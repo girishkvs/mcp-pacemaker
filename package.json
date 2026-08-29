@@ -1,0 +1,58 @@
+{
+  "name": "mcp-pacemaker",
+  "version": "1.0.0",
+  "description": "Keeps your MCP servers alive across editor restarts, reboots, and token expiry — pluggable auth, cross-platform auto-start, one-command setup. Zero-dependency bridge; a small CLI for setup.",
+  "type": "module",
+  "bin": {
+    "mcp-pacemaker": "bin/cli.mjs",
+    "mcp-bridge": "bin/mcp-bridge.mjs"
+  },
+  "files": [
+    "bin/",
+    "autostart/",
+    "supervisor/",
+    "examples/",
+    "ui/dist/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "Girish Konda",
+  "homepage": "https://github.com/girishkvs/mcp-pacemaker#readme",
+  "bugs": {
+    "url": "https://github.com/girishkvs/mcp-pacemaker/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/girishkvs/mcp-pacemaker.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sse",
+    "bridge",
+    "proxy",
+    "vscode",
+    "cursor",
+    "claude-desktop",
+    "supervisor",
+    "keep-alive"
+  ],
+  "scripts": {
+    "bridge": "node bin/mcp-bridge.mjs",
+    "cli": "node bin/cli.mjs",
+    "test": "node --test test/bridge.test.mjs test/bridge-controls.test.mjs test/kill-tree.test.mjs test/keepalive.test.mjs test/auth-token.test.mjs test/cold-start.test.mjs test/crash-report.test.mjs test/resume.test.mjs test/config-checks.test.mjs test/cli.test.mjs test/tui.test.mjs test/cross-host.test.mjs"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "commander": "^15.0.0",
+    "ink": "^7.1.1",
+    "picocolors": "^1.1.1",
+    "react": "^19.2.7",
+    "smol-toml": "^1.7.0"
+  }
+}

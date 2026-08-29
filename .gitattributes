@@ -1,0 +1,22 @@
+# Cross-platform line-ending normalization.
+* text=auto
+
+# Unix shell / Node / config files must be LF (CRLF breaks shebangs on macOS/Linux).
+*.sh    text eol=lf
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+
+# Windows scripts use CRLF.
+*.ps1   text eol=crlf
+*.vbs   text eol=crlf
+
+# Built dashboard assets are shipped exactly as produced (no line-ending conversion).
+ui/dist/** -text
+
+# Images are binary — never line-ending converted.
+*.png   binary
+*.jpg   binary
+*.gif   binary

@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+body {
+  margin: 0;
+  background: #0f1117;
+  color: #e6e8ee;
+  font: 14px/1.5 ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+}

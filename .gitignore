@@ -1,0 +1,19 @@
+# Runtime config + state (user-specific — never commit)
+servers.json
+*.bak
+*.log
+.mcp-pacemaker/
+
+# Registry config is machine-specific and can leak private feed URLs into lockfiles
+.npmrc
+
+# Personal working notes — may reference private hosts, paths or internal tooling
+*.local.md
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db

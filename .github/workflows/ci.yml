@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lockfiles:
+    name: Lockfiles resolve to the public registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject non-public registry URLs
+        run: |
+          if grep -nE '"resolved": "https://(?!registry\.npmjs\.org/)' -P package-lock.json ui/package-lock.json; then
+            echo "::error::A lockfile resolves to a non-public registry. Regenerate with --registry https://registry.npmjs.org/"
+            exit 1
+          fi
+          echo "both lockfiles resolve to registry.npmjs.org only"
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: |
+          node --check bin/mcp-bridge.mjs
+          node --check bin/cli.mjs
+          node --check bin/top.mjs
+          node --check bin/config-checks.mjs
+      - name: Test
+        run: npm test
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build web dashboard
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
