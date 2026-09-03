@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -47,7 +48,7 @@ async function bootBridge(port, config) {
     try { const s = await req('GET', '/status'); if (s.status === 200) return { child, req, tmp }; } catch { /* wait */ }
     await sleep(100);
   }
-  child.kill();
+  killBridge(child);
   throw new Error(`bridge on ${port} did not start`);
 }
 
@@ -95,7 +96,7 @@ async function assertNoSurvivors(hbPath, what) {
 }
 
 function cleanup(bridgeChild) {
-  bridgeChild.kill();
+  killBridge(bridgeChild);
 }
 
 test('recycle tears down the whole process tree of a bare-command server', async (t) => {

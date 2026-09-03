@@ -95,6 +95,8 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **B5** | MCP SDK adoption | Replace hand-rolled JSON-RPC framing with the official SDK. |
 | **B6** | `shared` sharing mode | True multiplex of one child across agents. Risky for a 24/7 bridge — R&D. |
 | **B9** | Bridge-side OAuth broker | For `auth: none` servers whose resource does not pre-authorize the Azure CLI, so no `audience` token can be minted. The bridge would run the OAuth flow itself and share one credential across clients. Adds a callback listener and refresh-token storage to a 24/7 daemon — needs a threat-model review first. |
+| **B10** | `mcp-pacemaker logs` | Tail and filter `bridge.log` from the CLI, with `--server` and `--since`. The file exists as of 1.1.0; only the reader is missing. |
+| **B11** | Reap orphans from a previous instance | On Windows, force-killing the bridge (Task Manager, `Stop-Process -Force`, a hard reboot) terminates it without running its `SIGTERM` shutdown, so **children it spawned can survive indefinitely** — real servers have no self-destruct, and they hold their ports and credentials. Measured directly with a heartbeat file: after `taskkill /F` on the bridge, a directly-spawned server kept running (the `cmd.exe`-wrapped one did not). The test suite hit the same thing and leaked 24 processes per run until teardown was changed to kill the tree. A Job Object with `KILL_ON_JOB_CLOSE` is the proper fix but needs native code; the pure-Node alternative is to record child pids alongside `sessions.json` and, on startup, kill any that survived — guarded by a command-line match, since Windows reuses pids. |
 
 ## Shipped
 | # | Item | Where |
@@ -104,6 +106,8 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **B4** | Retire `vscode-extension/` | removed — see the decision record below |
 | **B7** | Concurrency queue | `awaitSlot`, `MCP_QUEUE_TIMEOUT_MS`; over-cap requests queue briefly instead of `503` |
 | **B8** | Surface `warm` in the TUI | `WARM` column in `mcp-pacemaker top` |
+| **B12** | Config hot-reload | `mcp-pacemaker reload`, `POST /admin/reload`, `MCP_CONFIG_WATCH`; diffed so unchanged servers keep their sessions |
+| **B13** | Server health | `health` in `/api/status`, `doctor`, `top` and the dashboard; optional probing via `MCP_HEALTH_INTERVAL_MS` |
 
 ---
 

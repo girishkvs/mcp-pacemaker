@@ -24,7 +24,7 @@ import { Command } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { parse as parseToml } from 'smol-toml';
-import { checkServerPaths } from './config-checks.mjs';
+import { checkServerPaths, checkReservedName } from './config-checks.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -562,12 +562,51 @@ async function cmdStatus() {
       if (j && j.service === 'mcp-pacemaker') {
         ok(`bridge UP on :${port} — ${j.servers.length} server(s), ${j.sessions} active session(s)`);
         const api = await httpGet(`http://127.0.0.1:${port}/api/status`);
-        if (api && api.status === 200) { try { for (const sv of JSON.parse(api.body).servers) { if (sv.sessions || (sv.clients && sv.clients.length)) info(`    ${sv.name}: ${sv.sessions} session(s)${sv.clients && sv.clients.length ? `  agents=[${sv.clients.join(', ')}]` : ''}`); } } catch { /* noop */ } }
+        if (api && api.status === 200) {
+          try {
+            const list = JSON.parse(api.body).servers;
+            const failing = list.filter((sv) => sv.health && sv.health.state === 'failing');
+            for (const sv of failing) err(`    ${sv.name}: failing — ${sv.health.consecutiveFailures} in a row: ${sv.lastError}`);
+            for (const sv of list) { if (sv.sessions || (sv.clients && sv.clients.length)) info(`    ${sv.name}: ${sv.sessions} session(s)${sv.clients && sv.clients.length ? `  agents=[${sv.clients.join(', ')}]` : ''}`); }
+          } catch { /* noop */ }
+        }
       } else warn(`:${port} responds but is NOT an mcp-pacemaker bridge (foreign service)`);
     } else err(`bridge DOWN on :${port}  (start with "mcp-pacemaker start")`);
     for (const h of state.hosts.filter((x) => x.port === port)) info(`  ${h.id} · ${h.servers.length} server(s) · ${h.path}`);
   }
   if (!state.hosts.length) warn('no install state — run "mcp-pacemaker install"');
+}
+
+/* --------------------------------- reload ----------------------------------- */
+function httpPost(url, nonce) {
+  return new Promise((res) => {
+    const u = new URL(url);
+    const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers: { 'x-mcp-nonce': nonce } },
+      (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => res({ status: resp.statusCode, body: d })); });
+    r.on('error', () => res(null));
+    r.setTimeout(5000, () => { r.destroy(); res(null); });
+    r.end();
+  });
+}
+
+async function cmdReload(opts) {
+  const port = opts.port ? parseInt(opts.port, 10) : (readState().hosts.length ? distinctPorts(readState())[0] : DEFAULT_PORT);
+  const noncePath = join(dirname(CONFIG), 'admin.nonce');
+  let nonce;
+  try { nonce = readFileSync(noncePath, 'utf8').trim(); }
+  catch { err(`no admin nonce at ${noncePath} — is the bridge running?`); process.exit(1); }
+
+  const r = await httpPost(`http://127.0.0.1:${port}/admin/reload`, nonce);
+  if (!r) { err(`bridge DOWN on :${port}  (start with "mcp-pacemaker start")`); process.exit(1); }
+  let j = null; try { j = JSON.parse(r.body); } catch { /* noop */ }
+  if (r.status !== 200 || !j || !j.ok) { err(`reload rejected: ${(j && j.error) || r.body || r.status} — the bridge kept its previous config`); process.exit(1); }
+  if (j.unchanged) { ok(`${CONFIG} re-read on :${port} — no changes`); return; }
+  ok(`reloaded ${CONFIG} on :${port}`);
+  if (j.added.length) info(`  added:   ${j.added.join(', ')}`);
+  if (j.removed.length) info(`  removed: ${j.removed.join(', ')}`);
+  if (j.changed.length) info(`  changed: ${j.changed.join(', ')}`);
+  if (!j.added.length && !j.removed.length && !j.changed.length) info('  no server definitions changed');
+  else info(`  ${j.restarted} session(s) restarted; untouched servers kept theirs`);
 }
 
 /* --------------------------------- doctor ----------------------------------- */
@@ -582,6 +621,8 @@ async function cmdDoctor() {
     try { servers = readJson(CONFIG); ok(`config valid: ${Object.keys(servers).length} server(s)`); }
     catch (e) { err(`config invalid JSON: ${e.message}`); fails++; }
     for (const [n, d] of Object.entries(servers)) {
+      const reserved = checkReservedName(n);
+      if (reserved) { err(`  ${n}: ${reserved.detail}`); fails++; continue; }
       if (!d.command && !d.url) { err(`  ${n}: missing "command" or "url"`); fails++; continue; }
       if (d.type === 'http' && !d.auth && !d.audience && !d.headers) { warn(`  ${n}: http server with no auth/headers`); continue; }
       const pathCheck = checkServerPaths(n, d, HOME);
@@ -710,6 +751,10 @@ program.command('install')
   .action(cmdInstall);
 
 program.command('status').description('Is the bridge up? what is installed?').action(cmdStatus);
+program.command('reload')
+  .description('Re-read servers.json into the running bridge (no restart, untouched servers keep their sessions)')
+  .option('--port <n>', 'bridge port')
+  .action(cmdReload);
 program.command('doctor').description('Diagnose config, bridge reachability, client wiring').action(cmdDoctor);
 program.command('dashboard').description('Open the web dashboard in your browser').action(cmdDashboard);
 program.command('top')

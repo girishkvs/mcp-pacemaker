@@ -5,6 +5,120 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-03
+
+### Added
+
+- **Edit `servers.json` without restarting.** Save the file and the bridge picks it up, or run
+  `mcp-pacemaker reload` (also `POST /admin/reload`). The reload is a diff: servers whose
+  definition is unchanged keep their processes and their live sessions, so adding one server no
+  longer costs an outage on every other one. A file that does not parse, or a server with neither
+  `command` nor `url`, is rejected whole — the bridge logs why and keeps serving the last good
+  config, so a half-written editor save cannot take anything down. `MCP_CONFIG_WATCH=0` requires
+  an explicit reload instead of watching the file.
+
+- **Per-server health.** `/api/status`, `doctor`, `top` and the dashboard now report each server
+  as `ok`, `failing` (with a count of consecutive failures), or `unknown`. Previously the only
+  signal was `lastError`, which is sticky and only ever accumulates: a server that failed once
+  last week looked exactly like one failing right now, and one that had recovered still showed
+  the old error. A server here returned 401 on every call for hours while the dashboard showed
+  nothing wrong. `unknown` is deliberately distinct from `ok` — a server nobody has called is not
+  claimed to be working.
+
+  Health is derived from traffic already being proxied, so it costs nothing. A JSON-RPC error
+  *from* a server counts as healthy, because the server answered; a 401/403, a 5xx, a spawn
+  failure or a non-zero exit counts as failing.
+
+- **Optional health probing.** `MCP_HEALTH_INTERVAL_MS` (or per-server `healthIntervalMinutes`)
+  periodically calls an HTTP server so an idle one gets a verdict before a client needs it —
+  a credential that expires overnight is otherwise found by a failed tool call. Off by default,
+  since a probe is a real request to somebody else's service. stdio servers are not probed: that
+  would mean spawning a process, which costs more than the request it would pre-empt.
+
+- **A durable log.** The bridge writes `bridge.log` alongside its config and rolls it at
+  `MCP_LOG_MAX_BYTES` (default 5 MB, keeping one previous file). Set it to `0` to disable.
+  Previously the only history was an in-memory buffer served by `/api/logs`, which holds a few
+  hundred lines: a client that reconnects every 30 seconds fills that in about two minutes, so
+  nothing that happened overnight could be explained the next morning. Redirecting stderr was
+  not an alternative, because the supervisor starts the bridge without a redirect. See
+  [SECURITY.md](SECURITY.md) for what the file does and does not contain.
+
+### Fixed
+
+Everything since 1.0.0, including two defects that combined to send a client to the browser to
+sign in repeatedly, for a server it was never responsible for authenticating.
+
+- **A credential is cached for no longer than it is actually valid.** The configured
+  `refreshMinutes` was applied as a flat window, but an auth command usually returns a JWT served
+  from the provider's own cache — `az account get-access-token`, for instance, hands back a token
+  it minted earlier, which can already be most of the way through its life. The bridge then went
+  on presenting a dead token for the rest of the window while reporting it as healthy, and every
+  request to that server returned 401. A JWT's `exp` claim now bounds the cache entry, a token
+  that arrives already expired is not cached at all, and an opaque (non-JWT) credential still
+  falls back to `refreshMinutes`.
+
+- **An upstream 401 is no longer turned into a login prompt for a server the bridge
+  authenticates.** The challenge was relayed for every proxied server, so when the bridge's own
+  credential was refused, the client was told to authenticate — a login it cannot win, because
+  the bridge overwrites whatever token the client returns with its own on the next request. The
+  effect was a client sent back to the browser to sign in over and over, for a server it was
+  never responsible for authenticating. A 401 on a server with `audience` or `auth.command` is
+  now reported as the bridge-side failure it is (`lastError`, plus a log line), the rejected
+  credential is discarded rather than served for the rest of its window, and no challenge is
+  passed on. Servers with `auth: none`, where the client really is the one authenticating, are
+  unchanged.
+
+- **A bare `audience` is expanded into its token command in exactly one place.** The expansion
+  was duplicated, and the expanded string doubles as the token cache key, so the two copies
+  drifting apart would have minted under one key and looked it up under another — silently
+  disabling the cache.
+
+- **The session retention window is now enforced while the bridge runs**, not only when
+  `sessions.json` is read at startup. A bridge left running for days kept accepting session ids
+  well past `MCP_RESUME_TTL_MS` and kept rewriting them to disk, so the file grew without bound
+  — on a bridge up for 28 hours, records 45 hours old were still being honoured under a 24-hour
+  window. Expired records are now refused at resume time and dropped as the file is written.
+
+- **A server named after one of the bridge's own routes is now reported.** `api`, `admin`, `ui`,
+  `status` and `.well-known` are answered by the bridge before it consults the server table, so a
+  server with one of those names was unreachable and nothing said so — the client simply got the
+  bridge's own reply. `doctor` and the dashboard Health page now flag it.
+
+- **A crash keeps its own error message.** When a server exited and the in-flight request then
+  timed out, the generic timeout overwrote the exit code and stderr tail that explained why —
+  replacing the cause with the symptom. A timeout is now only recorded while the child is still
+  alive.
+
+- **A scheduled recycle added by a config edit now takes effect.** The recycle interval was
+  computed once at startup from the servers that had `recycleMinutes` then, so a server given one
+  later would never be recycled. The schedule is rebuilt on every reload.
+
+### Internal
+
+Changes that affect contributors rather than users.
+
+- **The test suite leaked 24 processes per run.** Tests tore the bridge down with `child.kill()`,
+  which on Windows is `TerminateProcess` — the bridge's `SIGTERM` handler never ran, so every
+  server child it had spawned was orphaned. Running the suite a few times inside the fixture's
+  120s self-destruct window loaded the machine enough that teardown elsewhere missed its
+  deadline, which surfaced as an intermittent failure in the kill-tree test that looked unrelated.
+  Tests now tear down the whole process tree via `test/helpers/kill-bridge.mjs`; the leak is zero
+  and the suite passes 8 consecutive runs.
+
+- **The suite checks itself.** `npm test` names its files explicitly, which is portable across
+  the Node versions in CI but drifts silently — two new test files were written, passed when run
+  directly, and did not run under `npm test` at all. `test/suite-integrity.test.mjs` now fails if
+  a test file is missing from the list, if the list names a file that no longer exists, or if two
+  files claim the same port.
+
+- The `stubborn-mcp-server` test fixture deliberately outlives its stdin closing, and its
+  self-destruct timer was scoped to the `--heartbeat` flag. Fixtures spawned without that flag
+  therefore survived the run and accumulated across runs. The timer is now unconditional.
+- The test port allocation, recorded at the top of `test/auth-token.test.mjs`, had drifted from
+  the assignments actually in use. It has been rebuilt from real usage and now lists every file.
+  A duplicated port fails only under the parallel suite and only intermittently, so the note is
+  worth keeping accurate.
+
 ## [1.0.0] - 2026-08-30
 
 First public release. It starts at 1.0.0 rather than 0.x because the bridge, its config format
@@ -123,4 +237,5 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
+[1.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.1.0
 [1.0.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.0.0

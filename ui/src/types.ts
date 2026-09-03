@@ -1,3 +1,10 @@
+export interface ServerHealth {
+  state: 'ok' | 'failing' | 'unknown';
+  consecutiveFailures: number;
+  lastSuccessSec: number | null;
+  lastErrorSec: number | null;
+}
+
 export interface ServerStat {
   name: string;
   type: 'stdio' | 'http';
@@ -12,6 +19,7 @@ export interface ServerStat {
   sharing?: string;
   warm?: number;
   maxSessions?: number | null;
+  health?: ServerHealth;
 }
 
 export interface Snapshot {

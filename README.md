@@ -123,7 +123,8 @@ npm i -g github:girishkvs/mcp-pacemaker # global install -> `mcp-pacemaker` on P
 | Command | What it does |
 |---|---|
 | `init [--client a,b] [--yes]` | **The one you want.** Detect hosts, import, wire, auto-start, launch |
-| `status` | Bridges, wired hosts, servers. Also what bare `mcp-pacemaker` shows once installed |
+| `status` | Bridges, wired hosts, servers, and any server currently failing |
+| `reload` | Re-read `servers.json` into the running bridge without restarting it |
 | `doctor` | Diagnose config, bridge reachability, host wiring |
 | `top` / `dashboard` | Live terminal UI / web dashboard |
 | `plan --client <host>` | Dry run — show exactly what `install` would change |
@@ -173,27 +174,76 @@ terminal.
 
 It checks the Node version, that the config parses, every server definition (including a stdio
 server whose relative path will not resolve from the directory it would run in — a failure that
-is otherwise silent until a client first calls it), and that the admin nonce file exists.
+is otherwise silent until a client first calls it, and a server named after one of the bridge's
+own routes, which is unreachable), any server currently failing, and that the admin nonce file
+exists.
 
 ### Terminal dashboard
 
 `mcp-pacemaker top` is the same data as an Ink TUI, for when a browser is inconvenient:
 
 ```
-🫀 mcp-pacemaker top                                     ● :8850 · up 176s · v1.0.0
-SERVER            TYPE   SESS  WARM  REQ    PID       TOKEN   ERROR / CLIENTS
-filesystem        stdio  2     1/1   8      186276,12 -       ⇄ Visual Studio Code,Claude Code
-github            stdio  1     -     2      146436    -       ⇄ GitHub Copilot
-sqlite            stdio  1     -     2      102108    -       ⇄ Cursor
-slow-tool         stdio  1     -     2      103776    -       ⇄ Codex CLI
-search-api        http   0     -     0      -         42m
-docs-api          http   0     -     0      -         -
+🫀 mcp-pacemaker top                                     ● :8850 · up 176s · v1.1.0
+SERVER            TYPE   HEALTH  SESS  WARM  REQ    PID       TOKEN   ERROR / CLIENTS
+filesystem        stdio  ok      2     1/1   8      186276,12 -       ⇄ Visual Studio Code,Claude Code
+github            stdio  ok      1     -     2      146436    -       ⇄ GitHub Copilot
+sqlite            stdio  ok      1     -     2      102108    -       ⇄ Cursor
+slow-tool         stdio  ok      1     -     2      103776    -       ⇄ Codex CLI
+search-api        http   FAIL×3  0     -     4      -         42m     upstream rejected the crede
+docs-api          http   ?       0     -     0      -         -
 ↑↓ select · r recycle · q quit
 ```
 
-`WARM` shows `warm/minWarm` for pooled servers and `-` for the rest, `TOKEN` the time left on a
-cached credential, and the last column either the connected clients or the last error. `↑↓`
-selects a row and `r` recycles it.
+`HEALTH` is `ok` when the last request to that server succeeded, `FAIL×n` after n consecutive
+failures, and `?` when nothing has called it yet — deliberately not `ok`, since no evidence is not
+the same as working. `WARM` shows `warm/minWarm` for pooled servers and `-` for the rest, `TOKEN`
+the time left on a cached credential, and the last column either the connected clients or the last
+error. `↑↓` selects a row and `r` recycles it.
+
+## Editing servers.json while it runs
+
+Save the file and the bridge picks it up. Servers whose definition did not change are left
+completely alone — same processes, same live sessions — so adding one server does not cost you the
+fourteen that were already working:
+
+```bash
+$ mcp-pacemaker reload           # or just save the file; the bridge watches it
+✓ reloaded /Users/you/.mcp-pacemaker/servers.json on :8850
+·   added:   postgres
+·   changed: github
+·   2 session(s) restarted; untouched servers kept theirs
+```
+
+A file that does not parse, or a server with neither `command` nor `url`, is **rejected whole** —
+the bridge logs why and keeps serving the last good config, so a half-written save cannot take your
+servers down. Set `MCP_CONFIG_WATCH=0` to require an explicit `reload` instead of watching.
+
+## Server health
+
+Every server carries a health verdict in `/api/status`, `doctor`, `top` and the dashboard:
+
+| State | Meaning |
+|---|---|
+| `ok` | The last request to this server succeeded |
+| `failing` | Recent requests are failing, with a count of how many in a row |
+| `unknown` | Nothing has called it yet |
+
+This is passive and free — it is derived from traffic the bridge is already proxying. A JSON-RPC
+error *from* the server counts as healthy (it answered); a 401/403, a 5xx, a spawn failure or a
+non-zero exit counts as failing, and the state clears the moment a request succeeds again.
+
+A server nobody calls stays `unknown` forever, which is honest but not much help if its credential
+quietly expires overnight. `MCP_HEALTH_INTERVAL_MS` adds a periodic probe for HTTP servers so they
+get a verdict without waiting for a client:
+
+```bash
+MCP_HEALTH_INTERVAL_MS=300000 mcp-pacemaker start    # probe every 5 minutes
+```
+
+It is off by default because a probe is a real request to somebody else's service. Set
+`"healthIntervalMinutes": 0` on a server to exclude just that one, or a number to give it its own
+interval. stdio servers are not probed: a probe would mean spawning a process, which costs more
+than the request it is meant to pre-empt.
 
 ## HTTP API
 
@@ -203,11 +253,12 @@ Read endpoints need no auth; the one state-changing endpoint requires a nonce.
 | Endpoint | Method | Returns |
 |---|---|---|
 | `/status` | GET | Tiny liveness probe: `ok`, `service`, `version`, `port` and the server names. Used to tell a pacemaker bridge apart from a foreign service on the same port |
-| `/api/status` | GET | Full snapshot — every server with sessions, pids, warm count, request count, `lastError`, connected clients |
+| `/api/status` | GET | Full snapshot — every server with sessions, pids, warm count, request count, `health`, `lastError`, connected clients |
 | `/api/doctor` | GET | The health checks, as JSON |
 | `/api/events` | GET (SSE) | The same snapshot pushed every 2s — what the dashboard consumes |
-| `/api/logs` | GET (SSE) | Bridge log: replays the last 100 lines, then streams |
+| `/api/logs` | GET (SSE) | Bridge log: replays the last 100 lines, then streams. For anything older, read `bridge.log` next to your config |
 | `/admin/recycle/<name>` | POST | Restart a server's processes. Omit `<name>` to recycle everything |
+| `/admin/reload` | POST | Re-read `servers.json`. Only servers whose definition changed are restarted |
 | `/<name>/mcp` | POST/GET/DELETE | Streamable HTTP transport for that server |
 | `/<name>/sse` | GET | HTTP+SSE transport for that server |
 | `/.well-known/oauth-protected-resource/<name>` | GET | OAuth discovery relayed from the upstream, for HTTP servers where the client authenticates |
@@ -277,6 +328,14 @@ whatever issues tokens in your environment. Some examples — none of these are 
 By default the token is sent as `Authorization: Bearer <token>`; set `header` to send it
 somewhere else (for example `{ "header": "X-Api-Key" }`).
 
+**How long a credential is cached.** If the command returns a JWT, its `exp` claim decides —
+`refreshMinutes` is only an upper bound and a fallback for opaque credentials. This matters
+because token CLIs serve from their own cache: `az account get-access-token` will hand back a
+token it minted earlier that may be nearly spent, and trusting a flat window would keep a dead
+token in play. If the upstream rejects a credential the bridge supplied, that 401 is reported on
+the server (`doctor`, `/api/status` → `lastError`) and the credential is discarded rather than
+reused — the client is never asked to log in for a server the bridge authenticates.
+
 > **Azure shorthand.** A bare `"audience": "<res>"` expands to
 > `az account get-access-token --resource <res> …`. That is a convenience for Azure users only —
 > every other provider uses `auth.command` above.
@@ -302,7 +361,10 @@ and HTTP servers share the cached token across all of them. The dashboard, `top`
 | Session resume | `MCP_RESUME`, `MCP_RESUME_TTL_MS` | on, 24h | re-establish a session id the bridge has not seen — after a restart, recycle or idle reap. `MCP_RESUME=0` disables |
 | Scheduled recycle | per-server `recycleMinutes`, or `MCP_RECYCLE_MINUTES` | off | restart a server periodically, for servers holding a credential they can only refresh interactively |
 | Request timeouts | `MCP_REQUEST_TIMEOUT_MS` / `MCP_INIT_TIMEOUT_MS` | 30s / 180s | `initialize` also pays for spawning the server, so it gets a longer budget than ordinary calls |
-| Credential refresh | `MCP_TOKEN_REFRESH_LEAD_MS` | `300000` (5 min) | renew a cached token before it expires instead of discovering the expiry on a request |
+| Credential refresh | `MCP_TOKEN_REFRESH_LEAD_MS` | `300000` (5 min) | renew a cached token before it expires instead of discovering the expiry on a request. A JWT's own `exp` still caps how long it is cached |
+| Durable log | `MCP_LOG_MAX_BYTES` | `5242880` (5 MB) | `bridge.log` next to your config, rolled to `bridge.log.1` at this size. `0` disables. The dashboard only keeps the last few hundred lines in memory, which a chatty client fills in minutes |
+| Config watching | `MCP_CONFIG_WATCH` | on | reload `servers.json` when it is saved. `0` requires an explicit `mcp-pacemaker reload`. Either way, only servers whose definition changed are restarted, and an unparseable file is rejected without disturbing anything |
+| Health probing | `MCP_HEALTH_INTERVAL_MS`, or per-server `healthIntervalMinutes` | off | periodically call an HTTP server so it has a health verdict before a client needs it. Passive health from real traffic is always on and costs nothing |
 
 ## Uninstall
 

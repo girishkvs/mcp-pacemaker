@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -43,7 +44,7 @@ test('a server that starts then exits non-zero is reported with its stderr', asy
   writeFileSync(cfg, JSON.stringify({ broken: { command: 'node', args: [FIXTURE] } }));
   const child = spawn(process.execPath, [BRIDGE, '--port', String(PORT), '--config', cfg],
     { stdio: 'ignore', env: { ...process.env, MCP_INIT_TIMEOUT_MS: '4000' } });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   for (let i = 0; i < 60; i++) {
     try { const s = await req('GET', '/status'); if (s.status === 200) break; } catch { /* wait */ }
@@ -73,7 +74,7 @@ test('a teardown the bridge initiated is not reported as a crash', async (t) => 
   const HEALTHY = resolve(__dirname, 'fixtures', 'stubborn-mcp-server.mjs');
   writeFileSync(cfg, JSON.stringify({ fine: { command: 'node', args: [HEALTHY] } }));
   const child = spawn(process.execPath, [BRIDGE, '--port', '8819', '--config', cfg], { stdio: 'ignore' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   const at = (method, path, opts) => req2(8819, method, path, opts);
   for (let i = 0; i < 60; i++) {

@@ -47,6 +47,14 @@ function resolvePort(port) {
 
 const pad = (s, n) => { s = String(s ?? ''); return s.length >= n ? s.slice(0, n - 1) + ' ' : s.padEnd(n); };
 const fmtTok = (sec) => (sec == null ? '-' : sec <= 0 ? 'exp' : `${Math.round(sec / 60)}m`);
+// 'unknown' has to be visibly distinct from 'ok': the point of the health column is that a
+// server nobody has called is not claimed to be working.
+const HEALTH = { ok: { text: 'ok', color: 'green' }, failing: { text: 'FAIL', color: 'red' }, unknown: { text: '?', color: 'gray' } };
+const healthCell = (s) => {
+  const st = s.health?.state ?? 'unknown';
+  const h = HEALTH[st] ?? HEALTH.unknown;
+  return { text: st === 'failing' && s.health.consecutiveFailures > 1 ? `FAIL×${s.health.consecutiveFailures}` : h.text, color: h.color };
+};
 
 function App({ port }) {
   const { exit } = useApp();
@@ -88,14 +96,14 @@ function App({ port }) {
       h(Text, { bold: true, color: 'cyan' }, '🫀 mcp-pacemaker top'),
       h(Text, { color: snap ? 'green' : 'red' }, snap ? `● :${snap.port} · up ${snap.uptimeSec}s · v${snap.version}` : '● connecting…'),
     ),
-    h(Text, { dimColor: true }, pad('SERVER', 18) + pad('TYPE', 7) + pad('SESS', 6) + pad('WARM', 6) + pad('REQ', 7) + pad('PID', 10) + pad('TOKEN', 8) + 'ERROR / CLIENTS'),
+    h(Text, { dimColor: true }, pad('SERVER', 18) + pad('TYPE', 7) + pad('HEALTH', 8) + pad('SESS', 6) + pad('WARM', 6) + pad('REQ', 7) + pad('PID', 10) + pad('TOKEN', 8) + 'ERROR / CLIENTS'),
     servers.length === 0
       ? h(Text, { dimColor: true }, snap ? 'no servers configured' : 'connecting…')
       : servers.map((s, i) =>
           h(
             Text,
-            { key: s.name, inverse: i === sel, color: s.lastError ? 'red' : undefined },
-            pad(s.name, 18) + pad(s.type, 7) + pad(s.sessions, 6) + pad(s.sharing === 'pool' ? `${s.warm}/${s.minWarm ?? 1}` : '-', 6) + pad(s.requests, 7) + pad(s.pids.join(',') || '-', 10) + pad(fmtTok(s.tokenExpiresIn), 8) + (s.lastError ? String(s.lastError).slice(0, 24) : (s.clients && s.clients.length ? '\u21c4 ' + s.clients.join(',') : '')),
+            { key: s.name, inverse: i === sel, color: s.health?.state === 'failing' ? 'red' : undefined },
+            pad(s.name, 18) + pad(s.type, 7) + pad(healthCell(s).text, 8) + pad(s.sessions, 6) + pad(s.sharing === 'pool' ? `${s.warm}/${s.minWarm ?? 1}` : '-', 6) + pad(s.requests, 7) + pad(s.pids.join(',') || '-', 10) + pad(fmtTok(s.tokenExpiresIn), 8) + (s.lastError ? String(s.lastError).slice(0, 24) : (s.clients && s.clients.length ? '\u21c4 ' + s.clients.join(',') : '')),
           ),
         ),
     h(Text, { dimColor: true }, `↑↓ select · r recycle · q quit   ${msg}`),

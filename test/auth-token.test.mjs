@@ -13,10 +13,19 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
-// Ports are assigned per test file to avoid collisions under the parallel suite:
-// 8801-8803 bridge-controls, 8804-8805 kill-tree, 8806 keepalive, 8807 cross-host,
-// 8808-8809 tui, 8810-8811 and 8820-8823 here, 8830 config-checks.
+// Ports are assigned per test file to avoid collisions under the parallel suite. This is the
+// full allocation — keep it accurate, because a file that reuses another file's port fails only
+// intermittently, and only when the suite runs in parallel:
+//
+//   8801-8803, 8822, 8831-8832  bridge-controls      8804-8805  kill-tree
+//   8806                        keepalive            8807       cross-host
+//   8808-8809, 8850, 8860, 8877 tui                  8812-8813  cold-start
+//   8810-8811, 8820-8827        auth-token (here)    8814, 8819 crash-report
+//   8815-8818, 8829, 8833       resume               8830       config-checks
+//
+// Free at the time of writing: 8828, 8834+.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -50,7 +59,7 @@ async function bootBridge(port, config, env) {
     try { const s = await req(port, 'GET', '/status'); if (s.status === 200) return { child, tmp }; } catch { /* wait */ }
     await sleep(100);
   }
-  child.kill();
+  killBridge(child);
   throw new Error(`bridge on ${port} did not start`);
 }
 
@@ -73,7 +82,7 @@ test('an empty auth command result is never cached and never sent as a credentia
   const { child } = await bootBridge(port, {
     up: { type: 'http', url: `http://127.0.0.1:${up.port}/`, auth: { type: 'command', command: authCommand(tally, '-') } },
   });
-  t.after(() => { child.kill(); up.srv.close(); });
+  t.after(() => { killBridge(child); up.srv.close(); });
 
   const r = await req(port, 'POST', '/up', { headers: rpc, body });
   assert.notEqual(r.status, 200, 'request must fail rather than proceed without a credential');
@@ -97,7 +106,7 @@ test('a cached credential is renewed before it expires, without waiting for a re
       auth: { type: 'command', command: authCommand(tally, 'tok-123'), refreshMinutes: 0.1 },
     },
   }, { MCP_TOKEN_REFRESH_LEAD_MS: '5000' });
-  t.after(() => { child.kill(); up.srv.close(); });
+  t.after(() => { killBridge(child); up.srv.close(); });
 
   await req(port, 'POST', '/up', { headers: rpc, body });
   assert.equal(readFileSync(tally, 'utf8').length, 1, 'minted once for the first request');
@@ -107,6 +116,114 @@ test('a cached credential is renewed before it expires, without waiting for a re
 
   assert.ok(readFileSync(tally, 'utf8').length >= 2,
     'the credential should be renewed proactively, not on the next request');
+});
+
+// An auth command usually returns a token the provider served from its OWN cache, so it can
+// arrive most of the way through its life. Caching it for a fixed window then serves a dead
+// credential until that window is up: every request 401s while the bridge still reports a
+// healthy token. Observed in production as a client being sent to the browser to log in over
+// and over for a server it never had to authenticate for.
+test('a credential is cached no longer than its own expiry claims, not the refresh window', async (t) => {
+  const seen = [];
+  const up = await startUpstream(seen);
+  const tally = join(mkdtempSync(join(tmpdir(), 'mcpka-tally-')), 'calls');
+  const port = 8824;
+  const { child } = await bootBridge(port, {
+    // The token has 61s left, so only ~1s is usable once the 60s safety margin is applied,
+    // while refreshMinutes claims it is good for an hour. The short one has to win.
+    up: {
+      type: 'http', url: `http://127.0.0.1:${up.port}/`,
+      auth: { type: 'command', command: authCommand(tally, 'jwt:61'), refreshMinutes: 60 },
+    },
+  }, { MCP_TOKEN_REFRESH_LEAD_MS: '0' });
+  t.after(() => { killBridge(child); up.srv.close(); });
+
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  assert.equal(readFileSync(tally, 'utf8').length, 1, 'minted once for the first request');
+
+  await sleep(1500); // outlive the token's own expiry, but nowhere near refreshMinutes
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  assert.equal(readFileSync(tally, 'utf8').length, 2,
+    'a token past its own expiry must be re-minted, not served for the rest of refreshMinutes');
+});
+
+test('a token that is already expired when it arrives is never cached', async (t) => {
+  const seen = [];
+  const up = await startUpstream(seen);
+  const tally = join(mkdtempSync(join(tmpdir(), 'mcpka-tally-')), 'calls');
+  const port = 8825;
+  const { child } = await bootBridge(port, {
+    up: {
+      type: 'http', url: `http://127.0.0.1:${up.port}/`,
+      auth: { type: 'command', command: authCommand(tally, 'jwt:-300'), refreshMinutes: 60 },
+    },
+  }, { MCP_TOKEN_REFRESH_LEAD_MS: '0' });
+  t.after(() => { killBridge(child); up.srv.close(); });
+
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  assert.equal(readFileSync(tally, 'utf8').length, 2,
+    'each request must re-mint while the provider keeps returning a spent token');
+});
+
+// An opaque credential (an API key, a non-JWT token) has no expiry to read, so the configured
+// window is all there is to go on. The expiry check must not break that case.
+test('an opaque credential still honours refreshMinutes', async (t) => {
+  const seen = [];
+  const up = await startUpstream(seen);
+  const tally = join(mkdtempSync(join(tmpdir(), 'mcpka-tally-')), 'calls');
+  const port = 8826;
+  const { child } = await bootBridge(port, {
+    up: {
+      type: 'http', url: `http://127.0.0.1:${up.port}/`,
+      auth: { type: 'command', command: authCommand(tally, 'opaque-api-key'), refreshMinutes: 60 },
+    },
+  }, { MCP_TOKEN_REFRESH_LEAD_MS: '0' });
+  t.after(() => { killBridge(child); up.srv.close(); });
+
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  await req(port, 'POST', '/up', { headers: rpc, body });
+  assert.equal(readFileSync(tally, 'utf8').length, 1, 'minted once and cached for the window');
+  assert.deepEqual(seen, ['Bearer opaque-api-key', 'Bearer opaque-api-key']);
+});
+
+// The other half of the same production failure. When the bridge supplies the credential, a 401
+// means the bridge's own token was refused — the client has nothing to fix. Relaying a challenge
+// starts a login it cannot win: any token it returns with is overwritten by the bridge's on the
+// next request, so it 401s again and the client is sent back to the browser, indefinitely.
+test('a 401 for a bridge-authenticated server is not turned into a client login prompt', async (t) => {
+  const tally = join(mkdtempSync(join(tmpdir(), 'mcpka-tally-')), 'calls');
+  const srv = http.createServer((rq, rs) => {
+    rs.writeHead(401, { 'www-authenticate': 'Bearer realm="Upstream", resource_metadata="https://upstream.example/.well-known/oauth-protected-resource"' });
+    rs.end();
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const upPort = srv.address().port;
+
+  const port = 8827;
+  const { child, tmp } = await bootBridge(port, {
+    minted: {
+      type: 'http', url: `http://127.0.0.1:${upPort}/`,
+      auth: { type: 'command', command: authCommand(tally, 'jwt:3600'), refreshMinutes: 60 },
+    },
+  });
+  t.after(() => { killBridge(child); srv.close(); });
+
+  const r = await req(port, 'POST', '/minted', { headers: rpc, body });
+  assert.equal(r.status, 401, 'the status is still relayed, so the caller knows it failed');
+  assert.equal(r.headers['www-authenticate'], undefined,
+    'no challenge may reach a client that is not the one authenticating');
+
+  // The rejected credential must not keep being served for the rest of its cache window.
+  await req(port, 'POST', '/minted', { headers: rpc, body });
+  assert.equal(readFileSync(tally, 'utf8').length, 2,
+    'a refused credential is discarded, so the next request mints a fresh one');
+
+  // And the failure has to be visible where an operator will look, since the client cannot act.
+  const nonce = readFileSync(join(tmp, 'admin.nonce'), 'utf8').trim();
+  const snap = JSON.parse((await req(port, 'GET', '/api/status', { headers: { 'x-admin-nonce': nonce } })).body);
+  const svc = snap.servers.find((s) => s.name === 'minted');
+  assert.match(String(svc.lastError), /401/, 'the rejection is reported on the server entry');
 });
 
 // A client authenticating against the bridge derives its OAuth discovery URL from the bridge's
@@ -138,7 +255,7 @@ test('OAuth discovery for a proxied server is served from the bridge origin', as
   const { child } = await bootBridge(port, {
     guarded: { type: 'http', url: `http://127.0.0.1:${upPort}/`, auth: { type: 'none' } },
   });
-  t.after(() => { child.kill(); srv.close(); });
+  t.after(() => { killBridge(child); srv.close(); });
 
   const disco = await req(port, 'GET', '/.well-known/oauth-protected-resource/guarded');
   assert.equal(disco.status, 200, 'the bridge must answer discovery for a proxied server');
@@ -192,7 +309,7 @@ test('hop-by-hop response headers are not relayed to the client', async (t) => {
   const { child } = await bootBridge(port, {
     streamed: { type: 'http', url: `http://127.0.0.1:${upPort}/`, auth: { type: 'none' } },
   });
-  t.after(() => { child.kill(); srv.close(); });
+  t.after(() => { killBridge(child); srv.close(); });
 
   const r = await req(port, 'POST', '/streamed', { headers: rpc, body });
   assert.equal(r.status, 200);
@@ -214,7 +331,7 @@ test('concurrent first-use mints the token once, not once per caller', async (t)
     b: { type: 'http', url: `http://127.0.0.1:${up.port}/`, auth },
     c: { type: 'http', url: `http://127.0.0.1:${up.port}/`, auth },
   });
-  t.after(() => { child.kill(); up.srv.close(); });
+  t.after(() => { killBridge(child); up.srv.close(); });
 
   await Promise.all(['a', 'b', 'c'].map((n) => req(port, 'POST', `/${n}`, { headers: rpc, body })));
 

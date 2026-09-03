@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { portFromState, fetchSnapshot, recycleServer } from '../bin/top.mjs';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -33,7 +34,7 @@ test('fetchSnapshot reads a live bridge snapshot (the TUI read path)', async (t)
   const cfg = join(tmp, 'servers.json');
   writeFileSync(cfg, JSON.stringify({ echo: { command: process.execPath, args: [FIXTURE] } }));
   const child = spawn(process.execPath, [BRIDGE, '--port', '8808', '--config', cfg], { stdio: 'ignore' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   let snap = null;
   for (let i = 0; i < 60 && !snap; i++) { snap = await fetchSnapshot(8808); if (!snap) await sleep(100); }
   assert.ok(snap, 'snapshot fetched');

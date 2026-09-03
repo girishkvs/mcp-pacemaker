@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -35,7 +36,7 @@ test('cross-host: three hosts share one bridged server, each attributed by clien
   const cfg = join(tmp, 'servers.json');
   writeFileSync(cfg, JSON.stringify({ echo: { command: process.execPath, args: [FIXTURE] } }));
   const child = spawn(process.execPath, [BRIDGE, '--port', String(PORT), '--config', cfg], { stdio: 'ignore' });
-  t.after(() => { try { child.kill(); } catch { /* noop */ } });
+  t.after(() => { try { killBridge(child); } catch { /* noop */ } });
   for (let i = 0; i < 60; i++) { try { if ((await req('GET', '/status')).status === 200) break; } catch { /* wait */ } await sleep(100); }
 
   const hosts = ['Visual Studio Code', 'GitHub Copilot', 'Claude Code'];

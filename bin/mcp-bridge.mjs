@@ -27,12 +27,12 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn, exec, execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, renameSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
-import { checkServerPaths } from './config-checks.mjs';
+import { checkServerPaths, checkReservedName } from './config-checks.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -62,20 +62,93 @@ const NONCE_FILE = resolve(dirname(CONFIG), 'admin.nonce');
 const logBuffer = [];
 const logClients = new Set();
 const snapClients = new Set();
-const stats = new Map(); // name -> { requests, lastError, lastActivity }
-const stat = (name) => { let s = stats.get(name); if (!s) { s = { requests: 0, lastError: null, lastActivity: 0 }; stats.set(name, s); } return s; };
+const stats = new Map(); // name -> see stat()
+const stat = (name) => {
+  let s = stats.get(name);
+  if (!s) { s = { requests: 0, lastError: null, lastErrorAt: 0, lastActivity: 0, lastSuccess: 0, consecutiveFailures: 0, lastProbe: 0 }; stats.set(name, s); }
+  return s;
+};
+
+/* ------------------------------- server health ------------------------------ */
+// `lastError` alone is not a health signal: it is sticky, so a server that failed once last week
+// looks identical to one that is failing right now, and one that recovered still shows the old
+// error. A server 401ing on every call sat that way for hours here while the dashboard showed
+// nothing wrong. Health is therefore a running verdict — did the last attempt work, and how many
+// in a row have not — rather than a string that only ever accumulates.
+function noteSuccess(name) {
+  const s = stat(name);
+  if (s.consecutiveFailures > 0) log(`[${name}] recovered after ${s.consecutiveFailures} consecutive failure(s)`);
+  s.consecutiveFailures = 0;
+  s.lastSuccess = Date.now();
+  s.lastError = null;
+}
+
+function noteFailure(name, detail) {
+  const s = stat(name);
+  if (s.consecutiveFailures === 0) log(`[${name}] now failing: ${detail}`);
+  s.consecutiveFailures++;
+  s.lastError = detail;
+  s.lastErrorAt = Date.now();
+}
+
+// 'unknown' is deliberately distinct from 'ok'. Reporting a server nobody has called as healthy
+// is the exact lie this feature exists to stop.
+function healthOf(name) {
+  const s = stat(name);
+  const state = s.consecutiveFailures > 0 ? 'failing' : (s.lastSuccess ? 'ok' : 'unknown');
+  return {
+    state,
+    consecutiveFailures: s.consecutiveFailures,
+    lastSuccessSec: s.lastSuccess ? Math.round((Date.now() - s.lastSuccess) / 1000) : null,
+    lastErrorSec: s.lastErrorAt ? Math.round((Date.now() - s.lastErrorAt) / 1000) : null,
+  };
+}
+
+// A durable log next to the config. The in-memory buffer is all the dashboard and `/api/logs`
+// have, and a single chatty client fills it in minutes — on a real setup a client polling every
+// 30s left roughly two minutes of history, which is useless for diagnosing something that
+// happened overnight. stderr alone does not help either: the supervisor starts the bridge
+// without redirecting it, and on Windows that output goes nowhere. So write here too, and roll
+// the file at a fixed size so it cannot grow without bound.
+const LOG_FILE = resolve(dirname(CONFIG), 'bridge.log');
+const LOG_MAX_BYTES = parseInt(process.env.MCP_LOG_MAX_BYTES || String(5 * 1024 * 1024), 10);
+let logBytes = -1; // -1 until the existing file has been measured once
+function appendLog(line) {
+  if (LOG_MAX_BYTES <= 0) return;
+  try {
+    if (logBytes < 0) logBytes = existsSync(LOG_FILE) ? statSync(LOG_FILE).size : 0;
+    if (logBytes >= LOG_MAX_BYTES) {
+      renameSync(LOG_FILE, LOG_FILE + '.1'); // keep one previous file, overwriting any older one
+      logBytes = 0;
+    }
+    const buf = line + '\n';
+    appendFileSync(LOG_FILE, buf);
+    logBytes += Buffer.byteLength(buf);
+  } catch { /* logging must never take the bridge down */ }
+}
 
 const log = (m) => {
   const line = `[mcp-bridge] ${new Date().toISOString()} ${m}`;
   process.stderr.write(line + '\n');
+  appendLog(line);
   logBuffer.push(line); if (logBuffer.length > 500) logBuffer.shift();
   for (const c of logClients) { try { c.write(`data: ${JSON.stringify(line)}\n\n`); } catch { /* gone */ } }
 };
 
 // Token expiry (seconds) for an http server's cached command/az token, if any — for the dashboard.
+//
+// A bare `audience` is shorthand for an Azure CLI token command. It is expanded in exactly one
+// place because the expanded string is also the token cache key: two copies that drift would
+// mint under one key and look it up under another, quietly disabling the cache.
+const azTokenCommand = (audience) =>
+  `az account get-access-token --resource ${audience} --query accessToken -o tsv`;
+function normalizedAuth(def) {
+  if (def.auth) return def.auth;
+  if (def.audience) return { type: 'command', command: azTokenCommand(def.audience), refreshMinutes: 50 };
+  return null;
+}
 function authCacheKey(def) {
-  let auth = def.auth;
-  if (!auth && def.audience) auth = { type: 'command', command: `az account get-access-token --resource ${def.audience} --query accessToken -o tsv` };
+  const auth = normalizedAuth(def);
   return auth && auth.type === 'command' ? auth.command : null;
 }
 function tokenExpiryFor(def) {
@@ -91,7 +164,7 @@ function richSnapshot() {
   for (const name of Object.keys(servers)) {
     const def = servers[name];
     const st = stat(name);
-    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: def.maxSessions || MAX_SESSIONS_PER_SERVER || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null };
+    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: def.maxSessions || MAX_SESSIONS_PER_SERVER || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null, health: healthOf(name) };
     if (def.type === 'http') { byName[name].url = def.url; byName[name].tokenExpiresIn = tokenExpiryFor(def); }
   }
   for (const s of sessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; if (s.child?.pid) b.pids.push(s.child.pid); } }
@@ -108,10 +181,14 @@ function runDoctor() {
   checks.push({ name: 'config', status: names.length ? 'ok' : 'warn', detail: `${names.length} server(s)` });
   for (const n of names) {
     const d = servers[n];
+    const reserved = checkReservedName(n);
+    if (reserved) { checks.push(reserved); continue; }
     if (!d.command && !d.url) { checks.push({ name: n, status: 'bad', detail: 'missing command/url' }); continue; }
     if (d.type === 'http' && !d.auth && !d.audience && !d.headers) { checks.push({ name: n, status: 'warn', detail: 'http server with no auth' }); continue; }
     const pathCheck = checkServerPaths(n, d, BASE_CWD);
     if (pathCheck) { checks.push(pathCheck); continue; }
+    const h = healthOf(n);
+    if (h.state === 'failing') { checks.push({ name: n, status: 'bad', detail: `failing — ${h.consecutiveFailures} in a row: ${stat(n).lastError}` }); continue; }
     checks.push({ name: n, status: 'ok', detail: d.type === 'http' ? `http ${d.url}` : `stdio ${d.command}` });
   }
   checks.push({ name: 'admin nonce', status: existsSync(NONCE_FILE) ? 'ok' : 'warn', detail: NONCE_FILE });
@@ -144,7 +221,13 @@ function handleAdmin(url, req, res) {
   const host = (req.headers.host || '').split(':')[0];
   if (host !== '127.0.0.1' && host !== 'localhost') { res.writeHead(403).end('forbidden'); return; }
   if (req.headers['x-mcp-nonce'] !== ADMIN_NONCE) { res.writeHead(401).end('bad nonce'); return; }
-  const parts = url.pathname.split('/').filter(Boolean); // ['admin','recycle', <name>?]
+  const parts = url.pathname.split('/').filter(Boolean); // ['admin','recycle'|'reload', <name>?]
+  if (req.method === 'POST' && parts[1] === 'reload') {
+    const r = reloadConfig('admin request');
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(r));
+    return;
+  }
   if (req.method === 'POST' && parts[1] === 'recycle') {
     const target = parts[2];
     const killed = recycleServer(target);
@@ -191,16 +274,44 @@ function runCommand(cmd) {
   });
 }
 
+// How long a minted credential can be trusted.
+//
+// `refreshMinutes` is only a fallback. An auth command usually returns a JWT, and the command
+// often serves it from the provider's OWN cache — `az account get-access-token` hands back a
+// token it minted earlier, which may be most of the way through its life already. Caching that
+// for a fixed window serves an expired credential until the window is up, and every request in
+// between comes back 401 while the bridge reports a healthy token.
+//
+// So prefer the token's own `exp` claim when there is one. The payload is only read, never
+// trusted for authorization, so parsing it unverified is safe here: the upstream is what
+// validates the signature. Anything unparseable (an opaque token, an API key) falls back to
+// `refreshMinutes`. A safety margin covers clock skew and the request still in flight.
+const TOKEN_EXPIRY_MARGIN_MS = 60_000;
+function tokenLifetimeMs(value, fallbackMs) {
+  const parts = String(value).split('.');
+  if (parts.length !== 3) return fallbackMs; // not a JWT
+  try {
+    const pad = '='.repeat((4 - (parts[1].length % 4)) % 4);
+    const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64').toString('utf8'));
+    if (typeof payload.exp !== 'number') return fallbackMs;
+    const remaining = payload.exp * 1000 - Date.now() - TOKEN_EXPIRY_MARGIN_MS;
+    // A token already at or past its expiry is still returned to the caller — the upstream is
+    // the authority on that — but it must not be cached.
+    return remaining > 0 ? Math.min(remaining, fallbackMs) : 0;
+  } catch { return fallbackMs; }
+}
+
+// Drop a server's cached credential so the next request mints a fresh one. Used when the
+// upstream rejects it: continuing to serve a credential known to be refused just repeats the
+// failure for the rest of its cache window.
+function invalidateToken(def) {
+  const key = authCacheKey(def);
+  if (key) tokenCache.delete(key);
+}
+
 // Normalize a server's auth config into { header, getValue() } or null.
 function resolveAuth(def) {
-  let auth = def.auth;
-  if (!auth && def.audience) {
-    auth = {
-      type: 'command',
-      command: `az account get-access-token --resource ${def.audience} --query accessToken -o tsv`,
-      refreshMinutes: 50,
-    };
-  }
+  const auth = normalizedAuth(def);
   if (!auth || auth.type === 'none') return null;
 
   const header = auth.header || 'Authorization';
@@ -227,7 +338,9 @@ function resolveAuth(def) {
         // An auth command can exit 0 and print nothing. Caching that would serve an empty
         // credential for the whole TTL, so every upstream request 401s until it expires.
         if (!value) throw new Error(`auth command returned an empty value: ${auth.command}`);
-        tokenCache.set(key, { value, exp: Date.now() + ttl });
+        const life = tokenLifetimeMs(value, ttl);
+        if (life > 0) tokenCache.set(key, { value, exp: Date.now() + life });
+        else tokenCache.delete(key); // already expired on arrival — re-mint next time
         return value;
       })();
       const tracked = mint.finally(() => tokenInFlight.delete(key));
@@ -293,7 +406,7 @@ function noteExit(name, child, code) {
   // Only an exit we did not cause is a failure worth reporting.
   if (code && !child.__bridgeKilled) {
     const tail = (stderrTails.get(child) ?? '').trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' | ');
-    stat(name).lastError = `exited code ${code}${tail ? `: ${tail}` : ''}`;
+    noteFailure(name, `exited code ${code}${tail ? `: ${tail}` : ''}`);
   }
   stderrTails.delete(child);
 }
@@ -340,10 +453,11 @@ function startChild(name, res) {
     const t = line.trim();
     if (!t) return;
     try { JSON.parse(t); } catch { log(`[${name}] (non-json stdout) ${t}`); return; }
+    noteSuccess(name); // the classic transport is fire-and-forget, so a reply is the only signal
     try { res.write(`event: message\ndata: ${t}\n\n`); } catch { /* client gone */ }
   });
   pipeStderr(name, child);
-  child.on('error', (e) => { stat(name).lastError = e.message; log(`[${name}] spawn error: ${e.message}`); });
+  child.on('error', (e) => { noteFailure(name, e.message); log(`[${name}] spawn error: ${e.message}`); });
   child.on('exit', (code) => {
     noteExit(name, child, code);
     log(`[${name}] session ${sessionId.slice(0, 8)} exited (code ${code})`);
@@ -432,7 +546,7 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
     else if (session.sseRes) { try { session.sseRes.write(`event: message\ndata: ${t}\n\n`); } catch { /* noop */ } }
   });
   if (!warmChild) pipeStderr(name, child);
-  child.on('error', (e) => { stat(name).lastError = e.message; log(`[${name}] spawn error: ${e.message}`); });
+  child.on('error', (e) => { noteFailure(name, e.message); log(`[${name}] spawn error: ${e.message}`); });
   child.on('exit', (code) => {
     noteExit(name, child, code);
     log(`[${name}] streamable session ${sessionId.slice(0, 8)} exited (code ${code})`);
@@ -497,9 +611,20 @@ function saveResumable() {
   if (!RESUME_ENABLED) return;
   try { writeFileSync(RESUME_FILE, JSON.stringify(Object.fromEntries(resumable))); } catch { /* best effort */ }
 }
+// Records past the TTL are dropped. Without this the window was only ever applied when the file
+// was loaded at startup, so a long-running bridge kept honouring — and re-persisting — records
+// far older than the retention window it documents. Returns true if anything was removed.
+function pruneResumable(now = Date.now()) {
+  let dropped = false;
+  for (const [id, r] of resumable) {
+    if (now - (r.at || 0) >= RESUME_TTL_MS) { resumable.delete(id); dropped = true; }
+  }
+  return dropped;
+}
 function rememberSession(sessionId, name, initMsg) {
   if (!RESUME_ENABLED || !initMsg) return;
   resumable.set(sessionId, { server: name, initialize: initMsg.params ?? {}, at: Date.now() });
+  pruneResumable();
   saveResumable();
 }
 function forgetSession(sessionId) {
@@ -521,6 +646,13 @@ if (RESUME_ENABLED) {
 async function resumeSession(name, sessionId) {
   const rec = resumable.get(sessionId);
   if (!rec || rec.server !== name) return null;
+  // The retention window is a promise about how long a session id stays valid, so it has to be
+  // checked here too — not only when the file is read at startup.
+  if (Date.now() - (rec.at || 0) >= RESUME_TTL_MS) {
+    resumable.delete(sessionId);
+    saveResumable();
+    return null;
+  }
   const cap = servers[name].maxSessions || MAX_SESSIONS_PER_SERVER;
   if (cap > 0 && sessionCount(name) >= cap) return null;
 
@@ -570,11 +702,17 @@ function recycleServer(name) {
   return killed;
 }
 
-const recyclePeriods = Object.keys(servers).map(recycleMinutesFor).filter((m) => m > 0);
-if (recyclePeriods.length) {
+// The tick adapts to the shortest configured period, so it has to be rebuilt whenever the config
+// changes: a reload can introduce the first `recycleMinutes` on a bridge that had none, or
+// shorten the interval below the current tick.
+let recycleTimer = null;
+function ensureRecycleTimer() {
+  const periods = Object.keys(servers).map(recycleMinutesFor).filter((m) => m > 0);
+  if (recycleTimer) { clearInterval(recycleTimer); recycleTimer = null; }
+  if (!periods.length) return;
   // Check often enough to honour the shortest configured period, but never busier than needed.
-  const tick = Math.max(200, Math.min(30_000, (Math.min(...recyclePeriods) * 60_000) / 2));
-  setInterval(() => {
+  const tick = Math.max(200, Math.min(30_000, (Math.min(...periods) * 60_000) / 2));
+  recycleTimer = setInterval(() => {
     const now = Date.now();
     for (const name of Object.keys(servers)) {
       const mins = recycleMinutesFor(name);
@@ -585,7 +723,166 @@ if (recyclePeriods.length) {
       lastRecycle.set(name, now);
       log(`[${name}] scheduled recycle after ${mins}m (${killed} session(s))`);
     }
+  }, tick);
+  recycleTimer.unref();
+}
+ensureRecycleTimer();
+
+/* ------------------------------- config reload ------------------------------ */
+// Apply an edited servers.json without restarting.
+//
+// A restart is the blunt alternative, and it costs every live session on every server — adding
+// one server should not disturb the fourteen that were working. So the reload is a diff: servers
+// whose definition is unchanged are left completely alone, and only the ones that actually
+// changed are torn down so the next request picks up the new definition.
+//
+// `servers` is mutated in place rather than rebound, because the rest of the bridge closes over
+// that object; rebinding it would leave timers and handlers reading the old config forever.
+function diffConfig(next) {
+  const before = Object.keys(servers);
+  const after = Object.keys(next);
+  return {
+    added: after.filter((n) => !before.includes(n)),
+    removed: before.filter((n) => !after.includes(n)),
+    changed: after.filter((n) => before.includes(n) && JSON.stringify(servers[n]) !== JSON.stringify(next[n])),
+  };
+}
+
+function applyConfig(next) {
+  const { added, removed, changed } = diffConfig(next);
+  let restarted = 0;
+  // A changed or removed server's children were started from the old definition, so they are
+  // stale. Untouched servers are deliberately not disturbed.
+  for (const name of [...removed, ...changed]) {
+    invalidateToken(servers[name]);
+    restarted += recycleServer(name);
+  }
+  for (const name of removed) {
+    delete servers[name];
+    warmPool.delete(name); // recycleServer queued a refill; it must not resurrect a deleted server
+  }
+  for (const name of [...added, ...changed]) servers[name] = next[name];
+  for (const name of [...added, ...changed]) refillPool(name);
+  ensureRecycleTimer(); // a reload can add the first recycleMinutes, or shorten the interval
+  return { added, removed, changed, restarted };
+}
+
+let lastConfigText = (() => { try { return readFileSync(CONFIG, 'utf8'); } catch { return null; } })();
+
+function reloadConfig(reason) {
+  let text;
+  try { text = readFileSync(CONFIG, 'utf8'); }
+  catch (e) { return { ok: false, error: `cannot read ${CONFIG}: ${e.message}` }; }
+  if (text === lastConfigText) return { ok: true, unchanged: true, added: [], removed: [], changed: [], restarted: 0 };
+
+  // An invalid file must never take working servers down — a half-written save from an editor
+  // looks exactly like this. Keep serving what is already in memory and report the problem.
+  let next;
+  try { next = JSON.parse(text); }
+  catch (e) { log(`config reload rejected: invalid JSON (${e.message})`); return { ok: false, error: `invalid JSON: ${e.message}` }; }
+  if (!next || typeof next !== 'object' || Array.isArray(next)) {
+    log('config reload rejected: top level must be an object of server definitions');
+    return { ok: false, error: 'top level must be an object of server definitions' };
+  }
+  for (const [n, d] of Object.entries(next)) {
+    if (!d || typeof d !== 'object' || (!d.command && !d.url)) {
+      log(`config reload rejected: "${n}" has neither "command" nor "url"`);
+      return { ok: false, error: `server "${n}" has neither "command" nor "url"` };
+    }
+  }
+
+  lastConfigText = text;
+  const r = applyConfig(next);
+  const summary = [
+    r.added.length ? `+${r.added.join(', ')}` : null,
+    r.removed.length ? `-${r.removed.join(', ')}` : null,
+    r.changed.length ? `~${r.changed.join(', ')}` : null,
+  ].filter(Boolean).join('  ');
+  log(summary
+    ? `config reloaded (${reason}): ${summary} — ${r.restarted} session(s) restarted`
+    : `config reloaded (${reason}): no server definitions changed`);
+  return { ok: true, ...r };
+}
+
+// Watching the file makes an edit take effect on its own, which is the point: the config exists
+// to be edited. Debounced because editors save in bursts (write, rename, truncate), and re-armed
+// after each burst because an atomic save replaces the inode the watcher was holding.
+if (process.env.MCP_CONFIG_WATCH !== '0') {
+  let timer = null;
+  let watcher = null;
+  const arm = () => {
+    try {
+      watcher = watch(CONFIG, () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { reloadConfig('file changed'); rearm(); }, 300);
+      });
+      watcher.unref?.();
+    } catch { /* watching is best effort; /admin/reload still works */ }
+  };
+  const rearm = () => { try { watcher?.close(); } catch { /* noop */ } arm(); };
+  arm();
+}
+
+/* --------------------------- active health probing -------------------------- */
+// Passive health above only learns anything when somebody makes a request. A server nobody has
+// called today therefore reads 'unknown' indefinitely — which is honest, but it also means a
+// credential can expire overnight and you find out from a failed tool call rather than the
+// dashboard. Probing closes that gap for HTTP servers, where the failure is a silent 401.
+//
+// Off by default: a probe is a real request to somebody else's service, and how often that is
+// acceptable is not the bridge's call to make. stdio servers are not probed — a probe would mean
+// spawning a process, which costs more than the request it is meant to pre-empt, and their
+// failures (spawn error, non-zero exit) are already observed for free.
+const HEALTH_INTERVAL_MS = Number(process.env.MCP_HEALTH_INTERVAL_MS || 0);
+
+function probeServer(name) {
+  const def = servers[name];
+  if (!def || def.type !== 'http' || !def.url) return;
+  stat(name).lastProbe = Date.now();
+  const body = JSON.stringify({
+    jsonrpc: '2.0', id: `probe-${Date.now()}`, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'mcp-pacemaker-health', version: VERSION } },
+  });
+  (async () => {
+    const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body) };
+    const a = resolveAuth(def);
+    if (a) headers[a.header.toLowerCase()] = await a.getValue();
+    for (const [k, v] of Object.entries(def.headers ?? {})) headers[k] = v;
+    const target = new URL(def.url);
+    const lib = target.protocol === 'https:' ? https : http;
+    return new Promise((done) => {
+      const r = lib.request(target, { method: 'POST', headers }, (resp) => {
+        const code = resp.statusCode ?? 502;
+        resp.resume();
+        if (code === 401 || code === 403 || code >= 500) noteFailure(name, `health probe: upstream returned ${code}`);
+        else noteSuccess(name);
+        done();
+      });
+      r.on('error', (e) => { noteFailure(name, `health probe: ${e.message}`); done(); });
+      r.setTimeout(10_000, () => { r.destroy(new Error('timed out')); });
+      r.end(body);
+    });
+  })().catch((e) => noteFailure(name, `health probe: ${e.message}`));
+}
+
+if (HEALTH_INTERVAL_MS > 0) {
+  const tick = Math.max(1000, Math.min(HEALTH_INTERVAL_MS, 60_000));
+  setInterval(() => {
+    const now = Date.now();
+    for (const name of Object.keys(servers)) {
+      const def = servers[name];
+      if (def.type !== 'http') continue;
+      // A per-server interval of 0 opts one server out of an otherwise global schedule.
+      const every = def.healthIntervalMinutes != null ? def.healthIntervalMinutes * 60_000 : HEALTH_INTERVAL_MS;
+      if (!every) continue;
+      const s = stat(name);
+      // A server that just served a real request has already proven itself; probing it as well
+      // is pure extra load on the upstream.
+      if (now - Math.max(s.lastProbe, s.lastSuccess, s.lastErrorAt) < every) continue;
+      probeServer(name);
+    }
   }, tick).unref();
+  log(`health probing every ${Math.round(HEALTH_INTERVAL_MS / 1000)}s (http servers only)`);
 }
 
 /* --------------------------- proactive token refresh ------------------------ */
@@ -609,7 +906,7 @@ if (TOKEN_REFRESH_LEAD_MS > 0) {
       if (!auth) continue;
       auth.getValue()
         .then(() => log(`[${name}] refreshed credential ahead of expiry`))
-        .catch((e) => { stat(name).lastError = `token refresh failed: ${e.message}`; log(`[${name}] token refresh failed: ${e.message}`); });
+        .catch((e) => { noteFailure(name, `token refresh failed: ${e.message}`); log(`[${name}] token refresh failed: ${e.message}`); });
     }
   }, tick).unref();
 }
@@ -684,6 +981,13 @@ function handleStreamable(name, req, res) {
       const headers = { 'Mcp-Session-Id': sessionId };
       if (!requestIds.length) { res.writeHead(202, headers).end(); return; }
       const results = await Promise.all(waits);
+      // A JSON-RPC error from the server is the server working — it answered. Only the bridge's
+      // own synthetic errors mean the server is unhealthy, and even then a timeout is worth
+      // recording only while the child is alive: if it already exited, its exit code and stderr
+      // are the actual reason and must not be overwritten by the symptom.
+      if (results.some((r) => r && r.error && r.error.code === -32001)) {
+        if (session.child.exitCode === null && session.child.signalCode === null) noteFailure(name, 'upstream timeout');
+      } else noteSuccess(name);
       // Stamp again on completion: the idle clock should measure time since the request finished,
       // not since it started, or a call slower than the timeout is reapable the moment it returns.
       session.lastActivity = Date.now();
@@ -785,11 +1089,12 @@ function proxyHttp(name, def, req, res) {
     const headers = stripHopByHop(req.headers);
     delete headers.host;
     delete headers['content-length'];
+    let bridgeAuthenticates = false;
     try {
       const a = resolveAuth(def);
-      if (a) headers[a.header.toLowerCase()] = await a.getValue();
+      if (a) { headers[a.header.toLowerCase()] = await a.getValue(); bridgeAuthenticates = true; }
     } catch (e) {
-      stat(name).lastError = e.message;
+      noteFailure(name, e.message);
       log(`[${name}] auth error: ${e.message}`);
       try { res.writeHead(502).end('auth error'); } catch { /* noop */ }
       return;
@@ -801,21 +1106,42 @@ function proxyHttp(name, def, req, res) {
     const lib = target.protocol === 'https:' ? https : http;
     const upReq = lib.request(target, { method: req.method, headers }, (upRes) => {
       const outHeaders = stripHopByHop(upRes.headers);
-      // A 401 challenge names where to find this resource's metadata. The upstream points at
-      // its own origin, which the client cannot match to the bridge URL it is addressing, so
-      // redirect it to the bridge's copy — the one place that answers with a matching `resource`.
       const wwwKey = Object.keys(outHeaders).find((k) => k.toLowerCase() === 'www-authenticate');
       if (upRes.statusCode === 401 && wwwKey) {
-        outHeaders[wwwKey] = String(outHeaders[wwwKey]).replace(
-          /resource_metadata="[^"]*"/i,
-          `resource_metadata="http://${req.headers.host}/.well-known/oauth-protected-resource/${name}"`,
-        );
+        if (bridgeAuthenticates) {
+          // The bridge supplied the credential, so a 401 is the bridge's problem, not the
+          // client's. Relaying a challenge here starts a login the client cannot win: whatever
+          // token it comes back with is overwritten by the bridge's own on the next request, so
+          // it 401s again and the client is sent back to the browser, forever. Drop the
+          // challenge and surface the failure where an operator will see it instead.
+          delete outHeaders[wwwKey];
+          const detail = `upstream rejected the credential from ${def.audience ? `audience ${def.audience}` : 'auth.command'} (401)`;
+          noteFailure(name, detail);
+          log(`[${name}] ${detail} — the cached credential is being discarded`);
+          // Whatever is cached is not working, so do not keep serving it for the rest of its TTL.
+          invalidateToken(def);
+        } else {
+          // The client authenticates for this server, and it derives the metadata URL from the
+          // bridge origin it is addressing. The upstream names its own origin, which the client
+          // cannot match, so point it at the bridge's copy — the one that answers with a
+          // matching `resource`.
+          outHeaders[wwwKey] = String(outHeaders[wwwKey]).replace(
+            /resource_metadata="[^"]*"/i,
+            `resource_metadata="http://${req.headers.host}/.well-known/oauth-protected-resource/${name}"`,
+          );
+        }
       }
       res.writeHead(upRes.statusCode ?? 502, outHeaders);
+      // A verdict on every reply, not just the bad ones. 4xx other than auth is the client's
+      // fault and says nothing about the server, so it is left as-is rather than counted either
+      // way; 401/403 and 5xx are the server or the credential being broken.
+      const code = upRes.statusCode ?? 502;
+      if (code === 401 || code === 403 || code >= 500) noteFailure(name, `upstream returned ${code}`);
+      else if (code < 400) noteSuccess(name);
       upRes.pipe(res);
     });
     upReq.on('error', (e) => {
-      stat(name).lastError = e.message;
+      noteFailure(name, e.message);
       log(`[${name}] upstream error: ${e.message}`);
       try { res.writeHead(502).end('upstream error'); } catch { /* noop */ }
     });

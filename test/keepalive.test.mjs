@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -37,7 +38,7 @@ test('a pooled keep-alive socket survives a busy client idling past the Node def
   writeFileSync(cfg, JSON.stringify({}));
   const child = spawn(process.execPath, [BRIDGE, '--port', String(PORT), '--config', cfg], { stdio: 'ignore' });
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
-  t.after(() => { agent.destroy(); child.kill(); });
+  t.after(() => { agent.destroy(); killBridge(child); });
 
   let up = false;
   for (let i = 0; i < 60; i++) {

@@ -11,10 +11,19 @@ function fmtToken(sec: number): { text: string; cls: string } {
   return { text, cls: m <= 5 ? 'text-amber' : 'text-ok' };
 }
 
+// A distinct badge for "nobody has called this server yet". Rendering that as healthy is what
+// let a server sit broken here for hours without the dashboard saying anything.
+const HEALTH_BADGE = {
+  ok: { text: 'healthy', cls: 'border-ok text-ok', title: 'last request to this server succeeded' },
+  failing: { text: 'failing', cls: 'border-danger text-danger', title: 'recent requests to this server are failing' },
+  unknown: { text: 'unused', cls: 'border-line text-muted', title: 'no request has been made yet, so health is unknown' },
+} as const;
+
 export function ServerCard({ s, history }: { s: ServerStat; history: number[] }) {
   const [busy, setBusy] = useState(false);
   const isHttp = s.type === 'http';
   const token = isHttp && s.tokenExpiresIn != null ? fmtToken(s.tokenExpiresIn) : null;
+  const health = HEALTH_BADGE[s.health?.state ?? 'unknown'];
 
   const onRecycle = async () => {
     setBusy(true);
@@ -35,6 +44,9 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
           {s.name}
         </h2>
         <div className="flex items-center gap-2">
+          <span className={`text-xs px-2 py-0.5 rounded-full bg-panel2 border ${health.cls}`} title={health.title}>
+            {s.health?.state === 'failing' && s.health.consecutiveFailures > 1 ? `${health.text} ×${s.health.consecutiveFailures}` : health.text}
+          </span>
           {s.sharing && s.sharing !== 'isolated' && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-panel2 border border-accent text-accent" title="session sharing policy">
               {s.sharing}

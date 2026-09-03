@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 import { checkServerPaths, relativePathArgs } from '../bin/config-checks.mjs';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -76,7 +77,7 @@ test('the running bridge surfaces the broken path on /api/doctor', async (t) => 
   }));
   const port = 8830;
   const child = spawn(process.execPath, [BRIDGE, '--port', String(port), '--config', cfg], { stdio: 'ignore' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   let up = false;
   for (let i = 0; i < 60 && !up; i++) {
     try { up = (await req(port, 'GET', '/status')).status === 200; } catch { await sleep(100); }

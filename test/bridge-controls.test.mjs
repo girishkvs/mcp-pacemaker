@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -31,7 +32,7 @@ async function bootBridge(port, config, env = {}) {
   const child = spawn(process.execPath, [BRIDGE, '--port', String(port), '--config', cfg], { stdio: 'ignore', env: { ...process.env, ...env } });
   const req = reqTo(port);
   for (let i = 0; i < 60; i++) { try { const s = await req('GET', '/status'); if (s.status === 200) return { child, req }; } catch { /* wait */ } await sleep(100); }
-  child.kill(); throw new Error(`bridge on ${port} did not start`);
+  killBridge(child); throw new Error(`bridge on ${port} did not start`);
 }
 
 const echoDef = { command: process.execPath, args: [FIXTURE] };
@@ -41,7 +42,7 @@ const svc = (snap, name) => snap.servers.find((s) => s.name === name);
 
 test('sharing:"pool" pre-warms a child before any client, then refills after handing one out', async (t) => {
   const { child, req } = await bootBridge(8801, { echo: { ...echoDef, sharing: 'pool', minWarm: 1 } });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   await sleep(400);
   let s = svc(await status(req), 'echo');
   assert.equal(s.sharing, 'pool');
@@ -60,7 +61,7 @@ test('sharing:"pool" pre-warms a child before any client, then refills after han
 test('per-server maxSessions caps concurrent sessions with 503', async (t) => {
   // No queueing here: assert the cap itself still refuses rather than admitting extra sessions.
   const { child, req } = await bootBridge(8802, { echo: { ...echoDef, maxSessions: 1 } }, { MCP_QUEUE_TIMEOUT_MS: '0' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   const r1 = await req('POST', '/echo/mcp', { headers: { 'content-type': 'application/json' }, body: initBody(1) });
   assert.equal(r1.status, 200, 'first session allowed');
   const r2 = await req('POST', '/echo/mcp', { headers: { 'content-type': 'application/json' }, body: initBody(2) });
@@ -74,7 +75,7 @@ test('per-server maxSessions caps concurrent sessions with 503', async (t) => {
 // burst without queueing without limit — past the wait it still refuses rather than piling up.
 test('a request at the cap waits for a slot instead of failing immediately', async (t) => {
   const { child, req } = await bootBridge(8822, { echo: { ...echoDef, maxSessions: 1 } }, { MCP_QUEUE_TIMEOUT_MS: '8000' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   const first = await req('POST', '/echo/mcp', { headers: { 'content-type': 'application/json' }, body: initBody(1) });
   assert.equal(first.status, 200, 'first session allowed');
@@ -92,7 +93,7 @@ test('a request at the cap waits for a slot instead of failing immediately', asy
 
 test('MCP_IDLE_TIMEOUT_MS reaps idle Streamable HTTP sessions', async (t) => {
   const { child, req } = await bootBridge(8803, { echo: echoDef }, { MCP_IDLE_TIMEOUT_MS: '700' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   const r = await req('POST', '/echo/mcp', { headers: { 'content-type': 'application/json' }, body: initBody() });
   const sid = r.headers['mcp-session-id'];
   assert.ok(sid, 'session id issued');
@@ -124,7 +125,7 @@ test('a call slower than the idle timeout is not reaped while it is still runnin
     { slow: { command: process.execPath, args: [STUBBORN, '--call-delay', '1500'] } },
     { MCP_IDLE_TIMEOUT_MS: '600', MCP_REQUEST_TIMEOUT_MS: '6000' },
   );
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   const r = await req('POST', '/slow/mcp', { headers: { 'content-type': 'application/json' }, body: initBody() });
   const sid = r.headers['mcp-session-id'];
@@ -151,7 +152,7 @@ test('a call slower than the idle timeout is not reaped while it is still runnin
 // down, the next call has to resume again onto a third child, so the pid changes.
 test('a late exit from a reaped child does not delete the session that replaced it', async (t) => {
   const { child, req } = await bootBridge(8832, { echo: echoDef }, { MCP_IDLE_TIMEOUT_MS: '700' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
   const r = await req('POST', '/echo/mcp', { headers: { 'content-type': 'application/json' }, body: initBody() });
   const sid = r.headers['mcp-session-id'];
   assert.ok(sid, 'session id issued');

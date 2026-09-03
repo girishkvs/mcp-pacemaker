@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -43,7 +44,7 @@ before(async () => {
   await waitUp();
 });
 
-after(() => { try { child.kill(); } catch { /* noop */ } });
+after(() => { try { killBridge(child); } catch { /* noop */ } });
 
 test('GET /status lists configured servers', async () => {
   const s = await req('GET', '/status');

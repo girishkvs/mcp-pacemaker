@@ -18,6 +18,16 @@ export function relativePathArgs(def) {
   });
 }
 
+// Names the bridge routes to itself. A server given one of these is silently unreachable: the
+// bridge answers /api, /admin, /ui and /status before it ever consults the server table, so a
+// client asking for that server gets the bridge's own reply and no error ever names the cause.
+export const RESERVED_NAMES = new Set(['api', 'admin', 'ui', 'status', '.well-known']);
+
+export function checkReservedName(name) {
+  if (!RESERVED_NAMES.has(name)) return null;
+  return { name, status: 'bad', detail: `"${name}" is reserved by the bridge's own routes — rename this server, it is unreachable` };
+}
+
 // A relative path is resolved against the bridge's base directory, not the directory the config
 // was imported from. When a host's config assumed a project root, those paths point nowhere once
 // imported: the server dies at spawn with MODULE_NOT_FOUND while `status` still lists it as

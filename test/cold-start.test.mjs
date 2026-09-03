@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { killBridge } from './helpers/kill-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -38,7 +39,7 @@ async function bootBridge(port, config, env) {
     try { const s = await req(port, 'GET', '/status'); if (s.status === 200) return child; } catch { /* wait */ }
     await sleep(100);
   }
-  child.kill();
+  killBridge(child);
   throw new Error(`bridge on ${port} did not start`);
 }
 
@@ -51,7 +52,7 @@ test('a slow initialize is allowed to finish rather than timing out', async (t) 
   const port = 8812;
   const child = await bootBridge(port, { slow: slowDef },
     { MCP_REQUEST_TIMEOUT_MS: '500', MCP_INIT_TIMEOUT_MS: '20000' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   const r = await req(port, 'POST', '/slow/mcp', { headers: rpc, body: initBody });
   assert.equal(r.status, 200);
@@ -66,7 +67,7 @@ test('the longer budget applies only to initialize, not to ordinary calls', asyn
   // ordinary call must hit the short steady-state timeout instead of the init budget.
   const child = await bootBridge(port, { slow: { command: 'node', args: [FIXTURE] } },
     { MCP_REQUEST_TIMEOUT_MS: '1000', MCP_INIT_TIMEOUT_MS: '60000' });
-  t.after(() => child.kill());
+  t.after(() => killBridge(child));
 
   const init = await req(port, 'POST', '/slow/mcp', { headers: rpc, body: initBody });
   const sid = init.headers['mcp-session-id'];

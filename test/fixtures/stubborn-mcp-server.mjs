@@ -18,10 +18,14 @@ if (hbIndex !== -1 && process.argv[hbIndex + 1]) {
   const beat = () => { try { writeFileSync(hb, String(Date.now())); } catch { /* ignore */ } };
   beat();
   setInterval(beat, 100);
-  // Safety net: if a test fails before tearing this down, do not leave a process behind for
-  // the rest of the session. Far longer than any test run, so it cannot mask a real leak.
-  setTimeout(() => process.exit(0), 120_000);
 }
+
+// Safety net: this fixture deliberately survives stdin closing, so a test that fails before
+// tearing it down would otherwise leave it running for the rest of the session — and a suite
+// run repeatedly leaks one per spawn. Far longer than any test, so it cannot mask a real leak.
+// Unconditional: the leak does not depend on --heartbeat, and scoping the timer to that flag is
+// what allowed 300+ of these to accumulate on a dev box.
+setTimeout(() => process.exit(0), 120_000);
 
 const argValue = (flag) => {
   const i = process.argv.indexOf(flag);
@@ -31,6 +35,8 @@ const argValue = (flag) => {
 const INIT_DELAY_MS = Number(argValue('--init-delay') || 0);
 // Simulates a slow tool call, so a test can hold a request in flight across an idle timeout.
 const CALL_DELAY_MS = Number(argValue('--call-delay') || 0);
+// Reported back as serverInfo.name, so a test can tell which definition a child was started from.
+const LABEL = argValue('--label') || 'stubborn';
 
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const rl = createInterface({ input: process.stdin });
@@ -49,7 +55,7 @@ rl.on('line', (line) => {
   // Deliberately never answered, so a test can exercise the request timeout.
   if (msg.method === 'never/answer') return;
   if (msg.method === 'initialize') {
-    const reply = () => send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'stubborn', version: '0.0.0' } } });
+    const reply = () => send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: LABEL, version: '0.0.0' } } });
     if (INIT_DELAY_MS > 0) setTimeout(reply, INIT_DELAY_MS); else reply();
   } else if (msg.method === 'tools/list') {
     const reply = () => send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'ping', description: 'ping' }] } });
