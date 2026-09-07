@@ -50,6 +50,21 @@ export default function App() {
         </div>
       </header>
 
+      {data?.restart && data.restart.staleClients > 0 && (
+        <div className="w-full max-w-[1160px] mx-auto mt-4 px-6">
+          <div className="rounded-xl border border-amber/50 bg-amber/5 px-4 py-3 text-[13px]">
+            <span className="font-semibold text-amber">Bridge restarted {Math.round(data.restart.sinceSec / 60)}m ago.</span>{' '}
+            <span className="text-fg">
+              {data.restart.staleClients} client{data.restart.staleClients === 1 ? '' : 's'} held a session before the restart and
+              {' '}{data.restart.staleClients === 1 ? 'has' : 'have'} not come back.
+            </span>{' '}
+            <span className="text-muted">
+              Sessions are resumed automatically, but some clients treat a single connection failure as permanent — those need an MCP reload.
+            </span>
+          </div>
+        </div>
+      )}
+
       {view === 'dashboard' ? (
         <>
           <main className="flex-1 w-full max-w-[1160px] mx-auto p-6 grid gap-[18px] [grid-template-columns:repeat(auto-fit,minmax(320px,1fr))]">

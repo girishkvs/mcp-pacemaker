@@ -89,6 +89,22 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **B1** | Publish polish | `homepage` + `bugs` in `package.json`; tag `v1.0.0`; CHANGELOG |
 | **B2** | npm publish | Optional — only shortens `npx github:<owner>/mcp-pacemaker` to `npx mcp-pacemaker` |
 
+### Version plan
+| Release | Contents | State |
+|---|---|---|
+| **1.1.0** | Active health probing + config hot-reload | shipped |
+| **1.2.0** | Cold-start measurement, spawn gate, warm-pool correctness, health semantics, restart reporting | shipped |
+| **1.3.0** | **B10** `mcp-pacemaker logs`, **B6** `shared` sharing mode | planned |
+
+`B10` and `B6` were originally slated for 1.2.0. 1.2.0 was taken by unplanned work that came out
+of running the live bridge — a pool that had silently stopped refilling, and a cold start nobody
+was measuring. Both were worth shipping first; neither was on the plan. Recorded here so the slip
+is visible rather than quietly renumbered.
+
+`B6` is the real answer to session churn: one polling client here opened **238 sessions an hour**,
+each a fresh child that re-authenticates, where a single multiplexed process would have served all
+of them. Pooling (1.2.0) makes each spawn cheaper; `B6` removes the spawns.
+
 ## Feature backlog
 | # | Item | Detail |
 |---|---|---|
@@ -97,6 +113,51 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **B9** | Bridge-side OAuth broker | For `auth: none` servers whose resource does not pre-authorize the Azure CLI, so no `audience` token can be minted. The bridge would run the OAuth flow itself and share one credential across clients. Adds a callback listener and refresh-token storage to a 24/7 daemon — needs a threat-model review first. |
 | **B10** | `mcp-pacemaker logs` | Tail and filter `bridge.log` from the CLI, with `--server` and `--since`. The file exists as of 1.1.0; only the reader is missing. |
 | **B11** | Reap orphans from a previous instance | On Windows, force-killing the bridge (Task Manager, `Stop-Process -Force`, a hard reboot) terminates it without running its `SIGTERM` shutdown, so **children it spawned can survive indefinitely** — real servers have no self-destruct, and they hold their ports and credentials. Measured directly with a heartbeat file: after `taskkill /F` on the bridge, a directly-spawned server kept running (the `cmd.exe`-wrapped one did not). The test suite hit the same thing and leaked 24 processes per run until teardown was changed to kill the tree. A Job Object with `KILL_ON_JOB_CLOSE` is the proper fix but needs native code; the pure-Node alternative is to record child pids alongside `sessions.json` and, on startup, kill any that survived — guarded by a command-line match, since Windows reuses pids. |
+| **B14** | Zero-downtime restart (socket handoff) | See below. The one remaining reason a bridge restart is visible to a user. |
+
+### B14 — zero-downtime restart via socket handoff
+
+**Problem.** Session *state* already survives a restart: `sessions.json` plus resume means a client
+that keeps using its session id is re-established on a fresh child. What does not survive is the
+**connection**. The listening socket dies with the process, so every client gets `ECONNREFUSED`
+for the restart window. Some clients — `rmcp`, and Copilot CLI through it — treat a single
+connection failure as permanent: they never retry, never resume with `Last-Event-ID`, and never
+re-initialize, so the server is dead to them for the life of the session even though the bridge
+is healthy seconds later. Restarting for the 1.2.0 upgrade wedged **13 sessions across 3 agents**,
+all of which needed a manual MCP reload.
+
+Nothing in the transport spec fixes this: the only recovery path it defines is a client
+re-initializing after HTTP 404, and a client that has stopped making requests never sees one.
+So the bridge has to stop dropping the socket.
+
+**Mechanism.** Hand the listening socket to the replacement process so the port never stops
+accepting.
+
+1. The old process spawns the new one with an IPC channel and sends the live handle
+   (`child.send('server', server)`) — the same primitive `cluster` uses. It works on Windows too;
+   Node duplicates the socket with `WSADuplicateSocket` underneath.
+2. The new process finishes **all** startup first — config parsed, resumable sessions loaded,
+   warm pools filled — and only then begins accepting. Accepting before it is ready just moves
+   the failure rather than removing it.
+3. The old process stops accepting, drains in-flight requests, closes its SSE streams cleanly,
+   and exits. Exactly one process accepts at any moment; the handover point is a single explicit
+   message, not a race.
+
+**Server children do not transfer.** Their stdio pipes belong to the old process and cannot be
+meaningfully passed. They die with it, and each affected session is re-established on a fresh
+child by the existing resume path. That is a real cost now that it is measured — 2-7s per server
+on this machine — which is why the warm pool had to be correct first: the replacement pays a warm
+adoption, not a cold start.
+
+**Prerequisites,** all shipped: session resume (1.0.0), warm-pool refill correctness and the
+spawn gate (1.2.0), clean SSE close on shutdown (1.2.0).
+
+**Open questions.** Whether the supervisor or the old bridge owns spawning the successor; how a
+failed handover rolls back without leaving the port unowned; whether a client mid-SSE-stream sees
+the switch at all.
+
+**Validation.** Restart under live load and assert zero connection refusals, zero client reloads
+needed, and every pre-restart session id still served afterwards.
 
 ## Shipped
 | # | Item | Where |
@@ -108,6 +169,9 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **B8** | Surface `warm` in the TUI | `WARM` column in `mcp-pacemaker top` |
 | **B12** | Config hot-reload | `mcp-pacemaker reload`, `POST /admin/reload`, `MCP_CONFIG_WATCH`; diffed so unchanged servers keep their sessions |
 | **B13** | Server health | `health` in `/api/status`, `doctor`, `top` and the dashboard; optional probing via `MCP_HEALTH_INTERVAL_MS` |
+| **B15** | Cold-start measurement + pooling advice | p50/p95/max spawn time per server in `/api/status` and the dashboard; `doctor` recommends `sharing`/`minWarm` sized from observed concurrency. Advice only — pooling is never enabled automatically, since a warm pool costs a resident process per slot |
+| **B16** | Cold-start concurrency gate | `MCP_MAX_CONCURRENT_SPAWNS`; package-manager-backed servers share one cache and corrupted it when started together (`npm error code ECOMPROMISED` from 17 simultaneous `npx` invocations) |
+| **B17** | Warm-pool correctness | Refill after an unattended child exit (a pool could drain to empty and stay there), refill toward target in one pass instead of one child per take, and stop double-counting failures for pooled servers |
 
 ---
 

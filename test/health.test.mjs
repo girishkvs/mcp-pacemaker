@@ -6,7 +6,8 @@
 // apart — ok, failing, and the deliberately separate unknown — and pin that a server nobody has
 // called is never reported healthy.
 //
-// Ports: see the allocation note in auth-token.test.mjs. This file owns 8840-8846.
+// Ports: see the allocation note in auth-token.test.mjs. This file owns 8840-8849 and 8851-8853
+// (8850 belongs to tui.test.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
@@ -97,7 +98,7 @@ test('a server whose credential goes bad reports failing, and counts the failure
   });
   t.after(() => srv.close());
 
-  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp`, headers: { 'x-test': '1' } } });
+  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp`, headers: { authorization: 'Bearer test-credential' } } });
   const port = 8842;
   const child = await boot(port, cfg);
   t.after(() => killBridge(child));
@@ -171,6 +172,87 @@ test('a server named after one of the bridge\'s own routes is reported, not sile
   assert.equal(checks.find((c) => c.name === 'fine').status, 'ok', 'and normal servers are unaffected');
 });
 
+const listBody = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+
+test('a 401 on a server the CLIENT authenticates is a handshake, not a failure', async (t) => {
+  const { srv, port: upstream } = await fakeUpstream((rq, rs) =>
+    rs.writeHead(401, { 'www-authenticate': 'Bearer resource_metadata="https://up/x"' }).end('sign in'));
+  t.after(() => srv.close());
+
+  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp`, auth: { type: 'none' } } });
+  const port = 8847;
+  const child = await boot(port, cfg);
+  t.after(() => killBridge(child));
+
+  await req(port, 'POST', '/remote', { headers: rpc, body: initBody });
+  await req(port, 'POST', '/remote', { headers: rpc, body: initBody });
+  const h = await health(port, 'remote');
+  assert.equal(h.state, 'unknown', 'a relayed challenge says nothing about health');
+  assert.equal(h.consecutiveFailures, 0, 'handshakes are not counted as failures');
+});
+
+test('a 401 on a server the BRIDGE authenticates is still a real failure', async (t) => {
+  const { srv, port: upstream } = await fakeUpstream((rq, rs) =>
+    rs.writeHead(401, { 'www-authenticate': 'Bearer realm="x"' }).end('expired'));
+  t.after(() => srv.close());
+
+  // headers make the bridge the authenticating party, so a 401 is the bridge's problem.
+  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp`, headers: { authorization: 'Bearer stale' } } });
+  const port = 8848;
+  const child = await boot(port, cfg);
+  t.after(() => killBridge(child));
+
+  await req(port, 'POST', '/remote', { headers: rpc, body: initBody });
+  const h = await health(port, 'remote');
+  assert.equal(h.state, 'failing', 'the credential the bridge supplied was rejected');
+  assert.match((await req(port, 'GET', '/api/status')).body, /rejected the credential from the configured authorization header/);
+});
+
+test('the bridge refusing a session counts as a failure', async (t) => {
+  // The most client-visible failure the bridge produces is its own 503. It was invisible to
+  // health, so a server that could not be reached at all still reported as fine.
+  const { cfg } = makeConfig({ capped: { command: 'node', args: [FIXTURE], maxSessions: 1 } });
+  const port = 8849;
+  const child = await boot(port, cfg, { MCP_QUEUE_TIMEOUT_MS: '0' });
+  t.after(() => killBridge(child));
+
+  const first = await req(port, 'POST', '/capped/mcp', { headers: rpc, body: initBody });
+  assert.equal(first.status, 200);
+  const second = await req(port, 'POST', '/capped/mcp', { headers: rpc, body: initBody });
+  assert.equal(second.status, 503, 'the cap is enforced');
+
+  const h = await health(port, 'capped');
+  assert.equal(h.state, 'failing');
+  assert.match((await req(port, 'GET', '/api/status')).body, /bridge refused a session/);
+});
+
+test('sessions counted against the cap are reported separately from the display total', async (t) => {
+  // `sessions` sums both transports but `maxSessions` only governs the streamable pool, which is
+  // how a card came to read "33/32" without the cap ever being breached.
+  const { cfg } = makeConfig({ dual: { command: 'node', args: [FIXTURE] } });
+  const port = 8853;
+  const child = await boot(port, cfg);
+  t.after(() => killBridge(child));
+
+  await req(port, 'POST', '/dual/mcp', { headers: rpc, body: initBody });
+  const s = JSON.parse((await req(port, 'GET', '/api/status')).body).servers.find((x) => x.name === 'dual');
+  assert.equal(s.cappedSessions, 1, 'the streamable pool is reported on its own');
+  assert.ok(s.cappedSessions <= s.sessions, 'and it never exceeds the display total');
+});
+
+
+test('a fresh restart is reported so a wedged client can be spotted', async (t) => {
+  const { cfg } = makeConfig({ echo: { command: 'node', args: [FIXTURE] } });
+  const port = 8852;
+  const child = await boot(port, cfg);
+  t.after(() => killBridge(child));
+
+  const snap = JSON.parse((await req(port, 'GET', '/api/status')).body);
+  assert.ok(snap.restart, 'a recently started bridge reports its restart');
+  assert.ok(snap.restart.sinceSec >= 0);
+  assert.equal(typeof snap.restart.staleClients, 'number');
+});
+
 test('probing gives an idle server a verdict without any client traffic', async (t) => {
   let hits = 0;
   const { srv, port: upstream } = await fakeUpstream((rq, rs) => {
@@ -179,7 +261,9 @@ test('probing gives an idle server a verdict without any client traffic', async 
   });
   t.after(() => srv.close());
 
-  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp` } });
+  // The bridge holds the credential here, so a 401 really is the credential having expired —
+  // which is the overnight case probing exists to catch.
+  const { cfg } = makeConfig({ remote: { type: 'http', url: `http://127.0.0.1:${upstream}/mcp`, headers: { authorization: 'Bearer stale' } } });
   const port = 8845;
   const child = await boot(port, cfg, { MCP_HEALTH_INTERVAL_MS: '1000' });
   t.after(() => killBridge(child));

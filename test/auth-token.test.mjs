@@ -24,8 +24,10 @@ import { killBridge } from './helpers/kill-bridge.mjs';
 //   8808-8809, 8850, 8860, 8877 tui                  8812-8813  cold-start
 //   8810-8811, 8820-8827        auth-token (here)    8814, 8819 crash-report
 //   8815-8818, 8829, 8833       resume               8830       config-checks
+//   8835-8839                   config-reload        8840-8853  health
+//   8862-8863                   warm-pool
 //
-// Free at the time of writing: 8828, 8834+.
+// Free at the time of writing: 8828, 8854-8859, 8861, 8864+.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

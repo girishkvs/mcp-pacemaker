@@ -164,12 +164,47 @@ function richSnapshot() {
   for (const name of Object.keys(servers)) {
     const def = servers[name];
     const st = stat(name);
-    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: def.maxSessions || MAX_SESSIONS_PER_SERVER || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null, health: healthOf(name) };
+    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, cappedSessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: def.maxSessions || MAX_SESSIONS_PER_SERVER || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null, health: healthOf(name), spawn: spawnStats(name), peakConcurrency: peakConcurrency(name), advice: poolAdvice(name) };
     if (def.type === 'http') { byName[name].url = def.url; byName[name].tokenExpiresIn = tokenExpiryFor(def); }
   }
+  // `sessions` sums both transports for display, but `maxSessions` only governs the streamable
+  // pool — so a classic SSE session made the card read "33/32" as though the cap had been
+  // breached. Report the number the cap actually counts alongside it.
   for (const s of sessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; if (s.child?.pid) b.pids.push(s.child.pid); } }
-  for (const s of httpSessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; if (s.child?.pid) b.pids.push(s.child.pid); if (s.clientInfo && s.clientInfo.name && !b.clients.includes(s.clientInfo.name)) b.clients.push(s.clientInfo.name); } }
-  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, servers: Object.values(byName) };
+  for (const s of httpSessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; b.cappedSessions++; if (s.child?.pid) b.pids.push(s.child.pid); if (s.clientInfo && s.clientInfo.name && !b.clients.includes(s.clientInfo.name)) b.clients.push(s.clientInfo.name); } }
+  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, restart: restartStatus(), servers: Object.values(byName) };
+}
+
+// After a restart, a client whose session the bridge is holding open for it but which has not
+// come back is very likely wedged: some clients treat one connection failure as permanent and
+// never retry, so the user has to reload them by hand. The bridge cannot fix that from here,
+// but it can stop the user having to guess.
+const RESTART_NOTICE_MS = 30 * 60_000;
+// How far back a resume record still implies a live client. The resume file keeps a day of
+// records, most of which belong to sessions that ended normally long before the restart.
+const STALE_CLIENT_WINDOW_MS = 30 * 60_000;
+function restartStatus() {
+  const sinceSec = Math.round((Date.now() - startedAt) / 1000);
+  if (sinceSec * 1000 > RESTART_NOTICE_MS) return null;
+  let stale = 0;
+  for (const [id, r] of resumable) {
+    // A client that was live when the bridge went down: recorded before this process started,
+    // not seen since, and enough time has passed that an active one would have come back.
+    // Bounded to recently-active records, because the resume file holds a day of churn — one
+    // polling client here left hundreds of dead ids, and counting all of them reported 326
+    // stale clients where there were three.
+    const recordedBeforeRestart = (r.at || 0) < startedAt;
+    const activeNearTheRestart = (r.at || 0) > startedAt - STALE_CLIENT_WINDOW_MS;
+    const hasNotComeBack = !httpSessions.has(id);
+    const longEnoughToJudge = Date.now() - startedAt > 120_000;
+    if (recordedBeforeRestart &&
+        activeNearTheRestart &&
+        hasNotComeBack &&
+        longEnoughToJudge) {
+      stale++;
+    }
+  }
+  return { sinceSec, resumable: resumable.size, staleClients: stale };
 }
 
 // Health checks for the dashboard Health page (fast, no network).
@@ -383,11 +418,11 @@ function spawnServer(def) {
     stdio: ['pipe', 'pipe', 'pipe'],
   };
   const bareWin = process.platform === 'win32' && !/[\\/]/.test(def.command) && !/\.(exe|com)$/i.test(def.command);
-  if (bareWin) {
-    const line = '"' + [def.command, ...args].map(quoteWinArg).join(' ') + '"';
-    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], { ...opts, windowsVerbatimArguments: true });
-  }
-  return spawn(def.command, args, opts);
+  const child = bareWin
+    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', '"' + [def.command, ...args].map(quoteWinArg).join(' ') + '"'], { ...opts, windowsVerbatimArguments: true })
+    : spawn(def.command, args, opts);
+  child.__spawnedAt = Date.now(); // start of the cold-start clock; stopped when initialize lands
+  return child;
 }
 
 /* --------------------------- child failure reporting ------------------------ */
@@ -562,32 +597,207 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
   return sessionId;
 }
 
+/* ------------------- cold-start cost, concurrency, spawn gating ------------- */
+// The bridge spawns every child, so it is the only component positioned to know what a cold
+// start actually costs — and it was discarding that. Without it there is no way to tell a server
+// that starts in 200ms from one that shells out to a package manager and takes 20s, which is why
+// the pool ended up full for a fast server and empty for the slow one that needed it.
+const SPAWN_SAMPLES_MAX = 50;
+const spawnCost = new Map(); // name -> [ms, ...]
+function noteSpawnCost(name, ms) {
+  const arr = spawnCost.get(name) || [];
+  arr.unshift(ms);
+  if (arr.length > SPAWN_SAMPLES_MAX) arr.length = SPAWN_SAMPLES_MAX;
+  spawnCost.set(name, arr);
+}
+function spawnStats(name) {
+  const arr = spawnCost.get(name);
+  if (!arr || !arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
+  return { samples: s.length, p50Ms: at(0.5), p95Ms: at(0.95), maxMs: s[s.length - 1] };
+}
+
+// Rolling peak concurrency, so a pool can be sized from what a server is actually asked to do
+// rather than from a number the user had to guess. Bucketed by 5 minutes over the last hour: a
+// single burst should still size the pool, but yesterday's burst should not hold it open forever.
+const CONCURRENCY_BUCKET_MS = 5 * 60_000;
+const CONCURRENCY_BUCKETS = 12;
+const concurrency = new Map(); // name -> [{ slot, peak }, ...]
+function noteConcurrency(name, n) {
+  const slot = Math.floor(Date.now() / CONCURRENCY_BUCKET_MS);
+  const arr = concurrency.get(name) || [];
+  if (arr[0] && arr[0].slot === slot) arr[0].peak = Math.max(arr[0].peak, n);
+  else arr.unshift({ slot, peak: n });
+  if (arr.length > CONCURRENCY_BUCKETS) arr.length = CONCURRENCY_BUCKETS;
+  concurrency.set(name, arr);
+}
+const peakConcurrency = (name) => {
+  const arr = concurrency.get(name);
+  return arr && arr.length ? Math.max(...arr.map((b) => b.peak)) : 0;
+};
+
+// Running many package-manager-backed servers at once is how a shared npm/uv cache gets
+// corrupted: 17 simultaneous `npx` invocations on one machine produced
+// `npm error code ECOMPROMISED / Lock compromised`, and every one of those sessions failed. No
+// server definition can fix that — it is a property of the concurrency, not of any one command —
+// so the bridge has to own it. Queuing a cold start behind another is strictly better than both
+// of them corrupting the cache; the init budget still bounds the wait. Global rather than
+// per-server because the cache they fight over is shared across servers.
+const MAX_CONCURRENT_SPAWNS = Number(process.env.MCP_MAX_CONCURRENT_SPAWNS ?? 2);
+const spawnGate = { active: 0, queue: [] };
+function acquireSpawn() {
+  if (MAX_CONCURRENT_SPAWNS <= 0) return Promise.resolve();
+  if (spawnGate.active < MAX_CONCURRENT_SPAWNS) { spawnGate.active++; return Promise.resolve(); }
+  return new Promise((r) => spawnGate.queue.push(r));
+}
+function releaseSpawn() {
+  if (MAX_CONCURRENT_SPAWNS <= 0) return;
+  const next = spawnGate.queue.shift();
+  if (next) next(); // hand the slot straight over rather than dropping and re-taking it
+  else spawnGate.active = Math.max(0, spawnGate.active - 1);
+}
+
+// Pooling stays opt-in: the bridge says what it would cost and what it would size to, and the
+// user decides. Turning it on automatically would spend a resident process per warm slot on
+// someone's machine without asking.
+const POOL_ADVICE_MS = Number(process.env.MCP_POOL_ADVICE_MS ?? 2000);
+const WARM_MAX_PER_SERVER = Number(process.env.MCP_WARM_MAX ?? 8);
+function poolAdvice(name) {
+  const def = servers[name];
+  if (!def ||
+      def.sharing === 'pool' ||
+      def.type === 'http') {
+    return null;
+  }
+  const st = spawnStats(name);
+  const enoughSamples = st && st.samples >= 3;
+  if (!enoughSamples ||
+      st.p50Ms < POOL_ADVICE_MS) {
+    return null;
+  }
+  return {
+    reason: `cold start p50 ${(st.p50Ms / 1000).toFixed(1)}s over ${st.samples} spawns`,
+    suggest: { sharing: 'pool', minWarm: Math.max(1, Math.min(peakConcurrency(name) || 1, WARM_MAX_PER_SERVER)) },
+  };
+}
+
 /* --------------------- keep-warm pool (sharing: "pool") --------------------- */
 // For servers marked sharing:"pool", keep `minWarm` pre-spawned (un-initialized) children ready
 // so a new session adopts a warm child (process already started + imports loaded) instead of a
 // cold spawn. The warm child receives its FIRST initialize from the real client (safe — no
 // re-initialize). shared/multiplex is deferred R&D.
 const warmPool = new Map(); // name -> [child, ...]
-const poolTarget = (name) => (servers[name] && servers[name].sharing === 'pool' ? (servers[name].minWarm || 1) : 0);
+const warmPending = new Map(); // name -> spawns in flight, so a refill pass cannot double-order
+// Explicit minWarm always wins. Without one, size from observed peak concurrency — the number a
+// user cannot reasonably know and the bridge measures for free. Opting into pooling and still
+// getting a pool of one is how a burst of 17 sessions ended up with 16 cold starts.
+const poolTarget = (name) => {
+  const def = servers[name];
+  if (!def ||
+      def.sharing !== 'pool') {
+    return 0;
+  }
+  if (def.minWarm != null) return def.minWarm;
+  return Math.max(1, Math.min(peakConcurrency(name) || 1, WARM_MAX_PER_SERVER));
+};
+// Hold a spawn-gate slot until the child looks alive rather than until spawn() returns: the cost
+// being serialized is the package manager's, which happens after the process exists and before
+// it says anything. First output is the cheapest available proxy for "the expensive part is
+// over"; the timeout stops a silent child from wedging the gate.
+function releaseOnReady(child, maxMs = 30_000) {
+  let done = false;
+  const rel = () => { if (done) return; done = true; clearTimeout(timer); releaseSpawn(); };
+  const timer = setTimeout(rel, maxMs);
+  timer.unref?.();
+  child.stdout?.once('data', rel);
+  child.stderr?.once('data', rel);
+  child.once('exit', rel);
+}
+// A warm child can die on its own: a server that self-exits when idle, a crash, a laptop sleep.
+// The exit handler used to remove the corpse and stop there, and nothing else refilled — the pool
+// only grew on boot, on take, on recycle and on reload. So a pooled server silently degraded to
+// cold-start-every-session, which is the exact failure pooling exists to prevent, and it looked
+// like nothing was wrong because an empty pool is indistinguishable from one that has simply not
+// been asked for anything yet. Seen on ev2: warm sat at 0 for three hours while kusto stayed full
+// purely because kusto is taken often enough that every take triggered a refill.
+//
+// Refilling on an unattended exit needs a brake, or a child that dies instantly becomes a spawn
+// loop. Children that die quickly back off exponentially; one that lived a while refills at once.
+const WARM_MIN_LIFETIME_MS = 5000;
+const WARM_BACKOFF_CAP_MS = 60_000;
+const warmFastExits = new Map(); // name -> consecutive too-fast exits
+let shuttingDown = false;
 function spawnWarm(name) {
   const child = spawnServer(servers[name]);
+  const bornAt = Date.now();
   pipeStderr(name, child);
   child.on('exit', (code) => {
+    // Once taken, the child belongs to its session, which registers its own exit handler. Both
+    // used to run, so every failing child of a pooled server was counted as two failures and
+    // drove that server's health down twice as fast as an identical unpooled one.
+    if (child.__warmTaken) return;
     noteExit(name, child, code);
     const arr = warmPool.get(name); if (arr) { const i = arr.indexOf(child); if (i >= 0) arr.splice(i, 1); }
+    // Deliberate kills refill themselves (recycle) or are meant to leave the pool empty (reload
+    // removing a server, shutdown). Only an exit we did not ask for needs replacing here.
+    const weAskedForThis = child.__bridgeKilled || shuttingDown;
+    if (weAskedForThis ||
+        !poolTarget(name)) {
+      return;
+    }
+    const lived = Date.now() - bornAt;
+    const fast = lived < WARM_MIN_LIFETIME_MS;
+    const strikes = fast ? (warmFastExits.get(name) || 0) + 1 : 0;
+    warmFastExits.set(name, strikes);
+    const delay = strikes ? Math.min(WARM_BACKOFF_CAP_MS, 1000 * 2 ** (strikes - 1)) : 0;
+    log(`[${name}] warm child exited after ${lived}ms (code ${code})${strikes ? `; ${strikes} fast exits, refilling in ${delay}ms` : '; refilling'}`);
+    setTimeout(() => refillPool(name), delay).unref();
   });
   return child;
 }
 function refillPool(name) {
   const target = poolTarget(name);
-  if (!target) return;
+  if (!target ||
+      shuttingDown) {
+    return;
+  }
   if (!warmPool.has(name)) warmPool.set(name, []);
   const arr = warmPool.get(name);
-  while (arr.length < target) { arr.push(spawnWarm(name)); log(`[${name}] pre-warmed pool child (${arr.length}/${target})`); }
+  // Refill toward the target in one pass instead of one child per take. Reactive single-child
+  // refill meant a burst that emptied the pool recovered long after the burst was over, which is
+  // the window pooling exists to cover. The spawn gate decides how many actually start at once.
+  while (arr.length + (warmPending.get(name) || 0) < target) {
+    warmPending.set(name, (warmPending.get(name) || 0) + 1);
+    acquireSpawn().then(() => {
+      warmPending.set(name, Math.max(0, (warmPending.get(name) || 1) - 1));
+      const want = poolTarget(name);
+      const cur = warmPool.get(name);
+      // The wait for a slot can be long enough for the answer to change: a reload removed the
+      // server, a shutdown started, or other refills already met the target.
+      const noLongerWanted = shuttingDown || !want || !cur;
+      const alreadyMet = cur && cur.length >= want;
+      if (noLongerWanted ||
+          alreadyMet) {
+        releaseSpawn();
+        return;
+      }
+      const child = spawnWarm(name);
+      cur.push(child);
+      log(`[${name}] pre-warmed pool child (${cur.length}/${want})`);
+      releaseOnReady(child);
+    });
+  }
 }
 function takeWarm(name) {
   const arr = warmPool.get(name);
-  if (arr && arr.length) { const c = arr.shift(); setImmediate(() => refillPool(name)); return c; }
+  if (arr && arr.length) {
+    const c = arr.shift();
+    c.__warmTaken = true; // hand ownership to the session; the warm exit handler stands down
+    warmFastExits.delete(name); // a child that survived to be used clears the backoff
+    setImmediate(() => refillPool(name));
+    return c;
+  }
   return null;
 }
 for (const poolName of Object.keys(servers)) refillPool(poolName); // pre-warm pool servers at boot
@@ -614,21 +824,38 @@ function saveResumable() {
 // Records past the TTL are dropped. Without this the window was only ever applied when the file
 // was loaded at startup, so a long-running bridge kept honouring — and re-persisting — records
 // far older than the retention window it documents. Returns true if anything was removed.
+// Session ids we know existed and can no longer honour. Every released revision that has
+// sessions (2025-03-26 through 2025-11-25, Streamable HTTP / Session Management §3) requires 404
+// for a terminated session, and §4 makes re-initializing on 404 a client MUST — so the status
+// code stays 404. A 410 would read better to a human but would put a compliant client into
+// undefined territory and lose the one recovery path the spec defines. (The draft revision drops
+// sessions from this transport altogether, so 404 is also the last word on the subject.)
+// We keep the set purely to tell "known-gone" from "never existed" in the log, which is what
+// actually distinguishes a stale client after a restart from a misconfigured one.
+const GONE_MAX = 500;
+const goneSessions = new Set();
+function markGone(sessionId) {
+  goneSessions.add(sessionId);
+  if (goneSessions.size > GONE_MAX) goneSessions.delete(goneSessions.values().next().value);
+}
+
 function pruneResumable(now = Date.now()) {
   let dropped = false;
   for (const [id, r] of resumable) {
-    if (now - (r.at || 0) >= RESUME_TTL_MS) { resumable.delete(id); dropped = true; }
+    if (now - (r.at || 0) >= RESUME_TTL_MS) { resumable.delete(id); markGone(id); dropped = true; }
   }
   return dropped;
 }
 function rememberSession(sessionId, name, initMsg) {
   if (!RESUME_ENABLED || !initMsg) return;
   resumable.set(sessionId, { server: name, initialize: initMsg.params ?? {}, at: Date.now() });
+  goneSessions.delete(sessionId); // a live id again
   pruneResumable();
   saveResumable();
 }
 function forgetSession(sessionId) {
   if (resumable.delete(sessionId)) saveResumable();
+  markGone(sessionId); // an explicit DELETE is gone for good, not "never existed"
 }
 if (RESUME_ENABLED) {
   try {
@@ -650,6 +877,7 @@ async function resumeSession(name, sessionId) {
   // checked here too — not only when the file is read at startup.
   if (Date.now() - (rec.at || 0) >= RESUME_TTL_MS) {
     resumable.delete(sessionId);
+    markGone(sessionId);
     saveResumable();
     return null;
   }
@@ -838,6 +1066,9 @@ const HEALTH_INTERVAL_MS = Number(process.env.MCP_HEALTH_INTERVAL_MS || 0);
 function probeServer(name) {
   const def = servers[name];
   if (!def || def.type !== 'http' || !def.url) return;
+  // A server the client authenticates cannot be probed usefully: the bridge holds no credential
+  // for it, so every probe would 401 and report a working server as broken.
+  if (!resolveAuth(def) && !def.headers) return;
   stat(name).lastProbe = Date.now();
   const body = JSON.stringify({
     jsonrpc: '2.0', id: `probe-${Date.now()}`, method: 'initialize',
@@ -856,8 +1087,7 @@ function probeServer(name) {
         resp.resume();
         if (code === 401 || code === 403 || code >= 500) noteFailure(name, `health probe: upstream returned ${code}`);
         else noteSuccess(name);
-        done();
-      });
+        done();      });
       r.on('error', (e) => { noteFailure(name, `health probe: ${e.message}`); done(); });
       r.setTimeout(10_000, () => { r.destroy(new Error('timed out')); });
       r.end(body);
@@ -949,14 +1179,36 @@ function handleStreamable(name, req, res) {
         if (session) sessionId = sid;
       }
       if (!session) {
-        if (!isInit) { res.writeHead(404).end('no session (send initialize first)'); return; }
+        if (!isInit) {
+          // Both cases are 404 because the spec requires it, but they mean different things to
+          // an operator: a known-gone id is a client that outlived a restart, an unknown id is a
+          // client that never initialized here. Say which in the body and the log.
+          if (sid && goneSessions.has(sid)) {
+            log(`${name}: rejecting known-gone session ${sid} (client predates a restart; it must re-initialize)`);
+            res.writeHead(404).end('session terminated (re-initialize)');
+            return;
+          }
+          res.writeHead(404).end('no session (send initialize first)');
+          return;
+        }
         const cap = servers[name].maxSessions || MAX_SESSIONS_PER_SERVER;
         if (cap > 0 && !(await awaitSlot(name, cap))) {
+          // The most client-visible failure the bridge produces is its own: the client asked for
+          // a session and did not get one, so its command failed. Reporting this as healthy sent
+          // an operator looking at the upstream when the bridge was the one refusing.
+          noteFailure(name, `bridge refused a session: max sessions (${cap}) reached`);
           res.writeHead(503).end(`bridge: max sessions (${cap}) reached for ${name}`);
           return;
         }
-        sessionId = startStreamableChild(name, takeWarm(name));
+        const warm = takeWarm(name);
+        // Only a cold spawn passes through the gate — adopting a warm child spawns nothing,
+        // which is the whole point of having warmed it. Released on first output rather than
+        // manually, so no early return path can leak a slot.
+        if (!warm) await acquireSpawn();
+        sessionId = startStreamableChild(name, warm);
         session = httpSessions.get(sessionId);
+        if (!warm) { session.cold = true; releaseOnReady(session.child); }
+        noteConcurrency(name, sessionCount(name));
       }
       session.lastActivity = Date.now();
       if (isInit) {
@@ -987,7 +1239,16 @@ function handleStreamable(name, req, res) {
       // are the actual reason and must not be overwritten by the symptom.
       if (results.some((r) => r && r.error && r.error.code === -32001)) {
         if (session.child.exitCode === null && session.child.signalCode === null) noteFailure(name, 'upstream timeout');
-      } else noteSuccess(name);
+      } else {
+        noteSuccess(name);
+        // A cold start is only measurable once the server has answered: spawn() returning tells
+        // us nothing about the package manager work that follows it. Recorded once per child.
+        const measurableColdStart = session.cold && isInit && session.child.__spawnedAt;
+        if (measurableColdStart) {
+          noteSpawnCost(name, Date.now() - session.child.__spawnedAt);
+          session.cold = false;
+        }
+      }
       // Stamp again on completion: the idle clock should measure time since the request finished,
       // not since it started, or a call slower than the timeout is reapable the moment it returns.
       session.lastActivity = Date.now();
@@ -1100,6 +1361,10 @@ function proxyHttp(name, def, req, res) {
       return;
     }
     for (const [k, v] of Object.entries(def.headers ?? {})) headers[k] = v;
+    // A static credential in `headers` makes the bridge the authenticating party just as much as
+    // an auth command does. Without this, a 401 on such a server counted as neither success nor
+    // failure, and its challenge was relayed to a client that cannot act on it.
+    if (Object.keys(def.headers ?? {}).some((k) => k.toLowerCase() === 'authorization')) bridgeAuthenticates = true;
 
     const remainder = req.url.substring(('/' + name).length);
     const target = new URL(remainder ? def.url.replace(/\/$/, '') + remainder : def.url);
@@ -1107,6 +1372,7 @@ function proxyHttp(name, def, req, res) {
     const upReq = lib.request(target, { method: req.method, headers }, (upRes) => {
       const outHeaders = stripHopByHop(upRes.headers);
       const wwwKey = Object.keys(outHeaders).find((k) => k.toLowerCase() === 'www-authenticate');
+      let healthCounted = false;
       if (upRes.statusCode === 401 && wwwKey) {
         if (bridgeAuthenticates) {
           // The bridge supplied the credential, so a 401 is the bridge's problem, not the
@@ -1115,8 +1381,12 @@ function proxyHttp(name, def, req, res) {
           // it 401s again and the client is sent back to the browser, forever. Drop the
           // challenge and surface the failure where an operator will see it instead.
           delete outHeaders[wwwKey];
-          const detail = `upstream rejected the credential from ${def.audience ? `audience ${def.audience}` : 'auth.command'} (401)`;
+          const source = def.audience ? `audience ${def.audience}`
+            : (def.auth && def.auth.command) ? 'auth.command'
+            : 'the configured authorization header';
+          const detail = `upstream rejected the credential from ${source} (401)`;
           noteFailure(name, detail);
+          healthCounted = true; // this response is already recorded; do not count it twice below
           log(`[${name}] ${detail} — the cached credential is being discarded`);
           // Whatever is cached is not working, so do not keep serving it for the rest of its TTL.
           invalidateToken(def);
@@ -1132,11 +1402,15 @@ function proxyHttp(name, def, req, res) {
         }
       }
       res.writeHead(upRes.statusCode ?? 502, outHeaders);
-      // A verdict on every reply, not just the bad ones. 4xx other than auth is the client's
-      // fault and says nothing about the server, so it is left as-is rather than counted either
-      // way; 401/403 and 5xx are the server or the credential being broken.
+      // Health means "did the client's command work". A 401 challenge on a server the client
+      // authenticates is not a failure — it is the first half of the OAuth handshake and the
+      // client is about to complete it. Counting those marked a healthy server as failing for
+      // the three seconds of every handshake, which is most of what the dashboard showed.
       const code = upRes.statusCode ?? 502;
-      if (code === 401 || code === 403 || code >= 500) noteFailure(name, `upstream returned ${code}`);
+      const bridgeCredentialRejected = (code === 401 || code === 403) && bridgeAuthenticates;
+      if (healthCounted) { /* the challenge branch above already recorded this response */ }
+      else if (code >= 500) noteFailure(name, `upstream returned ${code}`);
+      else if (bridgeCredentialRejected) noteFailure(name, `upstream rejected the bridge credential (${code})`);
       else if (code < 400) noteSuccess(name);
       upRes.pipe(res);
     });
@@ -1244,7 +1518,14 @@ server.listen(PORT, HOST, () => {
   }
 });
 
+// Ending the streams before exiting matters: a client that sees its SSE stream close cleanly
+// treats it as "reconnect", while a dropped TCP connection reads as a transport fault and some
+// clients latch on that permanently. This only helps a graceful stop — a force-kill runs no
+// handler at all, which is why the supervisor should ask rather than kill.
 function shutdown() {
+  shuttingDown = true; // stop warm-pool refills racing the exit
+  for (const s of sessions.values()) { try { s.res?.end(); } catch { /* already gone */ } }
+  for (const s of httpSessions.values()) { try { s.sseRes?.end(); } catch { /* already gone */ } }
   for (const s of sessions.values()) killTree(s.child, true);
   for (const s of httpSessions.values()) killTree(s.child, true);
   for (const arr of warmPool.values()) for (const c of arr) killTree(c, true);
