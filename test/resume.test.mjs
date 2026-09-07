@@ -96,7 +96,31 @@ test('an explicit DELETE is final: the session does not come back', async (t) =>
   await req(port, 'DELETE', '/echo/mcp', { headers: { 'mcp-session-id': sid } });
 
   const after = await req(port, 'POST', '/echo/mcp', { headers: { ...rpc, 'mcp-session-id': sid }, body: listBody });
-  assert.equal(after.status, 404, 'a deleted session must not be resurrected');
+  assert.equal(after.status, 404, 'a deleted session must not be resurrected; spec requires 404 so the client re-initializes');
+});
+
+// MCP 2025-11-25 (and every session-bearing revision back to 2025-03-26), Streamable HTTP /
+// Session Management: a server that has terminated a session MUST answer 404 for that id,
+// because §4 makes "re-initialize on 404" a client MUST. 410 reads better to a human but strands
+// a compliant client in undefined behaviour, which is the exact failure this bridge exists to
+// avoid. This test exists to stop that "improvement" being made.
+test('a terminated session is 404, never 410 — the spec makes 404 the recovery signal', async (t) => {
+  const { cfg } = makeConfig();
+  const port = 8818;
+  const child = await boot(port, cfg);
+  t.after(() => killBridge(child));
+
+  const init = await req(port, 'POST', '/echo/mcp', { headers: rpc, body: initBody });
+  const known = init.headers['mcp-session-id'];
+  await req(port, 'DELETE', '/echo/mcp', { headers: { 'mcp-session-id': known } });
+
+  const gone = await req(port, 'POST', '/echo/mcp', { headers: { ...rpc, 'mcp-session-id': known }, body: listBody });
+  const never = await req(port, 'POST', '/echo/mcp', { headers: { ...rpc, 'mcp-session-id': 'never-existed-0000' }, body: listBody });
+
+  assert.equal(gone.status, 404, 'a session we know we terminated must still be 404');
+  assert.equal(never.status, 404, 'an id we never issued is also 404');
+  assert.notEqual(gone.body, never.body, 'the body must still tell an operator which case it is');
+  assert.match(gone.body, /re-initialize/i, 'the known-gone body says what the client should do');
 });
 
 test('recycle is transparent: the client keeps using its session id', async (t) => {
@@ -190,7 +214,7 @@ test('a record past the retention window is not resumable, and is dropped from d
   // Now age the record past the window, with the bridge still running the whole time.
   await sleep(3000);
   const outside = await req(port, 'POST', '/echo/mcp', { headers: { ...rpc, 'mcp-session-id': sid }, body: listBody });
-  assert.equal(outside.status, 404, 'a session id older than the retention window must not be resumed');
+  assert.equal(outside.status, 404, 'an expired id must 404 so a spec-compliant client re-initializes');
 
   const onDisk = JSON.parse(readFileSync(join(tmp, 'sessions.json'), 'utf8'));
   assert.equal(Object.prototype.hasOwnProperty.call(onDisk, sid), false,

@@ -18,7 +18,11 @@ export interface ServerStat {
   clients?: string[];
   sharing?: string;
   warm?: number;
+  spawn?: { samples: number; p50Ms: number; p95Ms: number; maxMs: number } | null;
+  peakConcurrency?: number;
+  advice?: { reason: string; suggest: { sharing: string; minWarm: number } } | null;
   maxSessions?: number | null;
+  cappedSessions?: number;
   health?: ServerHealth;
 }
 
@@ -29,5 +33,6 @@ export interface Snapshot {
   port: number;
   uptimeSec: number;
   sessions: number;
+  restart?: { sinceSec: number; resumable: number; staleClients: number } | null;
   servers: ServerStat[];
 }

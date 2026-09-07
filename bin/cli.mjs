@@ -564,7 +564,11 @@ async function cmdStatus() {
         const api = await httpGet(`http://127.0.0.1:${port}/api/status`);
         if (api && api.status === 200) {
           try {
-            const list = JSON.parse(api.body).servers;
+            const snap = JSON.parse(api.body);
+            const list = snap.servers;
+            if (snap.restart && snap.restart.staleClients > 0) {
+              warn(`  bridge restarted ${Math.round(snap.restart.sinceSec / 60)}m ago — ${snap.restart.staleClients} client(s) have not reconnected; they may need an MCP reload`);
+            }
             const failing = list.filter((sv) => sv.health && sv.health.state === 'failing');
             for (const sv of failing) err(`    ${sv.name}: failing — ${sv.health.consecutiveFailures} in a row: ${sv.lastError}`);
             for (const sv of list) { if (sv.sessions || (sv.clients && sv.clients.length)) info(`    ${sv.name}: ${sv.sessions} session(s)${sv.clients && sv.clients.length ? `  agents=[${sv.clients.join(', ')}]` : ''}`); }
@@ -640,7 +644,21 @@ async function cmdDoctor() {
       if (svc === 'mcp-pacemaker') {
         ok(`bridge reachable on :${port} (mcp-pacemaker)`);
         const api = await httpGet(`http://127.0.0.1:${port}/api/status`);
-        if (api && api.status === 200) { try { const agents = [...new Set(JSON.parse(api.body).servers.flatMap((sv) => sv.clients || []))]; if (agents.length) info(`    connected agents: ${agents.join(', ')}`); } catch { /* noop */ } }
+        if (api && api.status === 200) {
+          try {
+            const snap = JSON.parse(api.body);
+            const agents = [...new Set(snap.servers.flatMap((sv) => sv.clients || []))];
+            if (agents.length) info(`    connected agents: ${agents.join(', ')}`);
+            // Cold start is invisible to the person paying for it: they experience "this tool is
+            // slow", not "spawning costs 20s". Naming the number and the exact config that would
+            // fix it is the whole point of measuring — but enabling it is theirs to decide.
+            for (const sv of snap.servers) {
+              if (!sv.advice) continue;
+              warn(`  ${sv.name}: ${sv.advice.reason}${sv.peakConcurrency ? `, peak ${sv.peakConcurrency} concurrent` : ''}`);
+              info(`    consider: "sharing": "pool", "minWarm": ${sv.advice.suggest.minWarm}  (in ${CONFIG})`);
+            }
+          } catch { /* noop */ }
+        }
       }
       else warn(`:${port} responds but is NOT an mcp-pacemaker bridge (foreign service)`);
     } else warn(`bridge not reachable on :${port} (start with "mcp-pacemaker start")`);

@@ -5,6 +5,94 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-04
+
+### Added
+
+- **Cold start is measured.** The bridge spawns every child, so it is the only thing positioned
+  to know what starting a server actually costs — and it was throwing that away. `/api/status`
+  and the dashboard now report p50/p95/max spawn time per server, timed from `spawn()` to the
+  server answering `initialize`, because a process existing says nothing about the package
+  manager work that follows it. On the author's machine one server measured a 20s cold start
+  while the pre-warm pool sat empty and a server that starts in 200ms had a full one.
+
+- **A gate on concurrent cold starts** (`MCP_MAX_CONCURRENT_SPAWNS`, default 2). Servers launched
+  through `npx`, `uvx` or `dnx` share one package cache, and starting several at once can corrupt
+  it: 17 simultaneous `npx` invocations here produced `npm error code ECOMPROMISED / Lock
+  compromised` and failed every one of those sessions. No server definition can fix that — it is
+  a property of the concurrency — so the bridge queues cold starts instead. The slot is held
+  until the child first speaks, which is when the expensive part is over.
+
+- **Pooling advice, never pooling by default.** When a server's measured cold start passes
+  `MCP_POOL_ADVICE_MS` (2s), `doctor` and the dashboard name the number and print the exact
+  config that would hide it, sized from observed peak concurrency. It is not applied: a warm pool
+  costs a resident process per slot, and that is the user's call to make. Cold start is otherwise
+  invisible to the person paying for it, who just experiences a slow tool.
+
+- **Pools size themselves once you opt in.** `sharing: "pool"` with no `minWarm` now targets peak
+  concurrent sessions over the last hour, capped by `MCP_WARM_MAX` (8). An explicit `minWarm`
+  still wins. Defaulting to one warm child is how a burst of 17 sessions ended up paying 16 cold
+  starts on a server that was configured to pool.
+
+- **Restart reporting.** `/api/status` carries how long ago the bridge restarted and how many
+  clients held a session before it and have not come back; `status` warns and the dashboard shows
+  a banner. The bridge re-establishes those sessions correctly, but some clients treat a single
+  connection failure as permanent and need an MCP reload — this says who.
+
+- `cappedSessions` alongside `sessions`, so a server's count matches the cap actually enforced.
+  The cap counts Streamable HTTP sessions while the display summed those and classic SSE, which
+  is how a server showed `33/32`.
+
+### Changed
+
+- **A 401 or 403 only counts against health when the bridge holds the credential.** For a server
+  with `auth: {type: none}` the *client* authenticates, so an opening 401 is the handshake
+  working as designed. Counting it flipped a healthy server to `failing` every 60 seconds. The
+  rule is now the one that matters: failing means the tool actually failed.
+
+- **The bridge's own 503 counts as a failure.** Refusing a session at the concurrency cap is the
+  most client-visible failure the bridge produces, and it was invisible to health — an operator
+  saw a healthy server while the bridge was the thing saying no.
+
+- A terminated session still answers **404**, per the transport spec, which makes re-initializing
+  on 404 a client MUST. An earlier revision of this work returned 410 for sessions known to be
+  gone; it reads better to a human and strands a compliant client, since 410 has no defined
+  recovery behaviour. The distinction moved to the response body and the log, where a client is
+  not allowed to care about it.
+
+### Fixed
+
+- **A warm pool never refilled after a child died on its own.** The exit handler removed the
+  corpse and stopped; refill only ran on boot, on take, on recycle and on reload. A pooled server
+  that went quiet drained to empty and stayed there, silently degrading to a cold spawn per
+  session — the exact failure pooling exists to prevent, and invisible because an empty pool
+  looks like one nobody has asked for anything yet. Seen here as one server sitting at `warm: 0`
+  for three hours while another with identical config stayed full purely because it was busy.
+  Refill now happens on an unattended exit, with backoff so a child that dies instantly cannot
+  become a spawn loop.
+
+- **A pooled server counted every failure twice.** A warm child adopted into a session kept the
+  pool's exit handler and gained the session's, and both reported the exit — so an identical
+  server lost health twice as fast for having been pooled.
+
+- **A pool refilled one child per take,** so a burst that emptied it recovered long after the
+  burst was over. Refill now runs toward the target in one pass, bounded by the spawn gate.
+
+- A static `authorization` header did not mark a server as bridge-authenticated, so its 401 read
+  as `unknown` forever and its challenge was relayed to a client that could not act on it.
+
+- The health probe no longer calls servers the bridge does not authenticate.
+
+- SSE streams are closed on shutdown instead of dropped. A clean close reads as "reconnect" to a
+  client; a dropped TCP connection reads as a transport fault, and some clients latch on that.
+
+- A failed request names the credential source it actually used — `audience X`, `auth.command`,
+  or the configured `authorization` header — rather than a generic message.
+
+- `staleClients` counts only clients that were active near the restart. It counted every resume
+  record predating the restart, and the resume file holds a day of churn — one polling client
+  left hundreds of dead ids, so a restart reported 326 stale clients where there were three.
+
 ## [1.1.0] - 2026-09-03
 
 ### Added
@@ -237,5 +325,6 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
+[1.2.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.2.0
 [1.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.1.0
 [1.0.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.0.0
