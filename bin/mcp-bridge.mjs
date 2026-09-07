@@ -641,21 +641,70 @@ const peakConcurrency = (name) => {
 // corrupted: 17 simultaneous `npx` invocations on one machine produced
 // `npm error code ECOMPROMISED / Lock compromised`, and every one of those sessions failed. No
 // server definition can fix that — it is a property of the concurrency, not of any one command —
-// so the bridge has to own it. Queuing a cold start behind another is strictly better than both
-// of them corrupting the cache; the init budget still bounds the wait. Global rather than
-// per-server because the cache they fight over is shared across servers.
+// so the bridge has to own it. Global rather than per-server, because the cache is shared across
+// servers.
+//
+// Two limits on how far this is allowed to go, both learned by getting it wrong:
+//
+// 1. Only commands that actually go through a package manager are gated. A plain `node server.js`
+//    shares no cache and was never at risk, and gating it put a global semaphore in front of every
+//    cold start — including a test that opens 60 sessions in a loop, which then took the full
+//    180s init budget and failed on CI.
+// 2. Waiting for a slot is bounded. If one does not come free in time the spawn proceeds anyway:
+//    a corrupted cache is a risk, but hanging a client request is a certainty, and the whole
+//    point of this bridge is that a client request does not hang.
 const MAX_CONCURRENT_SPAWNS = Number(process.env.MCP_MAX_CONCURRENT_SPAWNS ?? 2);
-const spawnGate = { active: 0, queue: [] };
-function acquireSpawn() {
-  if (MAX_CONCURRENT_SPAWNS <= 0) return Promise.resolve();
-  if (spawnGate.active < MAX_CONCURRENT_SPAWNS) { spawnGate.active++; return Promise.resolve(); }
-  return new Promise((r) => spawnGate.queue.push(r));
+const SPAWN_GATE_WAIT_MS = Number(process.env.MCP_SPAWN_GATE_WAIT_MS ?? 15_000);
+const PACKAGE_RUNNERS = /(^|[\\/])(npx|pnpx|bunx|uvx|pipx|dnx)(\.cmd|\.exe|\.ps1)?$/i;
+function usesSharedPackageCache(def) {
+  if (!def || !def.command) return false;
+  // Explicit wins: a wrapper script that shells out to a package manager is invisible to the
+  // heuristic below, and its author is the only one who knows.
+  if (typeof def.sharedPackageCache === 'boolean') return def.sharedPackageCache;
+  if (PACKAGE_RUNNERS.test(def.command)) return true;
+  // `npm exec`, `pnpm dlx`, `yarn dlx`, `uv run` — the runner is the first argument.
+  const first = (def.args && def.args[0]) || '';
+  return /^(npm|pnpm|yarn|uv|pip)$/i.test(def.command) && /^(exec|dlx|run|x)$/i.test(first);
 }
-function releaseSpawn() {
-  if (MAX_CONCURRENT_SPAWNS <= 0) return;
-  const next = spawnGate.queue.shift();
-  if (next) next(); // hand the slot straight over rather than dropping and re-taking it
-  else spawnGate.active = Math.max(0, spawnGate.active - 1);
+
+const spawnGate = { active: 0, queue: [] };
+// One release per acquisition, idempotent, so a double call cannot inflate the pool and a
+// throw between acquire and release cannot strand a slot forever.
+function makeRelease() {
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const next = spawnGate.queue.shift();
+    if (next) next(); // hand the slot straight over rather than dropping and re-taking it
+    else spawnGate.active = Math.max(0, spawnGate.active - 1);
+  };
+}
+const NOOP_RELEASE = () => {};
+function acquireSpawn() {
+  if (MAX_CONCURRENT_SPAWNS <= 0) return Promise.resolve(NOOP_RELEASE);
+  if (spawnGate.active < MAX_CONCURRENT_SPAWNS) {
+    spawnGate.active++;
+    return Promise.resolve(makeRelease());
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const waiter = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(makeRelease());
+    };
+    spawnGate.queue.push(waiter);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const i = spawnGate.queue.indexOf(waiter);
+      if (i >= 0) spawnGate.queue.splice(i, 1);
+      resolve(NOOP_RELEASE); // proceed ungated rather than hold the caller any longer
+    }, SPAWN_GATE_WAIT_MS);
+    timer.unref?.();
+  });
 }
 
 // Pooling stays opt-in: the bridge says what it would cost and what it would size to, and the
@@ -705,9 +754,14 @@ const poolTarget = (name) => {
 // being serialized is the package manager's, which happens after the process exists and before
 // it says anything. First output is the cheapest available proxy for "the expensive part is
 // over"; the timeout stops a silent child from wedging the gate.
-function releaseOnReady(child, maxMs = 30_000) {
+function releaseOnReady(child, release, maxMs = 30_000) {
   let done = false;
-  const rel = () => { if (done) return; done = true; clearTimeout(timer); releaseSpawn(); };
+  const rel = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    release();
+  };
   const timer = setTimeout(rel, maxMs);
   timer.unref?.();
   child.stdout?.once('data', rel);
@@ -769,7 +823,9 @@ function refillPool(name) {
   // the window pooling exists to cover. The spawn gate decides how many actually start at once.
   while (arr.length + (warmPending.get(name) || 0) < target) {
     warmPending.set(name, (warmPending.get(name) || 0) + 1);
-    acquireSpawn().then(() => {
+    const gated = usesSharedPackageCache(servers[name]);
+    const slot = gated ? acquireSpawn() : Promise.resolve(NOOP_RELEASE);
+    slot.then((release) => {
       warmPending.set(name, Math.max(0, (warmPending.get(name) || 1) - 1));
       const want = poolTarget(name);
       const cur = warmPool.get(name);
@@ -779,13 +835,13 @@ function refillPool(name) {
       const alreadyMet = cur && cur.length >= want;
       if (noLongerWanted ||
           alreadyMet) {
-        releaseSpawn();
+        release();
         return;
       }
       const child = spawnWarm(name);
       cur.push(child);
       log(`[${name}] pre-warmed pool child (${cur.length}/${want})`);
-      releaseOnReady(child);
+      releaseOnReady(child, release);
     });
   }
 }
@@ -1201,13 +1257,25 @@ function handleStreamable(name, req, res) {
           return;
         }
         const warm = takeWarm(name);
-        // Only a cold spawn passes through the gate — adopting a warm child spawns nothing,
-        // which is the whole point of having warmed it. Released on first output rather than
-        // manually, so no early return path can leak a slot.
-        if (!warm) await acquireSpawn();
-        sessionId = startStreamableChild(name, warm);
-        session = httpSessions.get(sessionId);
-        if (!warm) { session.cold = true; releaseOnReady(session.child); }
+        // Only a cold spawn of a package-manager-backed server passes through the gate. Adopting
+        // a warm child spawns nothing, and a plain `node server.js` shares no cache — gating
+        // either one just puts a global semaphore in front of work that was never at risk.
+        const gated = !warm && usesSharedPackageCache(servers[name]);
+        const release = gated ? await acquireSpawn() : NOOP_RELEASE;
+        try {
+          sessionId = startStreamableChild(name, warm);
+          session = httpSessions.get(sessionId);
+        } catch (e) {
+          release(); // a throw here must not strand the slot for the life of the process
+          throw e;
+        }
+        if (!session) {
+          release();
+          res.writeHead(500).end('failed to start session');
+          return;
+        }
+        if (!warm) session.cold = true;
+        if (gated) releaseOnReady(session.child, release);
         noteConcurrency(name, sessionCount(name));
       }
       session.lastActivity = Date.now();
