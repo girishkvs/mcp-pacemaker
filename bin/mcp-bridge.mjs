@@ -585,6 +585,15 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
   child.on('exit', (code) => {
     noteExit(name, child, code);
     log(`[${name}] streamable session ${sessionId.slice(0, 8)} exited (code ${code})`);
+    // A child that dies with requests in flight must fail them now. Nothing did, so the caller
+    // waited out the full budget — 180s for an initialize — for an answer that could never come.
+    // A config reload recycling a server mid-request hits this exactly, and it surfaced as a
+    // three-minute CI hang rather than as the immediate failure it is.
+    for (const [id, p] of session.pending) {
+      clearTimeout(p.timer);
+      p.resolve({ jsonrpc: '2.0', id, error: { code: -32000, message: `bridge: server exited (code ${code}) before answering` } });
+    }
+    session.pending.clear();
     if (session.sseRes) { try { session.sseRes.end(); } catch { /* noop */ } }
     // The same session id may already have been re-established on a fresh child by the time this
     // fires: `taskkill /F /T` takes about a second on Windows, so a reap followed by a resume
@@ -975,8 +984,12 @@ const lastRecycle = new Map();
 
 function recycleServer(name) {
   let killed = 0;
-  for (const s of sessions.values()) if (!name || s.name === name) { killTree(s.child); killed++; }
-  for (const s of httpSessions.values()) if (!name || s.name === name) { killTree(s.child); killed++; }
+  // A session with a request in flight is left alone, the same rule the idle reaper already
+  // follows: killing the child underneath a caller means it waits for a reply that can never
+  // arrive. Its credential is replaced on the next request instead, which is a moment later.
+  const busy = (s) => s.pending && s.pending.size > 0;
+  for (const s of sessions.values()) if ((!name || s.name === name) && !busy(s)) { killTree(s.child); killed++; }
+  for (const s of httpSessions.values()) if ((!name || s.name === name) && !busy(s)) { killTree(s.child); killed++; }
   // Warm children hold the same stale credential, so they have to go too, or a recycled server
   // is immediately replaced by a pre-spawned copy of what was just discarded.
   for (const n of (name ? [name] : Object.keys(servers))) {
@@ -1307,6 +1320,9 @@ function handleStreamable(name, req, res) {
       // are the actual reason and must not be overwritten by the symptom.
       if (results.some((r) => r && r.error && r.error.code === -32001)) {
         if (session.child.exitCode === null && session.child.signalCode === null) noteFailure(name, 'upstream timeout');
+      } else if (results.some((r) => r && r.error && r.error.code === -32000)) {
+        // The child exited mid-request. Its exit handler already recorded the real reason with
+        // the stderr tail, so counting it again here would report one dead child as two failures.
       } else {
         noteSuccess(name);
         // A cold start is only measurable once the server has answered: spawn() returning tells
