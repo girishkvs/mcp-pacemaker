@@ -164,3 +164,29 @@ test('a slow server is measured and recommended for pooling, but never pooled au
   assert.equal(s.sharing, 'isolated', 'but the bridge must not enable pooling on its own');
   assert.equal(s.warm, 0, 'and must not have pre-spawned anything');
 });
+
+// The failure that took two CI runs to find. A child that exits with a request in flight left
+// the caller waiting out the full budget - 180s for an initialize - for a reply that could never
+// arrive. A config reload recycling a server mid-request hits this, and it surfaced as a
+// three-minute hang instead of the immediate failure it is.
+test('a child that exits mid-request fails it now, not after the timeout', async (t) => {
+  const port = 8867;
+  const def = { command: 'node', args: [FIXTURE] };
+  const { child } = await boot(port, { dying: def }, { MCP_REQUEST_TIMEOUT_MS: '30000', MCP_INIT_TIMEOUT_MS: '60000' });
+  t.after(() => killBridge(child));
+
+  const init = await req(port, 'POST', '/dying/mcp', { headers: rpc, body: initBody });
+  const sid = init.headers['mcp-session-id'];
+  assert.ok(sid, 'session established');
+
+  const started = Date.now();
+  const r = await req(port, 'POST', '/dying/mcp', {
+    headers: { ...rpc, 'mcp-session-id': sid },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'crash/now' }),
+  });
+  const elapsed = Date.now() - started;
+
+  const msg = JSON.parse((r.body.match(/data: (.*)/) || [null, r.body])[1]);
+  assert.ok(msg.error, 'a dead child must produce an error, not a hang');
+  assert.ok(elapsed < 10000, `must fail as soon as the child exits, took ${elapsed}ms`);
+});
