@@ -107,7 +107,9 @@ test('a pooled session child that dies is counted as one failure, not two', asyn
 test('concurrent cold starts are serialized by the spawn gate', async (t) => {
   const port = 8864;
   const DELAY = 1200;
-  const def = { command: 'node', args: [FIXTURE, '--startup-delay', String(DELAY)] };
+  // `sharedPackageCache` marks this as the kind of server the gate exists for. A real one is an
+  // `npx`/`uvx` command; the flag lets the test say so without invoking a package manager.
+  const def = { command: 'node', args: [FIXTURE, '--startup-delay', String(DELAY)], sharedPackageCache: true };
   const { child } = await boot(port, { slow: def }, { MCP_MAX_CONCURRENT_SPAWNS: '2', MCP_INIT_TIMEOUT_MS: '60000' });
   t.after(() => killBridge(child));
 
@@ -120,6 +122,27 @@ test('concurrent cold starts are serialized by the spawn gate', async (t) => {
   // 4 spawns, 2 at a time, each blocking for DELAY => at least two batches.
   assert.ok(elapsed >= DELAY * 2, `4 spawns at a gate of 2 must take >= 2 batches, took ${elapsed}ms`);
   assert.ok(elapsed < DELAY * 6, `serialization must not be pathological, took ${elapsed}ms`);
+});
+
+// The gate exists to protect a shared package-manager cache. A server that does not use one was
+// never at risk, and gating it put a global semaphore in front of every cold start in the bridge:
+// a test opening sessions in a loop then consumed the whole init budget and failed on CI. Cost of
+// getting this wrong is a hung client request, so the scoping is worth pinning.
+test('a server that uses no package manager is not gated', async (t) => {
+  const port = 8866;
+  const DELAY = 1200;
+  const def = { command: 'node', args: [FIXTURE, '--startup-delay', String(DELAY)] };
+  const { child } = await boot(port, { plain: def }, { MCP_MAX_CONCURRENT_SPAWNS: '1', MCP_INIT_TIMEOUT_MS: '60000' });
+  t.after(() => killBridge(child));
+
+  const started = Date.now();
+  const all = await Promise.all([0, 1, 2, 3].map(() =>
+    req(port, 'POST', '/plain/mcp', { headers: rpc, body: initBody })));
+  const elapsed = Date.now() - started;
+
+  assert.ok(all.every((r) => r.status === 200), 'all four start');
+  // Gate of 1 would force four sequential batches. Ungated they overlap and finish in about one.
+  assert.ok(elapsed < DELAY * 2.5, `plain servers must start concurrently, took ${elapsed}ms`);
 });
 
 // Pooling costs a resident process per warm slot, so the bridge measures and recommends but does

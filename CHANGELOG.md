@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a property of the concurrency — so the bridge queues cold starts instead. The slot is held
   until the child first speaks, which is when the expensive part is over.
 
+  Only servers that actually use a package manager are gated; a plain `node server.js` shares no
+  cache and was never at risk. Detection is from the command, and per-server
+  `sharedPackageCache` forces it either way for a wrapper script the heuristic cannot see.
+  Waiting for a slot is bounded by `MCP_SPAWN_GATE_WAIT_MS` (15s) — past that the spawn proceeds
+  ungated, because a corrupted cache is a risk while a hung client request is a certainty.
+
 - **Pooling advice, never pooling by default.** When a server's measured cold start passes
   `MCP_POOL_ADVICE_MS` (2s), `doctor` and the dashboard name the number and print the exact
   config that would hide it, sized from observed peak concurrency. It is not applied: a warm pool
