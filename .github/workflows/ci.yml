@@ -39,6 +39,12 @@ jobs:
           node --check bin/cli.mjs
           node --check bin/top.mjs
           node --check bin/config-checks.mjs
+          node --check bin/server-metrics.mjs
+          node --check bin/pooling-config.mjs
+          node --check bin/pooling-writer.mjs
+          node --check bin/prewarm.mjs
+          node --check bin/logs.mjs
+          node --check bin/shared-sessions.mjs
       - name: Test
         run: npm test
 
@@ -55,4 +61,5 @@ jobs:
         working-directory: ui
         run: |
           npm ci
+          npm run typecheck
           npm run build

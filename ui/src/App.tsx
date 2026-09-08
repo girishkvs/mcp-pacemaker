@@ -4,6 +4,8 @@ import { useReqHistory } from './hooks/useReqHistory';
 import { ServerCard } from './components/ServerCard';
 import { LogDrawer } from './components/LogDrawer';
 import { HealthPage } from './components/HealthPage';
+import { PrewarmingPage } from './components/PrewarmingPage';
+import { usePoolingActions } from './hooks/usePoolingActions';
 import type { Snapshot } from './types';
 
 function fmtUptime(sec: number): string {
@@ -14,10 +16,11 @@ function fmtUptime(sec: number): string {
 }
 
 export default function App() {
-  const { data, connected } = useEventSource<Snapshot>('/api/events');
+  const { data, connected, setData } = useEventSource<Snapshot>('/api/events');
   const history = useReqHistory(data);
-  const [view, setView] = useState<'dashboard' | 'health'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pre-warming' | 'health'>('dashboard');
   const servers = data?.servers ?? [];
+  const poolingActions = usePoolingActions(data, connected, setData);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -28,7 +31,7 @@ export default function App() {
             <span>mcp-pacemaker</span>
           </div>
           <nav className="flex gap-1">
-            {(['dashboard', 'health'] as const).map((v) => (
+            {(['dashboard', 'pre-warming', 'health'] as const).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -72,11 +75,15 @@ export default function App() {
               <p className="col-span-full text-muted text-center p-16">{connected ? 'No servers configured.' : 'Connecting…'}</p>
             )}
             {servers.map((s) => (
-              <ServerCard key={s.name} s={s} history={history[s.name] ?? []} />
+              <ServerCard key={s.name} s={s} history={history[s.name] ?? []} poolingActions={poolingActions} poolingEnabled={connected && Boolean(data?.prewarm)} />
             ))}
           </main>
           <LogDrawer />
         </>
+      ) : view === 'pre-warming' ? (
+        <main className="flex-1">
+          <PrewarmingPage snapshot={data} actions={poolingActions} connected={connected} />
+        </main>
       ) : (
         <main className="flex-1">
           <HealthPage />

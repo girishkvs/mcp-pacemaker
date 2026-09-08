@@ -26,13 +26,17 @@
 import http from 'node:http';
 import https from 'node:https';
 import { spawn, exec, execFile, execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, renameSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { checkServerPaths, checkReservedName } from './config-checks.mjs';
+import { ServerMetrics } from './server-metrics.mjs';
+import { MAX_MIN_WARM } from './pooling-config.mjs';
+import { PoolingConfigWriter } from './pooling-writer.mjs';
+import { SharedSessionManager, SHARED_DEFAULTS } from './shared-sessions.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -54,9 +58,12 @@ const BASE_CWD = resolve(getArg('--cwd', dirname(CONFIG)));
 
 /** @type {Record<string, any>} */
 const servers = JSON.parse(readFileSync(CONFIG, 'utf8'));
+const poolingConfig = new PoolingConfigWriter(CONFIG);
 
 /* ----------------------------- dashboard backbone --------------------------- */
 const startedAt = Date.now();
+const instanceId = randomUUID();
+const serverMetrics = new ServerMetrics();
 const ADMIN_NONCE = randomUUID();
 const NONCE_FILE = resolve(dirname(CONFIG), 'admin.nonce');
 const logBuffer = [];
@@ -164,15 +171,40 @@ function richSnapshot() {
   for (const name of Object.keys(servers)) {
     const def = servers[name];
     const st = stat(name);
-    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, cappedSessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: def.maxSessions || MAX_SESSIONS_PER_SERVER || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null, health: healthOf(name), spawn: spawnStats(name), peakConcurrency: peakConcurrency(name), advice: poolAdvice(name) };
+    byName[name] = { name, type: def.type === 'http' ? 'http' : 'stdio', sessions: 0, cappedSessions: 0, pids: [], clients: [], sharing: def.sharing || 'isolated', warm: (warmPool.get(name) || []).length, minWarm: poolTarget(name), recycleMinutes: recycleMinutesFor(name) || null, maxSessions: (def.maxSessions ?? MAX_SESSIONS_PER_SERVER) || null, requests: st.requests, lastError: st.lastError, lastActivitySec: st.lastActivity ? Math.round((Date.now() - st.lastActivity) / 1000) : null, health: healthOf(name), spawn: spawnStats(name), peakConcurrency: peakConcurrency(name), advice: poolAdvice(name) };
+    byName[name].prewarming = prewarmingState(name);
+    byName[name].shared = sharedManager.inspect(name);
+    if (byName[name].shared?.pid) byName[name].pids.push(byName[name].shared.pid);
+    byName[name].startingSessions = startingSessions.get(name) || 0;
+    byName[name].cappedSessions += byName[name].startingSessions;
     if (def.type === 'http') { byName[name].url = def.url; byName[name].tokenExpiresIn = tokenExpiryFor(def); }
   }
   // `sessions` sums both transports for display, but `maxSessions` only governs the streamable
   // pool — so a classic SSE session made the card read "33/32" as though the cap had been
   // breached. Report the number the cap actually counts alongside it.
   for (const s of sessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; if (s.child?.pid) b.pids.push(s.child.pid); } }
-  for (const s of httpSessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; b.cappedSessions++; if (s.child?.pid) b.pids.push(s.child.pid); if (s.clientInfo && s.clientInfo.name && !b.clients.includes(s.clientInfo.name)) b.clients.push(s.clientInfo.name); } }
-  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, restart: restartStatus(), servers: Object.values(byName) };
+  for (const s of httpSessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; b.cappedSessions++; if (s.child?.pid && !b.pids.includes(s.child.pid)) b.pids.push(s.child.pid); if (s.clientInfo && s.clientInfo.name && !b.clients.includes(s.clientInfo.name)) b.clients.push(s.clientInfo.name); } }
+  const prewarm = { revision: createHash('sha256').update(lastConfigText ?? '').digest('hex'), maxWarm: MAX_MIN_WARM };
+  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, instanceId, startedAt: new Date(startedAt).toISOString(), prewarm, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, restart: restartStatus(), servers: Object.values(byName) };
+}
+
+function prewarmingState(name) {
+  const def = servers[name];
+  let reason;
+  if (def.type === 'http' ||
+      !def.command ||
+      def.url) {
+    reason = 'HTTP proxies have no local child to pre-warm.';
+  } else if (def.sharing === 'shared') {
+    reason = 'Shared mode reuses initialized children; switch to isolated mode before enabling a warm pool.';
+  }
+  const desired = poolAdvice(name)?.suggest.minWarm ?? poolTarget(name) ?? 1;
+  return {
+    eligible: !reason,
+    reason,
+    suggestedMinWarm: Math.max(1, Math.min(MAX_MIN_WARM, desired || 1)),
+    configuredMinWarm: def.minWarm ?? null,
+  };
 }
 
 // After a restart, a client whose session the bridge is holding open for it but which has not
@@ -257,6 +289,13 @@ function handleAdmin(url, req, res) {
   if (host !== '127.0.0.1' && host !== 'localhost') { res.writeHead(403).end('forbidden'); return; }
   if (req.headers['x-mcp-nonce'] !== ADMIN_NONCE) { res.writeHead(401).end('bad nonce'); return; }
   const parts = url.pathname.split('/').filter(Boolean); // ['admin','recycle'|'reload', <name>?]
+  if (req.method === 'POST' &&
+      parts.length === 4 &&
+      parts[1] === 'servers' &&
+      parts[3] === 'pooling') {
+    handlePoolingChange(parts[2], req, res);
+    return;
+  }
   if (req.method === 'POST' && parts[1] === 'reload') {
     const r = reloadConfig('admin request');
     res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
@@ -271,6 +310,80 @@ function handleAdmin(url, req, res) {
     return;
   }
   res.writeHead(404).end('unknown admin action');
+}
+
+function handlePoolingChange(encodedName, req, res) {
+  const reply = (status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+  };
+  if (shuttingDown) {
+    reply(503, { error: 'Bridge is shutting down.' });
+    req.resume();
+    return;
+  }
+  const origin = req.headers.origin;
+  if (origin &&
+      origin !== `http://${req.headers.host}`) {
+    reply(403, { error: 'Pooling changes require the dashboard origin.' });
+    req.resume();
+    return;
+  }
+  const chunks = [];
+  let bytes = 0;
+  let rejected = false;
+  req.on('error', () => {
+    rejected = true;
+    chunks.length = 0;
+    log('pooling request interrupted before completion');
+  });
+  req.on('data', (chunk) => {
+    if (rejected) return;
+    bytes += chunk.length;
+    if (bytes > 4096) {
+      rejected = true;
+      chunks.length = 0;
+      reply(413, { error: 'Pooling request exceeds 4096 bytes.' });
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', async () => {
+    if (rejected) return;
+    let body;
+    let name;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      name = decodeURIComponent(encodedName);
+    } catch {
+      reply(400, { error: 'Invalid JSON or server name.' });
+      return;
+    }
+    if (!body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.hasOwn(body, 'name')) {
+      reply(400, { error: 'A pooling request object is required; the route selects the server.' });
+      return;
+    }
+    try {
+      const result = Object.hasOwn(body, 'undoId')
+        ? await poolingConfig.undo({ ...body, name })
+        : await poolingConfig.apply({ ...body, name });
+      const reloaded = reloadConfig('pooling action');
+      if (!reloaded.ok) {
+        log(`[${name}] pooling settings saved but reload failed`);
+        reply(500, { error: 'Settings were saved, but could not be activated. Reread the config before retrying.', revision: result.revision });
+        return;
+      }
+      log(`[${name}] pooling ${Object.hasOwn(body, 'undoId') ? 'undo' : result.mode} applied`);
+      reply(200, { ...result, snapshot: richSnapshot() });
+    } catch (error) {
+      const status = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+      log(`pooling action rejected (${error.code || 'IO_ERROR'})`);
+      reply(status, { error: error.statusCode ? error.message : 'Unable to apply pooling settings.' });
+    }
+  });
 }
 
 /* ------------------------------ static dashboard ---------------------------- */
@@ -410,7 +523,7 @@ function quoteWinArg(s) {
 // Node doesn't re-quote it. This avoids `shell:true` (and its DEP0190 deprecation + arg-
 // injection footgun) while still resolving `.cmd` shims via PATHEXT. Absolute/`.exe` paths
 // and every non-Windows platform spawn the command directly with shell disabled.
-function spawnServer(def) {
+function spawnServer(name, def) {
   const args = def.args ?? [];
   const opts = {
     cwd: def.cwd ? resolve(BASE_CWD, def.cwd) : BASE_CWD,
@@ -418,9 +531,24 @@ function spawnServer(def) {
     stdio: ['pipe', 'pipe', 'pipe'],
   };
   const bareWin = process.platform === 'win32' && !/[\\/]/.test(def.command) && !/\.(exe|com)$/i.test(def.command);
-  const child = bareWin
-    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', '"' + [def.command, ...args].map(quoteWinArg).join(' ') + '"'], { ...opts, windowsVerbatimArguments: true })
-    : spawn(def.command, args, opts);
+  serverMetrics.attemptingSpawn(name);
+  let child;
+  try {
+    child = bareWin
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', '"' + [def.command, ...args].map(quoteWinArg).join(' ') + '"'], { ...opts, windowsVerbatimArguments: true })
+      : spawn(def.command, args, opts);
+  } catch (error) {
+    serverMetrics.failedSpawn(name);
+    throw error;
+  }
+  let spawned = false;
+  child.once('spawn', () => {
+    spawned = true;
+    serverMetrics.spawned(name);
+  });
+  child.once('error', () => {
+    if (!spawned) serverMetrics.failedSpawn(name);
+  });
   child.__spawnedAt = Date.now(); // start of the cold-start clock; stopped when initialize lands
   return child;
 }
@@ -455,6 +583,10 @@ function noteExit(name, child, code) {
 // kill() already targets the server itself.
 function killTree(child, sync = false) {
   if (!child) return;
+  if (child.__sharedSession) {
+    child.detach();
+    return;
+  }
   // Teardown we initiated. taskkill /F reports exit code 1, so without this every recycle,
   // idle reap and session close would be recorded as a crash.
   child.__bridgeKilled = true;
@@ -479,7 +611,8 @@ function killTree(child, sync = false) {
 function startChild(name, res) {
   const def = servers[name];
   const sessionId = randomUUID();
-  const child = spawnServer(def);
+  const child = spawnServer(name, def);
+  serverMetrics.openedSession(name);
   sessions.set(sessionId, { child, res, name });
   log(`[${name}] session ${sessionId.slice(0, 8)} started (pid ${child.pid ?? '?'})`);
 
@@ -507,6 +640,12 @@ function startChild(name, res) {
 // server->client SSE stream, DELETE to end. Unlike the SSE transport, one child persists
 // ACROSS posts (keyed by Mcp-Session-Id), so we route responses back by JSON-RPC id.
 const httpSessions = new Map(); // sessionId -> { child, name, pending, sseRes, lastActivity, clientInfo }
+const bridgeReplies = new WeakMap();
+function bridgeReply(id, code, message, kind) {
+  const reply = { jsonrpc: '2.0', id, error: { code, message } };
+  bridgeReplies.set(reply, kind);
+  return reply;
+}
 
 // How long the bridge waits for an upstream JSON-RPC response. `initialize` is separate
 // because it also pays for spawning the server: a cold start that downloads the server on
@@ -528,20 +667,43 @@ const MAX_SESSIONS_PER_SERVER = parseInt(process.env.MCP_MAX_SESSIONS_PER_SERVER
 // without limit. 0 disables waiting and rejects immediately.
 const QUEUE_TIMEOUT_MS = parseInt(process.env.MCP_QUEUE_TIMEOUT_MS || '10000', 10);
 const sessionCount = (name) => { let n = 0; for (const s of httpSessions.values()) if (s.name === name) n++; return n; };
+const startingSessions = new Map();
+
+function reserveSession(name, cap) {
+  const starting = startingSessions.get(name) || 0;
+  if (sessionCount(name) + starting >= cap) return false;
+  startingSessions.set(name, starting + 1);
+  return true;
+}
+
+function releaseSessionReservation(name) {
+  const remaining = (startingSessions.get(name) || 0) - 1;
+  if (remaining > 0) startingSessions.set(name, remaining);
+  else startingSessions.delete(name);
+  slotFreed(name);
+}
 
 // Resolve when a session slot is free for `name`, or false if the wait ran out.
 const waiters = new Map(); // name -> [resolve, ...]
 function slotFreed(name) {
   const q = waiters.get(name);
-  if (q && q.length) q.shift()(true);
+  if (q &&
+      q.length) q[0](true);
 }
 function awaitSlot(name, cap) {
-  if (sessionCount(name) < cap) return Promise.resolve(true);
+  if (reserveSession(name, cap)) return Promise.resolve(true);
   if (QUEUE_TIMEOUT_MS <= 0) return Promise.resolve(false);
   return new Promise((res) => {
     if (!waiters.has(name)) waiters.set(name, []);
     const q = waiters.get(name);
-    const done = (ok) => { const i = q.indexOf(done); if (i >= 0) q.splice(i, 1); clearTimeout(timer); res(ok); };
+    const done = (ok) => {
+      if (ok &&
+          !reserveSession(name, cap)) return;
+      const i = q.indexOf(done);
+      if (i >= 0) q.splice(i, 1);
+      clearTimeout(timer);
+      res(ok);
+    };
     const timer = setTimeout(() => done(false), QUEUE_TIMEOUT_MS);
     q.push(done);
   });
@@ -563,11 +725,33 @@ if (IDLE_TIMEOUT_MS > 0) {
   }, Math.min(IDLE_TIMEOUT_MS, 15000)).unref();
 }
 
+function writeSessionMessage(session, message) {
+  if (session.child.__sharedSession) {
+    session.child.writeMessage(message);
+  } else {
+    session.child.stdin.write(JSON.stringify(message) + '\n');
+  }
+}
+
+function writeSharedEvent(session, response, message) {
+  if (response.destroyed) return false;
+  const frame = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+  if (response.writableLength + Buffer.byteLength(frame) > session.sharedBufferLimit) {
+    log(`[${session.name}] shared response stream exceeded its buffer limit`);
+    response.destroy();
+    return false;
+  }
+  response.write(frame);
+  return true;
+}
+
 function startStreamableChild(name, warmChild, forcedSessionId) {
   const def = servers[name];
   const sessionId = forcedSessionId || randomUUID();
-  const child = warmChild || spawnServer(def);
+  const child = warmChild || spawnServer(name, def);
+  serverMetrics.openedSession(name, Boolean(forcedSessionId));
   const session = { child, name, pending: new Map(), sseRes: null, lastActivity: Date.now(), clientInfo: null };
+  session.sharedBufferLimit = def.sharedMaxBufferBytes ?? SHARED_DEFAULTS.sharedMaxBufferBytes;
   httpSessions.set(sessionId, session);
   const rl = createInterface({ input: child.stdout });
   rl.on('line', (line) => {
@@ -575,15 +759,35 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
     if (!t) return;
     let msg;
     try { msg = JSON.parse(t); } catch { log(`[${name}] (non-json stdout) ${t}`); return; }
-    const id = msg.id;
+    if (!msg ||
+        typeof msg !== 'object') {
+      log(`[${name}] ignored invalid upstream message`);
+      return;
+    }
+    const id = msg.method === undefined ? msg.id : undefined;
     const p = id != null ? session.pending.get(id) : undefined;
     if (p) { session.pending.delete(id); clearTimeout(p.timer); p.resolve(msg); }
-    else if (session.sseRes) { try { session.sseRes.write(`event: message\ndata: ${t}\n\n`); } catch { /* noop */ } }
+    else if (session.sseRes) {
+      if (child.__sharedSession) {
+        if (msg.method !== undefined) writeSharedEvent(session, session.sseRes, msg);
+      } else {
+        try { session.sseRes.write(`event: message\ndata: ${t}\n\n`); } catch { /* noop */ }
+      }
+    }
   });
   if (!warmChild) pipeStderr(name, child);
+  if (child.__sharedSession) {
+    child.on('sharedFailure', (detail) => { session.sharedFailure = detail; });
+    child.on('sharedProgress', ({ requestId, message }) => {
+      const pending = session.pending.get(requestId);
+      if (!pending?.stream ||
+          pending.stream.destroyed) return;
+      writeSharedEvent(session, pending.stream, message);
+    });
+  }
   child.on('error', (e) => { noteFailure(name, e.message); log(`[${name}] spawn error: ${e.message}`); });
   child.on('exit', (code) => {
-    noteExit(name, child, code);
+    if (!child.__sharedSession) noteExit(name, child, code);
     log(`[${name}] streamable session ${sessionId.slice(0, 8)} exited (code ${code})`);
     // A child that dies with requests in flight must fail them now. Nothing did, so the caller
     // waited out the full budget — 180s for an initialize — for an answer that could never come.
@@ -591,7 +795,11 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
     // three-minute CI hang rather than as the immediate failure it is.
     for (const [id, p] of session.pending) {
       clearTimeout(p.timer);
-      p.resolve({ jsonrpc: '2.0', id, error: { code: -32000, message: `bridge: server exited (code ${code}) before answering` } });
+      const reply = bridgeReply(id, -32000, `bridge: server exited (code ${code}) before answering`, 'exit');
+      if (session.sharedFailure) {
+        reply.error.data = { ...session.sharedFailure, phase: 'execution', execution: 'potentially-executed' };
+      }
+      p.resolve(reply);
     }
     session.pending.clear();
     if (session.sseRes) { try { session.sseRes.end(); } catch { /* noop */ } }
@@ -602,7 +810,7 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
     if (httpSessions.get(sessionId) === session) httpSessions.delete(sessionId);
     slotFreed(name); // a capped server may have a request waiting for this slot
   });
-  log(`[${name}] streamable session ${sessionId.slice(0, 8)} started (pid ${child.pid ?? '?'})`);
+  log(`[${name}] streamable session ${sessionId.slice(0, 8)} ${child.__sharedSession ? 'attached to shared child' : 'started'} (pid ${child.pid ?? '?'})`);
   return sessionId;
 }
 
@@ -611,20 +819,12 @@ function startStreamableChild(name, warmChild, forcedSessionId) {
 // start actually costs — and it was discarding that. Without it there is no way to tell a server
 // that starts in 200ms from one that shells out to a package manager and takes 20s, which is why
 // the pool ended up full for a fast server and empty for the slow one that needed it.
-const SPAWN_SAMPLES_MAX = 50;
-const spawnCost = new Map(); // name -> [ms, ...]
 function noteSpawnCost(name, ms) {
-  const arr = spawnCost.get(name) || [];
-  arr.unshift(ms);
-  if (arr.length > SPAWN_SAMPLES_MAX) arr.length = SPAWN_SAMPLES_MAX;
-  spawnCost.set(name, arr);
+  serverMetrics.initialized(name, ms);
 }
 function spawnStats(name) {
-  const arr = spawnCost.get(name);
-  if (!arr || !arr.length) return null;
-  const s = [...arr].sort((a, b) => a - b);
-  const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
-  return { samples: s.length, p50Ms: at(0.5), p95Ms: at(0.95), maxMs: s[s.length - 1] };
+  if (servers[name]?.type === 'http') return null;
+  return serverMetrics.snapshot(name);
 }
 
 // Rolling peak concurrency, so a pool can be sized from what a server is actually asked to do
@@ -725,6 +925,7 @@ function poolAdvice(name) {
   const def = servers[name];
   if (!def ||
       def.sharing === 'pool' ||
+      def.sharing === 'shared' ||
       def.type === 'http') {
     return null;
   }
@@ -744,7 +945,7 @@ function poolAdvice(name) {
 // For servers marked sharing:"pool", keep `minWarm` pre-spawned (un-initialized) children ready
 // so a new session adopts a warm child (process already started + imports loaded) instead of a
 // cold spawn. The warm child receives its FIRST initialize from the real client (safe — no
-// re-initialize). shared/multiplex is deferred R&D.
+// re-initialize). Shared mode instead retains one initialized child.
 const warmPool = new Map(); // name -> [child, ...]
 const warmPending = new Map(); // name -> spawns in flight, so a refill pass cannot double-order
 // Explicit minWarm always wins. Without one, size from observed peak concurrency — the number a
@@ -777,6 +978,81 @@ function releaseOnReady(child, release, maxMs = 30_000) {
   child.stderr?.once('data', rel);
   child.once('exit', rel);
 }
+
+const sharedManager = new SharedSessionManager({
+  async spawn(name, definition) {
+    const release = usesSharedPackageCache(definition) ? await acquireSpawn() : NOOP_RELEASE;
+    try {
+      if (shuttingDown ||
+          sharedManager.inspect(name)?.state !== 'starting') {
+        throw sharedManager.error('SHARED_RETIRED', 'spawn', 'unsent');
+      }
+      const child = spawnServer(name, definition);
+      pipeStderr(name, child);
+      releaseOnReady(child, release);
+      child.once('close', () => stderrTails.delete(child));
+      return child;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  },
+  kill: (child) => killTree(child, shuttingDown),
+  onFailure: (name, detail) => noteFailure(name, `shared: ${detail.kind}`),
+  onInitialized: (name, ms) => { noteSpawnCost(name, ms); noteSuccess(name); },
+  onResponse: (name) => noteSuccess(name),
+  log: (name, text) => log(`[${name}] ${text}`),
+  initTimeoutMs: INIT_TIMEOUT_MS,
+  requestTimeoutMs: REQUEST_TIMEOUT_MS,
+});
+sharedManager.on('draining', ({ name, generation, reason }) => log(`[${name}] shared generation ${generation} draining (${reason})`));
+sharedManager.on('retired', ({ name, generation, reason }) => log(`[${name}] shared generation ${generation} retired (${reason})`));
+
+async function startAdmittedSession(name, initializeParams, forcedSessionId, stillWanted) {
+  const definition = servers[name];
+  if (!definition) throw Object.assign(new Error('server was removed'), { statusCode: 404 });
+  const cap = definition.maxSessions ?? MAX_SESSIONS_PER_SERVER;
+  if (cap > 0 &&
+      !(await awaitSlot(name, cap))) {
+    noteFailure(name, `bridge refused a session: max sessions (${cap}) reached`);
+    throw Object.assign(new Error(`bridge: max sessions (${cap}) reached for ${name}`), { statusCode: 503 });
+  }
+  let candidate = null;
+  let release = NOOP_RELEASE;
+  try {
+    if (shuttingDown ||
+        servers[name] !== definition) {
+      throw Object.assign(new Error('server configuration changed while waiting for capacity; retry'), { statusCode: 409 });
+    }
+    if (!stillWanted()) return null;
+    if (definition.sharing === 'shared') {
+      candidate = await sharedManager.acquire(name, definition, initializeParams);
+    } else {
+      candidate = takeWarm(name);
+      if (!candidate &&
+          usesSharedPackageCache(definition)) release = await acquireSpawn();
+    }
+    if (shuttingDown ||
+        servers[name] !== definition) {
+      if (candidate) killTree(candidate);
+      throw Object.assign(new Error('server configuration changed while starting; retry'), { statusCode: 409 });
+    }
+    if (!stillWanted()) {
+      if (candidate) killTree(candidate);
+      return null;
+    }
+    const id = startStreamableChild(name, candidate, forcedSessionId);
+    const session = httpSessions.get(id);
+    session.cold = !candidate;
+    releaseOnReady(session.child, release);
+    release = NOOP_RELEASE;
+    noteConcurrency(name, sessionCount(name));
+    return { id, session };
+  } finally {
+    release();
+    if (cap > 0) releaseSessionReservation(name);
+  }
+}
 // A warm child can die on its own: a server that self-exits when idle, a crash, a laptop sleep.
 // The exit handler used to remove the corpse and stop there, and nothing else refilled — the pool
 // only grew on boot, on take, on recycle and on reload. So a pooled server silently degraded to
@@ -792,7 +1068,7 @@ const WARM_BACKOFF_CAP_MS = 60_000;
 const warmFastExits = new Map(); // name -> consecutive too-fast exits
 let shuttingDown = false;
 function spawnWarm(name) {
-  const child = spawnServer(servers[name]);
+  const child = spawnServer(name, servers[name]);
   const bornAt = Date.now();
   pipeStderr(name, child);
   child.on('exit', (code) => {
@@ -858,6 +1134,7 @@ function takeWarm(name) {
   const arr = warmPool.get(name);
   if (arr && arr.length) {
     const c = arr.shift();
+    serverMetrics.adoptedWarmChild(name);
     c.__warmTaken = true; // hand ownership to the session; the warm exit handler stands down
     warmFastExits.delete(name); // a child that survived to be used clears the backoff
     setImmediate(() => refillPool(name));
@@ -881,6 +1158,7 @@ const RESUME_ENABLED = process.env.MCP_RESUME !== '0';
 const RESUME_TTL_MS = parseInt(process.env.MCP_RESUME_TTL_MS || String(24 * 60 * 60 * 1000), 10);
 const RESUME_FILE = resolve(dirname(CONFIG), 'sessions.json');
 const resumable = new Map(); // sessionId -> { server, initialize, at }
+const resuming = new Map(); // sessionId -> handshake promise, before any asynchronous admission
 
 function saveResumable() {
   if (!RESUME_ENABLED) return;
@@ -938,6 +1216,7 @@ if (RESUME_ENABLED) {
 async function resumeSession(name, sessionId) {
   const rec = resumable.get(sessionId);
   if (!rec || rec.server !== name) return null;
+  if (resuming.has(sessionId)) return resuming.get(sessionId);
   // The retention window is a promise about how long a session id stays valid, so it has to be
   // checked here too — not only when the file is read at startup.
   if (Date.now() - (rec.at || 0) >= RESUME_TTL_MS) {
@@ -946,26 +1225,45 @@ async function resumeSession(name, sessionId) {
     saveResumable();
     return null;
   }
-  const cap = servers[name].maxSessions || MAX_SESSIONS_PER_SERVER;
-  if (cap > 0 && sessionCount(name) >= cap) return null;
+  const pending = restoreSession(name, sessionId, rec);
+  resuming.set(sessionId, pending);
+  try {
+    return await pending;
+  } finally {
+    if (resuming.get(sessionId) === pending) resuming.delete(sessionId);
+  }
+}
 
-  startStreamableChild(name, takeWarm(name), sessionId);
-  const session = httpSessions.get(sessionId);
+async function restoreSession(name, sessionId, rec) {
+  const stillWanted = () => resumable.get(sessionId) === rec && !goneSessions.has(sessionId);
+  const restored = await startAdmittedSession(name, rec.initialize, sessionId, stillWanted);
+  if (!restored) return null;
+  const { session } = restored;
   const initId = `bridge-resume-${randomUUID()}`;
   const reply = await new Promise((resolveWait) => {
     const timer = setTimeout(() => { session.pending.delete(initId); resolveWait(null); }, INIT_TIMEOUT_MS);
     session.pending.set(initId, { resolve: resolveWait, timer });
     try {
-      session.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: initId, method: 'initialize', params: rec.initialize }) + '\n');
+      writeSessionMessage(session, { jsonrpc: '2.0', id: initId, method: 'initialize', params: rec.initialize });
     } catch { clearTimeout(timer); session.pending.delete(initId); resolveWait(null); }
   });
-  if (!reply || reply.error) {
+  if (!reply ||
+      reply.error ||
+      !stillWanted()) {
     killTree(session.child);
-    httpSessions.delete(sessionId);
+    if (httpSessions.get(sessionId) === session) httpSessions.delete(sessionId);
+    slotFreed(name);
     log(`[${name}] could not resume session ${sessionId.slice(0, 8)}`);
-    return null;
+    if (!stillWanted()) return null;
+    throw Object.assign(new Error('bridge: session initialization failed'), { upstreamError: reply?.error, statusCode: 502 });
   }
-  try { session.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n'); } catch { /* noop */ }
+  writeSessionMessage(session, { jsonrpc: '2.0', method: 'notifications/initialized' });
+  session.clientInfo = rec.initialize.clientInfo ?? null;
+  session.protocolVersion = reply.result.protocolVersion;
+  if (session.cold) {
+    noteSpawnCost(name, Date.now() - session.child.__spawnedAt);
+    session.cold = false;
+  }
   rec.at = Date.now();
   saveResumable();
   log(`[${name}] resumed session ${sessionId.slice(0, 8)}`);
@@ -989,10 +1287,15 @@ function recycleServer(name) {
   // arrive. Its credential is replaced on the next request instead, which is a moment later.
   const busy = (s) => s.pending && s.pending.size > 0;
   for (const s of sessions.values()) if ((!name || s.name === name) && !busy(s)) { killTree(s.child); killed++; }
-  for (const s of httpSessions.values()) if ((!name || s.name === name) && !busy(s)) { killTree(s.child); killed++; }
+  for (const s of httpSessions.values()) {
+    if ((!name || s.name === name) &&
+        !s.child.__sharedSession &&
+        !busy(s)) { killTree(s.child); killed++; }
+  }
   // Warm children hold the same stale credential, so they have to go too, or a recycled server
   // is immediately replaced by a pre-spawned copy of what was just discarded.
   for (const n of (name ? [name] : Object.keys(servers))) {
+    if (sharedManager.recycle(n).found) killed++;
     for (const c of (warmPool.get(n) || []).slice()) killTree(c);
     setTimeout(() => refillPool(n), 1000).unref();
   }
@@ -1051,17 +1354,40 @@ function applyConfig(next) {
   // A changed or removed server's children were started from the old definition, so they are
   // stale. Untouched servers are deliberately not disturbed.
   for (const name of [...removed, ...changed]) {
+    if (next[name] &&
+        onlyPoolingPolicyChanged(servers[name], next[name])) {
+      continue;
+    }
     invalidateToken(servers[name]);
     restarted += recycleServer(name);
   }
   for (const name of removed) {
+    sharedManager.remove(name);
     delete servers[name];
     warmPool.delete(name); // recycleServer queued a refill; it must not resurrect a deleted server
   }
   for (const name of [...added, ...changed]) servers[name] = next[name];
-  for (const name of [...added, ...changed]) refillPool(name);
+  for (const name of [...added, ...changed]) {
+    const pool = warmPool.get(name);
+    const target = poolTarget(name);
+    while (pool &&
+           pool.length > 0 &&
+           pool.length > target) {
+      killTree(pool.pop());
+    }
+    refillPool(name);
+  }
   ensureRecycleTimer(); // a reload can add the first recycleMinutes, or shorten the interval
   return { added, removed, changed, restarted };
+}
+
+function onlyPoolingPolicyChanged(before, after) {
+  if (before.sharing === 'shared' ||
+      after.sharing === 'shared') {
+    return false;
+  }
+  const withoutPolicy = ({ sharing, minWarm, ...rest }) => rest;
+  return JSON.stringify(withoutPolicy(before)) === JSON.stringify(withoutPolicy(after));
 }
 
 let lastConfigText = (() => { try { return readFileSync(CONFIG, 'utf8'); } catch { return null; } })();
@@ -1212,6 +1538,12 @@ if (TOKEN_REFRESH_LEAD_MS > 0) {
 
 function handleStreamable(name, req, res) {
   const sid = req.headers['mcp-session-id'];
+  const boundName = httpSessions.get(sid)?.name ?? resumable.get(sid)?.server;
+  if (boundName &&
+      boundName !== name) {
+    res.writeHead(404).end('no such session');
+    return;
+  }
 
   if (req.method === 'GET') {
     const session = sid ? httpSessions.get(sid) : null;
@@ -1225,7 +1557,7 @@ function handleStreamable(name, req, res) {
 
   if (req.method === 'DELETE') {
     const session = sid ? httpSessions.get(sid) : null;
-    if (session) { killTree(session.child); httpSessions.delete(sid); }
+    if (session) { killTree(session.child); httpSessions.delete(sid); slotFreed(name); }
     // An explicit DELETE ends the session for good; it must not come back on the next request.
     if (sid) forgetSession(sid);
     res.writeHead(204).end();
@@ -1233,112 +1565,233 @@ function handleStreamable(name, req, res) {
   }
 
   if (req.method === 'POST') {
+    const definition = servers[name];
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let bytes = 0;
+    let tooLarge = false;
+    const shared = servers[name].sharing === 'shared';
+    const configuredLimit = servers[name].sharedMaxLineBytes;
+    const validLimit = Number.isSafeInteger(configuredLimit) && configuredLimit > 0;
+    const bodyLimit = shared ? Math.min(validLimit ? configuredLimit : SHARED_DEFAULTS.sharedMaxLineBytes, 16_777_216) : Infinity;
+    req.on('data', (chunk) => {
+      if (tooLarge) return;
+      bytes += chunk.length;
+      if (bytes > bodyLimit) {
+        tooLarge = true;
+        chunks.length = 0;
+        res.writeHead(413).end('shared request exceeds the input limit');
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', async () => {
+      if (tooLarge ||
+          res.destroyed) return;
+      if (servers[name] !== definition) {
+        res.writeHead(409).end('server configuration changed while receiving request; retry');
+        return;
+      }
       let parsed;
       try { parsed = JSON.parse(Buffer.concat(chunks).toString() || 'null'); } catch { res.writeHead(400).end('invalid json'); return; }
       const messages = Array.isArray(parsed) ? parsed : (parsed == null ? [] : [parsed]);
       const isInit = messages.some((m) => m && m.method === 'initialize');
-      let sessionId = sid;
-      let session = sid ? httpSessions.get(sid) : null;
-      if (!session && sid) {
-        // An id this process has not seen: it may predate a restart or a recycle.
-        session = await resumeSession(name, sid);
-        if (session) sessionId = sid;
+      const initMessage = messages.find((m) => m && m.method === 'initialize');
+      if (shared) {
+        const invalidMessage = messages.some((message) => !message ||
+          typeof message !== 'object' || Array.isArray(message) ||
+          message.jsonrpc !== '2.0' || typeof message.method !== 'string' ||
+          (Object.hasOwn(message, 'id') && !sharedManager.validId(message.id)));
+        const invalidInitialize = isInit && (Array.isArray(parsed) || messages.length !== 1 || !Object.hasOwn(initMessage, 'id'));
+        if (!messages.length ||
+            invalidMessage ||
+            invalidInitialize) {
+          res.writeHead(400).end('invalid shared JSON-RPC request');
+          return;
+        }
       }
-      if (!session) {
-        if (!isInit) {
-          // Both cases are 404 because the spec requires it, but they mean different things to
-          // an operator: a known-gone id is a client that outlived a restart, an unknown id is a
-          // client that never initialized here. Say which in the body and the log.
-          if (sid && goneSessions.has(sid)) {
-            log(`${name}: rejecting known-gone session ${sid} (client predates a restart; it must re-initialize)`);
-            res.writeHead(404).end('session terminated (re-initialize)');
-            return;
-          }
-          res.writeHead(404).end('no session (send initialize first)');
-          return;
-        }
-        const cap = servers[name].maxSessions || MAX_SESSIONS_PER_SERVER;
-        if (cap > 0 && !(await awaitSlot(name, cap))) {
-          // The most client-visible failure the bridge produces is its own: the client asked for
-          // a session and did not get one, so its command failed. Reporting this as healthy sent
-          // an operator looking at the upstream when the bridge was the one refusing.
-          noteFailure(name, `bridge refused a session: max sessions (${cap}) reached`);
-          res.writeHead(503).end(`bridge: max sessions (${cap}) reached for ${name}`);
-          return;
-        }
-        const warm = takeWarm(name);
-        // Only a cold spawn of a package-manager-backed server passes through the gate. Adopting
-        // a warm child spawns nothing, and a plain `node server.js` shares no cache — gating
-        // either one just puts a global semaphore in front of work that was never at risk.
-        const gated = !warm && usesSharedPackageCache(servers[name]);
-        const release = gated ? await acquireSpawn() : NOOP_RELEASE;
-        try {
-          sessionId = startStreamableChild(name, warm);
-          session = httpSessions.get(sessionId);
-        } catch (e) {
-          release(); // a throw here must not strand the slot for the life of the process
-          throw e;
+      try {
+        let sessionId = sid;
+        let session = sid ? httpSessions.get(sid) : null;
+        if (sid &&
+            (!session || resuming.has(sid))) {
+          // An id this process has not seen: it may predate a restart or a recycle.
+          session = await resumeSession(name, sid);
+          if (session) sessionId = sid;
         }
         if (!session) {
-          release();
-          res.writeHead(500).end('failed to start session');
+          if (!isInit) {
+            // Both cases are 404 because the spec requires it, but they mean different things to
+            // an operator: a known-gone id is a client that outlived a restart, an unknown id is a
+            // client that never initialized here. Say which in the body and the log.
+            if (sid &&
+                goneSessions.has(sid)) {
+              log(`${name}: rejecting known-gone session ${sid} (client predates a restart; it must re-initialize)`);
+              res.writeHead(404).end('session terminated (re-initialize)');
+              return;
+            }
+            res.writeHead(404).end('no session (send initialize first)');
+            return;
+          }
+          const started = await startAdmittedSession(name, initMessage.params, undefined, () => !res.destroyed);
+          if (!started) return;
+          ({ id: sessionId, session } = started);
+        }
+        session.lastActivity = Date.now();
+        if (session.child.__sharedSession) {
+          const wrongVersion = !isInit && req.headers['mcp-protocol-version'] &&
+            req.headers['mcp-protocol-version'] !== session.protocolVersion;
+          const unsupportedBatch = Array.isArray(parsed) && session.protocolVersion !== '2025-03-26';
+          if (wrongVersion ||
+              unsupportedBatch) {
+            res.writeHead(400).end('request does not match the negotiated shared protocol version');
+            return;
+          }
+        }
+        if (isInit) {
+          const im = messages.find((m) => m && m.method === 'initialize');
+          const ci = im && im.params && im.params.clientInfo;
+          if (ci) session.clientInfo = { name: ci.name, version: ci.version };
+        }
+        const requestIds = messages.filter((m) => m && m.id != null && m.method).map((m) => m.id);
+        if (new Set(requestIds).size !== requestIds.length ||
+            requestIds.some((id) => session.pending.has(id))) {
+          res.writeHead(400).end('duplicate pending JSON-RPC request id');
           return;
         }
-        if (!warm) session.cold = true;
-        if (gated) releaseOnReady(session.child, release);
-        noteConcurrency(name, sessionCount(name));
-      }
-      session.lastActivity = Date.now();
-      if (isInit) {
-        const im = messages.find((m) => m && m.method === 'initialize');
-        const ci = im && im.params && im.params.clientInfo;
-        if (ci) session.clientInfo = { name: ci.name, version: ci.version };
-        rememberSession(sessionId, name, im);
-      }
-      const requestIds = messages.filter((m) => m && m.id != null && m.method).map((m) => m.id);
-      // initialize is the request that pays for spawning the server, and a cold start can be
-      // slow (a package manager fetching the server on first run), so it gets a longer budget
-      // than steady-state calls.
-      const budget = isInit ? INIT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
-      const waits = requestIds.map((id) => new Promise((resolveWait) => {
-        const timer = setTimeout(() => {
-          if (session.pending.has(id)) { session.pending.delete(id); resolveWait({ jsonrpc: '2.0', id, error: { code: -32001, message: 'bridge: upstream timeout' } }); }
-        }, budget);
-        session.pending.set(id, { resolve: resolveWait, timer });
-      }));
-      try { for (const m of messages) session.child.stdin.write(JSON.stringify(m) + '\n'); }
-      catch { res.writeHead(500).end('write failed'); return; }
-      const headers = { 'Mcp-Session-Id': sessionId };
-      if (!requestIds.length) { res.writeHead(202, headers).end(); return; }
-      const results = await Promise.all(waits);
-      // A JSON-RPC error from the server is the server working — it answered. Only the bridge's
-      // own synthetic errors mean the server is unhealthy, and even then a timeout is worth
-      // recording only while the child is alive: if it already exited, its exit code and stderr
-      // are the actual reason and must not be overwritten by the symptom.
-      if (results.some((r) => r && r.error && r.error.code === -32001)) {
-        if (session.child.exitCode === null && session.child.signalCode === null) noteFailure(name, 'upstream timeout');
-      } else if (results.some((r) => r && r.error && r.error.code === -32000)) {
-        // The child exited mid-request. Its exit handler already recorded the real reason with
-        // the stderr tail, so counting it again here would report one dead child as two failures.
-      } else {
-        noteSuccess(name);
-        // A cold start is only measurable once the server has answered: spawn() returning tells
-        // us nothing about the package manager work that follows it. Recorded once per child.
-        const measurableColdStart = session.cold && isInit && session.child.__spawnedAt;
-        if (measurableColdStart) {
-          noteSpawnCost(name, Date.now() - session.child.__spawnedAt);
-          session.cold = false;
+        const headers = { 'Mcp-Session-Id': sessionId };
+        const hasProgress = messages.some((message) => message?.params?._meta &&
+          Object.hasOwn(message.params._meta, 'progressToken'));
+        const stream = session.child.__sharedSession && requestIds.length > 0 && hasProgress;
+        const arrayResponse = requestIds.length > 1 || (session.child.__sharedSession && Array.isArray(parsed));
+        let resultBytes = arrayResponse ? 1 : 0;
+        let responseOverflow = false;
+        const collect = (resolveWait, reply) => {
+          if (responseOverflow) { resolveWait(null); return; }
+          if (session.child.__sharedSession) {
+            try {
+              resultBytes += Buffer.byteLength(JSON.stringify(reply)) + (arrayResponse ? 1 : 0);
+            } catch (error) {
+              if (!(error instanceof RangeError)) throw error;
+              resultBytes = Infinity;
+            }
+            if (resultBytes > session.sharedBufferLimit) {
+              responseOverflow = true;
+              noteFailure(name, 'shared response exceeds the output limit');
+              if (res.headersSent) res.destroy();
+              else res.writeHead(502, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+                error: {
+                  code: -32002, message: 'shared response exceeds the output limit; calls were not replayed',
+                  data: { execution: 'potentially-executed' },
+                },
+              }));
+              for (const id of requestIds) {
+                const pending = session.pending.get(id);
+                if (!pending) continue;
+                clearTimeout(pending.timer);
+                session.pending.delete(id);
+                pending.resolve(null);
+                if (session.child.stdin.writable) {
+                  writeSessionMessage(session, {
+                    jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: id },
+                  });
+                }
+              }
+              resolveWait(null);
+              return;
+            }
+          }
+          resolveWait(reply);
+        };
+        if (stream) {
+          res.writeHead(200, { ...headers, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform' });
+          res.flushHeaders();
+        }
+        // initialize is the request that pays for spawning the server, and a cold start can be
+        // slow (a package manager fetching the server on first run), so it gets a longer budget
+        // than steady-state calls.
+        const budget = isInit ? INIT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const waits = requestIds.map((id) => new Promise((resolveWait) => {
+          const timer = setTimeout(() => {
+            if (session.pending.has(id)) {
+              session.pending.delete(id);
+              resolveWait(bridgeReply(id, -32001, 'bridge: upstream timeout', 'timeout'));
+            }
+          }, budget);
+          if (session.child.__sharedSession) clearTimeout(timer);
+          session.pending.set(id, { resolve: (reply) => collect(resolveWait, reply), timer, stream: stream ? res : null });
+        }));
+        try {
+          for (const message of messages) {
+            if (responseOverflow) break;
+            writeSessionMessage(session, message);
+          }
+        }
+        catch (error) {
+          for (const id of requestIds) {
+            const pending = session.pending.get(id);
+            if (!pending) continue;
+            clearTimeout(pending.timer);
+            session.pending.delete(id);
+            pending.resolve(bridgeReply(id, -32000, 'bridge: upstream write failed', 'write'));
+          }
+          throw error;
+        }
+        if (!requestIds.length) { res.writeHead(202, headers).end(); return; }
+        const results = await Promise.all(waits);
+        if (responseOverflow) return;
+        // A JSON-RPC error from the server is the server working — it answered. Only the bridge's
+        // own synthetic errors mean the server is unhealthy, and even then a timeout is worth
+        // recording only while the child is alive: if it already exited, its exit code and stderr
+        // are the actual reason and must not be overwritten by the symptom.
+        if (results.some((reply) => bridgeReplies.get(reply) === 'timeout')) {
+          if (session.child.exitCode === null &&
+              session.child.signalCode === null) noteFailure(name, 'upstream timeout');
+        } else if (results.some((reply) => bridgeReplies.get(reply) === 'exit')) {
+          // The child exited mid-request. Its exit handler already recorded the real reason with
+          // the stderr tail, so counting it again here would report one dead child as two failures.
+        } else if (!session.child.__sharedSession) {
+          noteSuccess(name);
+          // A cold start is only measurable once the server has answered: spawn() returning tells
+          // us nothing about the package manager work that follows it. Recorded once per child.
+          const initialized = results.some((reply) => reply.result &&
+            messages.some((message) => message && message.method === 'initialize' && message.id === reply.id));
+          const measurableColdStart = session.cold && initialized && session.child.__spawnedAt;
+          if (measurableColdStart) {
+            noteSpawnCost(name, Date.now() - session.child.__spawnedAt);
+            session.cold = false;
+          }
+        }
+        const initialized = isInit && results.some((reply) => reply?.result && reply.id === initMessage.id);
+        if (initialized) {
+          session.protocolVersion = results.find((reply) => reply.id === initMessage.id).result.protocolVersion;
+          rememberSession(sessionId, name, initMessage);
+        }
+        // Stamp again on completion: the idle clock should measure time since the request finished,
+        // not since it started, or a call slower than the timeout is reapable the moment it returns.
+        session.lastActivity = Date.now();
+        if (stream) {
+          for (const result of results) {
+            if (!writeSharedEvent(session, res, result)) return;
+          }
+          res.end();
+        } else {
+          headers['Content-Type'] = 'application/json';
+          res.writeHead(200, headers);
+          res.end(JSON.stringify(arrayResponse ? results : results[0]));
+        }
+      } catch (error) {
+        log(`[${name}] session request failed: ${error.message}`);
+        if (res.headersSent) { res.destroy(); return; }
+        const rpcError = error.upstreamError ?? (error.data
+          ? { code: -32002, message: error.message, data: error.data } : null);
+        if (rpcError) {
+          const request = messages.find((message) => message?.id != null);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: request?.id ?? null, error: rpcError }));
+        } else {
+          res.writeHead(error.statusCode ?? 502).end(error.message);
         }
       }
-      // Stamp again on completion: the idle clock should measure time since the request finished,
-      // not since it started, or a call slower than the timeout is reapable the moment it returns.
-      session.lastActivity = Date.now();
-      headers['Content-Type'] = 'application/json';
-      res.writeHead(200, headers);
-      res.end(JSON.stringify(results.length === 1 ? results[0] : results));
     });
     return;
   }
@@ -1530,6 +1983,10 @@ const server = http.createServer((req, res) => {
   if (def.type === 'http') { proxyHttp(name, def, req, res); return; }
 
   if (kind === 'mcp') { handleStreamable(name, req, res); return; }
+  if (def.sharing === 'shared') {
+    res.writeHead(400).end('shared mode requires Streamable HTTP; use /' + name + '/mcp');
+    return;
+  }
 
   if (req.method === 'GET' && kind === 'sse') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
@@ -1546,7 +2003,8 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && kind === 'message') {
     const s = sessions.get(url.searchParams.get('sessionId'));
-    if (!s) { res.writeHead(404).end('no such session'); return; }
+    if (!s ||
+        s.name !== name) { res.writeHead(404).end('no such session'); return; }
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
@@ -1606,8 +2064,11 @@ server.listen(PORT, HOST, () => {
 // treats it as "reconnect", while a dropped TCP connection reads as a transport fault and some
 // clients latch on that permanently. This only helps a graceful stop — a force-kill runs no
 // handler at all, which is why the supervisor should ask rather than kill.
-function shutdown() {
+async function shutdown() {
+  if (shuttingDown) return;
   shuttingDown = true; // stop warm-pool refills racing the exit
+  await poolingConfig.close();
+  sharedManager.shutdown();
   for (const s of sessions.values()) { try { s.res?.end(); } catch { /* already gone */ } }
   for (const s of httpSessions.values()) { try { s.sseRes?.end(); } catch { /* already gone */ } }
   for (const s of sessions.values()) killTree(s.child, true);

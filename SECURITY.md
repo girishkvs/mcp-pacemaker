@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-This project is pre-1.0. Fixes land on the latest released minor version only.
+Fixes land on the latest released minor version only.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | yes       |
-| < 0.1   | no        |
+| Latest released 1.x minor | yes |
+| Earlier releases | no |
 
 ## Reporting a vulnerability
 
@@ -33,6 +33,32 @@ so a few properties matter more than usual:
   to `~/.mcp-pacemaker/admin.nonce` on startup, readable only by the user running the bridge.
   This covers `/admin/reload`, which re-reads `servers.json` — see the note below on why that
   file is a trusted input.
+- **Pooling controls are opt-in configuration writes.** The dashboard's Enable/Disable/Undo
+  buttons and the equivalent CLI actions require the admin nonce. Browser writes also require
+  a matching Origin when provided. Only `sharing` and `minWarm` can be changed; commands,
+  environment and auth settings are not accepted. Requests are bounded to 4 KiB.
+  Edits require a content revision, preserve unrelated JSON, keep a backup and replace the file
+  atomically. Undo restores the previous bytes only while that revision is still current.
+  These checks detect stale clients and observed editor changes; a non-cooperating external
+  writer can still race the final filesystem check/rename because portable filesystem CAS
+  is unavailable. Do not edit the file concurrently with an admin action.
+- **Config backups and Undo contain config data.** `servers.json.bak` has the previous config
+  and is protected like the source file, including its Windows DACL. Temporary files are given
+  the same permissions before data is written. Bounded in-memory Undo records can include
+  credential-bearing configuration; they are not returned to the browser or written elsewhere.
+- **Windows timestamp changes are not permission changes by themselves.** Automatic writes
+  capture native non-audit security sections, audit policy and file attributes. A changed
+  timestamp is accepted only when that verified state, content and file identity still match.
+  Unreadable audit policy is refused before staging; security that cannot be preserved on both
+  replacement and backup files is also refused. No automatic elevation or security-policy
+  changes are performed. The built-in audit-read API uses only rights assigned to the account.
+- **Shared mode is not a user-security boundary.** It is opt-in for stateless tools with one
+  common credential context. Only a tools capability derived from the real upstream is exposed;
+  unsupported client capabilities and protocol methods fail explicitly. IDs, progress,
+  cancellation and cursors are scoped to virtual sessions, but a tool implementation can still
+  keep hidden process-global state. The operator must confirm that sharing that state is safe.
+  Do not enable it for separate users, accounts, workspaces or conversations. Dispatched work
+  is never replayed automatically, and deleting one session does not prove its tool stopped.
 - **The bridge reloads `servers.json` when it changes.** A running bridge watches its config and
   applies edits without a restart, so anything that can write that file can change what the
   bridge runs, at the moment it writes — not only at the next start. The file is already a
@@ -43,10 +69,11 @@ so a few properties matter more than usual:
   credential. It is off by default for exactly that reason. stdio servers are never probed.
 - **Tokens live in memory only.** Credentials obtained from an auth command are cached in the
   process and never written to disk. The dashboard shows time-to-expiry, never the value.
-- **Session state is written to disk, credentials are not.** To re-establish a session after a
+- **Session initialization metadata is written to disk.** To re-establish a session after a
   restart, `~/.mcp-pacemaker/sessions.json` records session ids and the `initialize` parameters
-  the client sent (protocol version, declared capabilities, client name). It contains no
-  credentials and no request or response content. Delete it to drop all resumable sessions, or
+  the client sent (protocol version, declared capabilities, client name and any extra fields).
+  Business requests and tool results are not recorded there. Treat it as sensitive because
+  client-defined initialization fields can contain additional data. Delete it to drop all resumable sessions, or
   run with `MCP_RESUME=0` to never write it. Records past `MCP_RESUME_TTL_MS` (24h by default)
   are refused and pruned, so the file does not accumulate indefinitely.
 - **The log records activity, not content.** `~/.mcp-pacemaker/bridge.log` holds the same lines

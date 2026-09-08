@@ -5,6 +5,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.3.0] - 2026-09-08
+
+### Added
+
+- Cumulative per-server process launch, failed launch, warm adoption, new session and resume
+  counters. The status snapshot identifies the bridge instance and interval start so process
+  churn can be compared without mixing time windows. Latency samples remain capped separately.
+- One-click pre-warming controls and conflict-safe Undo, with the requested warm count and
+  resident-process cost shown before activation. Pooling policy edits preserve active children.
+- A consolidated pre-warming dashboard tab and `mcp-pacemaker prewarm` CLI view, both using
+  the same snapshot data. Explicit CLI actions enable, disable or undo one server's settings.
+- `mcp-pacemaker logs` reads the durable log and retained rotation with `--follow`, `--since`,
+  `--server` and literal `--grep`. Multiline context, partial UTF-8 writes and rotation are
+  handled without treating continuation lines as independent server records.
+- Opt-in shared stdio children for compatible stateless tools sessions. One real initialization
+  serves virtual sessions with owner-scoped IDs, progress, cancellation and cursors, bounded
+  queues, idle retention and draining. Unsupported features fail explicitly; uncertain tool
+  calls are never replayed. UI and CLI distinguish shared children from uninitialized pools.
+
+### Fixed
+
+- Reserve session capacity before asynchronous startup, preventing queued cold starts from
+  overbooking the configured cap. Concurrent resumes of one session share one handshake.
+- Bind session lookup and deletion to the requested server. A stale exit or deleted resume
+  cannot remove or resurrect a replacement session.
+- Distinguish bridge-generated transport errors from identical numeric codes returned by an
+  upstream, so a legitimate server response is not mislabeled as a bridge timeout.
+- Guard shared JSON before serialization in both directions, including on Node 20, and bound
+  combined response sizes. Excessive depth or output produces controlled errors rather than
+  crashing the bridge or silently replaying tool calls.
+- Identify changed metadata fields when a pooling write is refused by the conflict guard.
+- Avoid false Windows pooling conflicts from unrelated timestamp updates while retaining
+  audit, integrity-label, permission and file-identity checks. Refuse automatic writes when
+  audit policy cannot be verified or preserved.
+- Run configuration writes in a bounded, serialized worker so Windows permission inspection
+  does not block the bridge's request processing.
+- Update the UI build's `browserslist` dependency to 4.28.9 to address its published memory-growth
+  and custom-stats advisories.
+
 ## [1.2.0] - 2026-09-04
 
 ### Added
