@@ -60,6 +60,10 @@ rl.on('line', (line) => {
   } else if (msg.method === 'tools/list') {
     const reply = () => send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'ping', description: 'ping' }] } });
     if (CALL_DELAY_MS > 0) setTimeout(reply, CALL_DELAY_MS); else reply();
+  } else if (msg.method === 'test/error') {
+    send({ jsonrpc: '2.0', id: msg.id, error: {
+      code: msg.params.code, message: 'Peer-defined error', data: msg.params.data,
+    } });
   } else {
     send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
   }

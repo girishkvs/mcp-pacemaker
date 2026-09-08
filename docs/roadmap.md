@@ -60,7 +60,7 @@ The bridge isolates per session (child keyed by session id, responses routed per
 multiple hosts/agents coexist with no cross-talk, and HTTP servers share the token cache.
 
 - **Sharing policy** per server: `isolated` (default) · `pool` (bounded warm pool) ·
-  `shared` (one child multiplexed across agents — R&D).
+  `shared` (one initialized child for compatible stateless tools sessions in 1.3.0).
 - **Concurrency caps** so agent fan-out can't exhaust the machine.
 - **Keep-warm linger** = `pool` with `minWarm`; idle children are reaped.
 - **Per-agent observability** — `clientInfo` captured at `initialize`, surfaced per server.
@@ -94,24 +94,57 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 |---|---|---|
 | **1.1.0** | Active health probing + config hot-reload | shipped |
 | **1.2.0** | Cold-start measurement, spawn gate, warm-pool correctness, health semantics, restart reporting | shipped |
-| **1.3.0** | **B10** `mcp-pacemaker logs`, **B6** `shared` sharing mode | planned |
+| **1.3.0** | **B21** process counters, **B18** safe pooling changes, **B19** one-click controls, **B20** unified pre-warming view in UI/CLI, **B10** logs CLI, **B6** opt-in shared mode | implemented; one release commit |
 
 `B10` and `B6` were originally slated for 1.2.0. 1.2.0 was taken by unplanned work that came out
 of running the live bridge — a pool that had silently stopped refilling, and a cold start nobody
 was measuring. Both were worth shipping first; neither was on the plan. Recorded here so the slip
 is visible rather than quietly renumbered.
 
-`B6` is the real answer to session churn: one polling client here opened **238 sessions an hour**,
-each a fresh child that re-authenticates, where a single multiplexed process would have served all
-of them. Pooling (1.2.0) makes each spawn cheaper; `B6` removes the spawns.
+`B6` targets session churn by retaining one initialized process across compatible stateless
+sessions. Pooling still launches a separate child per session. Shared-mode savings must be
+measured with aligned process-counter deltas and identical workloads, not inferred from
+historical session counts or assumed client/server compatibility.
+
+### 1.3.0 delivery gates
+
+All six items belong to this release. Local implementation checkpoints are not separate
+releases or permission to publish incremental commits to `main`. Keep one unpublished release
+change until the complete scope is ready; tag only after the exact final commit passes the
+Linux/macOS/Windows CI matrix.
+
+1. **B21 baseline:** count actual process launches independently of latency samples, including
+   warm starts, classic SSE, recycle and resume. Identify each measurement interval. Keep real
+   local server data outside the repository and compare deltas from matching intervals.
+2. **B18 configuration transaction:** only pooling settings may be changed. Require the existing
+   admin nonce, validate limits, back up before writing, preserve unrelated JSON, reject stale
+   revisions, and make undo conflict-safe. Apply the edit even with file watching disabled.
+3. **B19 one-click control:** show the requested warm count and resident-process cost before
+   activation. A click is approval; a recommendation is not. Report failures in the UI.
+4. **B20 consolidated view:** show all stdio candidates and already-pooled servers in both the
+   dashboard and CLI. Include latency evidence, process totals, current/target warm count,
+   eligibility and explicit enable/disable controls. HTTP proxies are not local spawn candidates.
+5. **B10 logs:** support `--follow`, `--since`, `--server` and `--grep`, including multiline log
+   records and rotation, without losing or duplicating records.
+6. **B6 shared mode:** explicit opt-in, compatible initialization and isolated routing of request
+   IDs, progress and cancellation. Define unsupported stateful capabilities before dispatch.
+   Handle child exit and credential recycling without replaying tool calls whose outcome is
+   unknown. Verify both correctness and reduced launches under identical replayed workloads.
+
+Use focused tests at each checkpoint, demonstrate regression tests fail with the relevant fix
+removed from an isolated copy, and investigate every new failure before proceeding. Never use
+a throwaway bridge with the production config directory: nonce, session and log files are shared
+within that directory.
+
+`B14` socket handoff and `B9` OAuth brokerage are separate, unapproved implementation work.
 
 ## Feature backlog
 | # | Item | Detail |
 |---|---|---|
 | **B5** | MCP SDK adoption | Replace hand-rolled JSON-RPC framing with the official SDK. |
-| **B6** | `shared` sharing mode | True multiplex of one child across agents. Risky for a 24/7 bridge — R&D. |
+| **B6** | `shared` sharing mode | 1.3.0 implementation: [bounded stateless-tools profile](shared-sessions.md), explicit activation and no tool replay. |
 | **B9** | Bridge-side OAuth broker | For `auth: none` servers whose resource does not pre-authorize the Azure CLI, so no `audience` token can be minted. The bridge would run the OAuth flow itself and share one credential across clients. Adds a callback listener and refresh-token storage to a 24/7 daemon — needs a threat-model review first. |
-| **B10** | `mcp-pacemaker logs` | Tail and filter `bridge.log` from the CLI, with `--server` and `--since`. The file exists as of 1.1.0; only the reader is missing. |
+| **B10** | `mcp-pacemaker logs` | 1.3.0 implementation: durable log reader, follow, filters and rotation handling. |
 | **B11** | Reap orphans from a previous instance | On Windows, force-killing the bridge (Task Manager, `Stop-Process -Force`, a hard reboot) terminates it without running its `SIGTERM` shutdown, so **children it spawned can survive indefinitely** — real servers have no self-destruct, and they hold their ports and credentials. Measured directly with a heartbeat file: after `taskkill /F` on the bridge, a directly-spawned server kept running (the `cmd.exe`-wrapped one did not). The test suite hit the same thing and leaked 24 processes per run until teardown was changed to kill the tree. A Job Object with `KILL_ON_JOB_CLOSE` is the proper fix but needs native code; the pure-Node alternative is to record child pids alongside `sessions.json` and, on startup, kill any that survived — guarded by a command-line match, since Windows reuses pids. |
 | **B14** | Zero-downtime restart (socket handoff) | See below. The one remaining reason a bridge restart is visible to a user. |
 

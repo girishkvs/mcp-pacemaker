@@ -774,6 +774,35 @@ program.command('reload')
   .option('--port <n>', 'bridge port')
   .action(cmdReload);
 program.command('doctor').description('Diagnose config, bridge reachability, client wiring').action(cmdDoctor);
+program.command('logs')
+  .description('Read durable bridge logs, including retained rotation and multiline records')
+  .option('--config <path>', 'bridge config path (logs are beside it)')
+  .option('-f, --follow', 'follow new records and rotation until interrupted')
+  .option('--since <time>', 'duration such as 2h, or an ISO timestamp with timezone')
+  .option('--server <name>', 'filter by exact server name')
+  .option('--grep <text>', 'case-insensitive literal text filter')
+  .action(async (opts) => {
+    const { runLogs } = await import('./logs.mjs');
+    await runLogs(opts);
+  });
+program.command('prewarm')
+  .description('Show all stdio pre-warming candidates; changes require an explicit action')
+  .option('--port <n>', 'bridge port')
+  .option('--config <path>', 'bridge config path (locates its admin nonce)')
+  .option('--json', 'machine-readable output')
+  .option('--enable <server>', 'enable pre-warming for this server')
+  .option('--count <n>', 'number of warm slots to enable (default: displayed recommendation)')
+  .option('--disable <server>', 'disable pre-warming for this server')
+  .option('--server <name>', 'server whose previous change is being undone')
+  .option('--undo <id>', 'restore the prior settings if no intervening edit occurred')
+  .action(async (opts) => {
+    const { runPrewarm } = await import('./prewarm.mjs');
+    const state = readState();
+    await runPrewarm(opts, {
+      configPath: CONFIG,
+      ports: state.hosts.length ? distinctPorts(state) : [DEFAULT_PORT],
+    });
+  });
 program.command('dashboard').description('Open the web dashboard in your browser').action(cmdDashboard);
 program.command('top')
   .description('Live terminal dashboard (Ink TUI)')

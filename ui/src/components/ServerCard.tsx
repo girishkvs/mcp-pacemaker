@@ -3,6 +3,8 @@ import { Activity, RefreshCw, Server } from 'lucide-react';
 import type { ServerStat } from '../types';
 import { recycle } from '../lib/api';
 import { Sparkline } from './Sparkline';
+import { PoolingControls } from './PoolingControls';
+import type { PoolingActions } from '../hooks/usePoolingActions';
 
 function fmtToken(sec: number): { text: string; cls: string } {
   if (sec <= 0) return { text: 'token expired', cls: 'text-danger' };
@@ -40,7 +42,12 @@ const HEALTH_BADGE = {
   unknown: { text: 'unused', cls: 'border-line text-muted', title: 'no request has been made yet, so health is unknown' },
 } as const;
 
-export function ServerCard({ s, history }: { s: ServerStat; history: number[] }) {
+export function ServerCard({ s, history, poolingActions, poolingEnabled }: {
+  s: ServerStat;
+  history: number[];
+  poolingActions: PoolingActions;
+  poolingEnabled: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const isHttp = s.type === 'http';
   const token = isHttp && s.tokenExpiresIn != null ? fmtToken(s.tokenExpiresIn) : null;
@@ -80,13 +87,14 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
       </div>
 
       <div className="flex items-center gap-4 text-[13px] text-muted">
-        <span className="flex items-center gap-1" title={s.maxSessions ? 'streamable sessions counted against the cap (total includes classic SSE)' : 'active client sessions'}>
+        <span className="flex items-center gap-1" title={s.maxSessions ? 'active and starting streamable sessions counted against the cap' : 'active client sessions'}>
           <Activity size={13} className={s.sessions > 0 ? 'text-ok' : 'text-muted'} />
           {s.maxSessions ? `${s.cappedSessions ?? s.sessions}/${s.maxSessions}` : s.sessions}
           {s.maxSessions != null && s.cappedSessions != null && s.sessions > s.cappedSessions && (
             <span className="text-muted"> (+{s.sessions - s.cappedSessions} sse)</span>
           )}
         </span>
+        {Boolean(s.startingSessions) && <span>{s.startingSessions} starting</span>}
         <span title="total requests routed to this server">{s.requests} req</span>
         {s.pids.length > 0 && <span title="child process id(s)">pid {s.pids.join(', ')}</span>}
         {s.warm != null && s.warm > 0 && <span className="text-ok" title="pre-warmed pool children ready">{s.warm} warm</span>}
@@ -94,6 +102,14 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
           <Sparkline values={history ?? []} />
         </span>
       </div>
+
+      {s.shared && (
+        <div className="mt-2 text-xs text-muted">
+          Shared child: {s.shared.state}, generation {s.shared.generation}.
+          {' '}{s.shared.members} sessions, {s.shared.unresolved} pending, {s.shared.queued} queued.
+          {s.shared.members === 0 && s.shared.state === 'ready' && ' Retained for compatible reconnects.'}
+        </div>
+      )}
 
       {(token || s.lastActivitySec != null) && (
         <div className="mt-2 flex items-center gap-3 text-xs">
@@ -121,7 +137,7 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
         </div>
       )}
 
-      {s.spawn && (
+      {s.spawn?.p50Ms != null && s.spawn.p95Ms != null && (
         <div className="mt-2 flex items-center gap-3 text-xs text-muted">
           <span title={`measured over ${s.spawn.samples} cold starts (p95 ${(s.spawn.p95Ms / 1000).toFixed(1)}s)`}>
             cold start {(s.spawn.p50Ms / 1000).toFixed(1)}s
@@ -133,16 +149,15 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
       {s.advice && (
         <div className="mt-2 rounded-lg border border-amber/50 bg-amber/5 px-2.5 py-2 text-xs">
           <div className="font-semibold text-amber">Slow to start — {s.advice.reason}.</div>
-          <div className="mt-1 text-fg">
-            Pre-warming would hide this. Add{' '}
-            <code className="px-1 rounded bg-panel2 border border-line">
-              "sharing": "pool", "minWarm": {s.advice.suggest.minWarm}
-            </code>{' '}
-            to this server in <code className="px-1 rounded bg-panel2 border border-line">servers.json</code>.
+          <div className="mt-2">
+            <PoolingControls server={s} actions={poolingActions} enabled={poolingEnabled} />
           </div>
-          <div className="mt-1 text-muted">
-            Costs {s.advice.suggest.minWarm} resident process{s.advice.suggest.minWarm === 1 ? '' : 'es'}, so it is your call — the bridge will not turn it on by itself.
-          </div>
+        </div>
+      )}
+
+      {(s.sharing === 'pool' || (!s.advice && poolingActions.states[s.name]?.undoId)) && (
+        <div className="mt-2 rounded-lg border border-line px-2.5 py-2">
+          <PoolingControls server={s} actions={poolingActions} enabled={poolingEnabled} />
         </div>
       )}
 
@@ -165,7 +180,7 @@ export function ServerCard({ s, history }: { s: ServerStat; history: number[] })
         <button
           onClick={onRecycle}
           disabled={busy || isHttp}
-          title={isHttp ? 'http servers have no child process to recycle' : 'stop active children; they respawn on next use (fresh token)'}
+          title={isHttp ? 'http servers have no child process to recycle' : s.sharing === 'shared' ? 'drain the shared child, then terminate it; uncertain tool calls are never replayed' : 'stop idle children; they respawn on next use using the configured credentials'}
           className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-panel2 border border-line text-fg hover:border-accent disabled:opacity-40 disabled:cursor-default"
         >
           <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />

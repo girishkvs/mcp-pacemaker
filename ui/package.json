@@ -1,7 +1,7 @@
 {
   "name": "mcp-pacemaker-ui",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
   "description": "React + Vite dashboard for mcp-pacemaker (built to ui/dist, served by the bridge at /ui).",
   "scripts": {

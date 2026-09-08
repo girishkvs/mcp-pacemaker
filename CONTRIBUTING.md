@@ -35,6 +35,10 @@ Tests are `node:test` only, no framework. Each test file that starts a bridge ow
 ports, because files run in parallel; the current allocation is listed at the top of
 `test/auth-token.test.mjs`. Pick unused ones for a new file.
 
+The complete Windows suite needs audit-read rights for successful configuration-write cases.
+Security-specific fixtures modify only their own temporary files. Automatic writes deliberately
+fail closed when audit policy is unreadable; the suite also exercises that restricted path.
+
 **A regression test must be shown to fail without its fix.** Revert the fix, watch the test
 fail, restore it, watch it pass. Several bugs in this repo were originally "covered" by tests
 that passed against the broken code — a test that cannot fail is worse than no test, because

@@ -18,11 +18,39 @@ export interface ServerStat {
   clients?: string[];
   sharing?: string;
   warm?: number;
-  spawn?: { samples: number; p50Ms: number; p95Ms: number; maxMs: number } | null;
+  spawn?: {
+    attempts: number;
+    total: number;
+    failures: number;
+    warmAdoptions: number;
+    sessionStarts: number;
+    sessionResumes: number;
+    samples: number;
+    p50Ms: number | null;
+    p95Ms: number | null;
+    maxMs: number | null;
+  } | null;
   peakConcurrency?: number;
   advice?: { reason: string; suggest: { sharing: string; minWarm: number } } | null;
+  minWarm?: number;
+  prewarming?: {
+    eligible: boolean;
+    reason?: string;
+    suggestedMinWarm: number;
+    configuredMinWarm: number | null;
+  };
   maxSessions?: number | null;
   cappedSessions?: number;
+  startingSessions?: number;
+  shared?: {
+    generation: string;
+    state: 'starting' | 'ready' | 'draining' | 'stopping' | 'dead';
+    pid: number | null;
+    members: number;
+    waiters: number;
+    unresolved: number;
+    queued: number;
+  } | null;
   health?: ServerHealth;
 }
 
@@ -32,6 +60,9 @@ export interface Snapshot {
   version: string;
   port: number;
   uptimeSec: number;
+  instanceId?: string;
+  startedAt?: string;
+  prewarm?: { revision: string; maxWarm: number };
   sessions: number;
   restart?: { sinceSec: number; resumable: number; staleClients: number } | null;
   servers: ServerStat[];

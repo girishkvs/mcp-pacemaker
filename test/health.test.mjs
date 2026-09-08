@@ -7,11 +7,12 @@
 // called is never reported healthy.
 //
 // Ports: see the allocation note in auth-token.test.mjs. This file owns 8840-8849 and 8851-8853
-// (8850 belongs to tui.test.mjs).
+// and 8874 (8850 belongs to tui.test.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +89,31 @@ test('a working stdio server reports ok once it answers', async (t) => {
   assert.equal(h.state, 'ok');
   assert.equal(h.consecutiveFailures, 0);
   assert.ok(h.lastSuccessSec != null, 'a success time is recorded');
+});
+
+test('peer-defined errors using bridge numeric codes still prove the server answered', async (t) => {
+  const { cfg, tmp } = makeConfig({ peer: { command: process.execPath, args: [FIXTURE], maxSessions: 1 } });
+  const port = 8874;
+  const child = await boot(port, cfg, { MCP_QUEUE_TIMEOUT_MS: '0' });
+  const exited = once(child, 'exit');
+  t.after(async () => {
+    killBridge(child);
+    await exited;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+  const initialized = await req(port, 'POST', '/peer/mcp', { headers: rpc, body: initBody });
+  const sid = initialized.headers['mcp-session-id'];
+  for (const code of [-32000, -32001]) {
+    assert.equal((await req(port, 'POST', '/peer/mcp', { headers: rpc, body: initBody })).status, 503);
+    assert.equal((await health(port, 'peer')).state, 'failing');
+    const response = await req(port, 'POST', '/peer/mcp', {
+      headers: { ...rpc, 'mcp-session-id': sid },
+      body: JSON.stringify({ jsonrpc: '2.0', id: code, method: 'test/error',
+        params: { code, data: { kind: 'SHARED_REQUEST_TIMEOUT' } } }),
+    });
+    assert.equal(JSON.parse(response.body).error.code, code);
+    assert.equal((await health(port, 'peer')).state, 'ok');
+  }
 });
 
 test('a server whose credential goes bad reports failing, and counts the failures', async (t) => {

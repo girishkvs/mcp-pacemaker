@@ -6,14 +6,16 @@ MCP hosts — editors (VS Code, Cursor, Claude Desktop) **and** CLIs (Claude Cod
 Codex, Gemini) — run stdio MCP servers as child processes. When the host restarts, crashes, or
 exits (every one-shot CLI run), **those servers die**. `mcp-pacemaker` runs your servers as
 children of a small, long-lived bridge and exposes each over the MCP HTTP+SSE / Streamable HTTP
-transport, so every host just **reconnects** — and **multiple hosts share the same warm,
-authenticated servers**. Wire them all to one bridge, or give each its own.
+transport. Multiple hosts use one bridge, with an isolated child per session by default.
+Opt into pre-warming or reuse one initialized child for compatible stateless tools sessions
+with [shared mode](#shared-mode). Wire hosts to one bridge, or give each its own.
 A cross-platform supervisor + OS auto-start keep the bridge itself alive across reboots and
 sleep/wake, and a pluggable auth layer injects a fresh token per request for HTTP servers.
 
-Sessions also survive **the bridge's own** restart: a client that reconnects with the session id
-it already holds is transparently re-established against a freshly started server, so upgrading,
-recycling or reaping a server never strands a connected client.
+After a restart, a returning client can reuse a recorded session ID to re-establish its handshake
+against a fresh server. This does not restore arbitrary tool state or preserve TCP connections.
+Clients that stop retrying after a dropped connection may still need a reload; socket handoff
+is separate planned work.
 
 ## Quick start
 
@@ -126,6 +128,9 @@ npm i -g github:girishkvs/mcp-pacemaker # global install -> `mcp-pacemaker` on P
 | `status` | Bridges, wired hosts, servers, and any server currently failing |
 | `reload` | Re-read `servers.json` into the running bridge without restarting it |
 | `doctor` | Diagnose config, bridge reachability, host wiring |
+| `prewarm [--port N] [--json]` | One view of stdio candidates, pools, shared-child state and measured process starts |
+| `prewarm --enable <server> [--count N]` | Explicitly enable warm slots; `--disable <server>` turns them off |
+| `logs [--follow] [--since 2h] [--server name] [--grep text]` | Read and filter durable logs, including retained rotation |
 | `top` / `dashboard` | Live terminal UI / web dashboard |
 | `plan --client <host>` | Dry run — show exactly what `install` would change |
 | `import --from <host>` | Build `~/.mcp-pacemaker/servers.json` from an existing host |
@@ -141,8 +146,8 @@ npm i -g github:girishkvs/mcp-pacemaker # global install -> `mcp-pacemaker` on P
 
 > On start, pacemaker **probes the port**: it *adopts* an existing pacemaker bridge and *refuses to collide* with a foreign service (the wizard offers another port).
 
-Each stdio server is exposed over **both** the HTTP+SSE transport (`/<name>/sse`) and the newer
-**Streamable HTTP** transport (`/<name>/mcp`), so old and new clients both work.
+Isolated and pooled stdio servers support HTTP+SSE (`/<name>/sse`) and Streamable HTTP
+(`/<name>/mcp`). Shared mode requires Streamable HTTP.
 
 `install` writes a `.bak` of your client config before touching it, and `uninstall` restores it.
 
@@ -164,6 +169,39 @@ ago it was last used, and **which clients are connected** — above, one server 
 VS Code and Claude Code while others are held by Copilot, Cursor and Codex. `Recycle` restarts
 that server's processes; it is disabled for servers with no session to restart. The live log at
 the bottom is the bridge's own log, filterable.
+
+### Pre-warming controls
+
+The **Pre-Warming** tab puts every stdio candidate, current pool and shared server in one table.
+It shows cold-start p50/p95, observed peak sessions, process starts, warm/target counts,
+shared-child state and pending work, and an action.
+HTTP proxies are excluded because the bridge does not launch their processes.
+
+Choose **Enable pre-warming (N)** on a slow-server card or in the table. The button shows
+the exact warm count and the extra resident-process cost before you click. Nothing enables
+it automatically. **Disable pre-warming** removes idle warm children without killing active
+sessions; **Undo** restores the prior config only if no intervening edit has occurred.
+
+The same controls are available without a browser:
+
+```sh
+mcp-pacemaker prewarm --port 8791
+mcp-pacemaker prewarm --port 8791 --enable filesystem --count 2
+mcp-pacemaker prewarm --port 8791 --disable filesystem
+# An applied change prints its own --server / --undo command.
+```
+
+Use `--config <path>` when the bridge's config and admin nonce are outside the default
+directory. `--json` returns the measured snapshot. The CLI and UI use the same server
+eligibility and recommendation data; a missing latency sample is not reported as a zero-cost
+startup. Config writes preserve unrelated JSON and permissions, create `.bak`, and require
+a matching content revision. Conflicts are shown rather than retried over someone else's edit.
+Config remains strict JSON, not JSONC.
+
+On Windows, automatic edits require readable audit policy as well as ordinary file access.
+If security cannot be verified or preserved, the action is refused before config data is written;
+the bridge does not elevate itself. Existing sessions keep running. Configuration writes run in
+a serialized worker so permission inspection does not block MCP traffic.
 
 ### Health
 
@@ -199,6 +237,25 @@ failures, and `?` when nothing has called it yet — deliberately not `ok`, sinc
 the same as working. `WARM` shows `warm/minWarm` for pooled servers and `-` for the rest, `TOKEN`
 the time left on a cached credential, and the last column either the connected clients or the last
 error. `↑↓` selects a row and `r` recycles it.
+
+## Reading durable logs
+
+```sh
+mcp-pacemaker logs --since 2h --server filesystem
+mcp-pacemaker logs --follow --grep timeout
+mcp-pacemaker logs --config /path/to/servers.json --since 2026-09-07T12:00:00Z
+```
+
+`logs` reads `bridge.log.1` then `bridge.log` beside the selected config, including when
+the bridge is stopped. `--since` accepts durations in seconds/minutes/hours/days or an ISO
+timestamp with timezone. `--server` matches the exact log-header server name; `--grep` is
+a case-insensitive literal match, not a regular expression. Matching multiline records retain
+their header and context.
+
+`--follow` handles complete new lines, split UTF-8 writes, truncation and rollover until
+interrupted. It warns if rotation has already discarded an unread generation. Only retained
+history is available; it cannot recover logs the bridge has deleted. Individual lines over
+1 MiB fail explicitly rather than being silently truncated.
 
 ## Editing servers.json while it runs
 
@@ -259,6 +316,7 @@ Read endpoints need no auth; the one state-changing endpoint requires a nonce.
 | `/api/logs` | GET (SSE) | Bridge log: replays the last 100 lines, then streams. For anything older, read `bridge.log` next to your config |
 | `/admin/recycle/<name>` | POST | Restart a server's processes. Omit `<name>` to recycle everything |
 | `/admin/reload` | POST | Re-read `servers.json`. Only servers whose definition changed are restarted |
+| `/admin/servers/<name>/pooling` | POST | Explicit enable/disable/undo with admin nonce, bounded input and a matching config revision |
 | `/<name>/mcp` | POST/GET/DELETE | Streamable HTTP transport for that server |
 | `/<name>/sse` | GET | HTTP+SSE transport for that server |
 | `/.well-known/oauth-protected-resource/<name>` | GET | OAuth discovery relayed from the upstream, for HTTP servers where the client authenticates |
@@ -348,7 +406,7 @@ reused — the client is never asked to log in for a server the bridge authentic
 
 ## Multi-agent & resource controls
 
-Multiple hosts/agents can share one bridge — each gets its own isolated session (no cross-talk),
+Multiple hosts/agents can share one bridge — each gets its own isolated session by default,
 and HTTP servers share the cached token across all of them. The dashboard, `top`, and
 `mcp-pacemaker status` show **which agents are connected** to each server.
 
@@ -357,7 +415,7 @@ and HTTP servers share the cached token across all of them. The dashboard, `top`
 | Idle reaper | `MCP_IDLE_TIMEOUT_MS` | `1800000` (30 min) | free Streamable HTTP children idle past the timeout. Safe by default because a returning client's session is transparently re-established. `0` disables |
 | Concurrency cap | `MCP_MAX_SESSIONS_PER_SERVER`, or per-server `maxSessions` | `0` (unlimited) | reject new sessions past the cap (HTTP 503) |
 | Queue at the cap | `MCP_QUEUE_TIMEOUT_MS` | `10000` (10s) | at the cap, wait this long for a slot before returning 503, so a burst is absorbed rather than failed. `0` rejects immediately |
-| Sharing policy | per-server `sharing` (+ `minWarm`) | `isolated` | `isolated` = one child per session; `pool` pre-warms children so a new session adopts a warm one. Worth it for servers with a slow cold start — the bridge measures that and tells you which ones qualify. Leave `minWarm` unset and the pool sizes itself from observed peak concurrency |
+| Sharing policy | per-server `sharing` (+ `minWarm`) | `isolated` | `isolated` = one child per session; `pool` pre-starts exclusive children; `shared` reuses one initialized child for compatible stateless tools sessions. Both alternatives require explicit activation |
 | Cold-start gate | `MCP_MAX_CONCURRENT_SPAWNS`, `MCP_SPAWN_GATE_WAIT_MS` | `2`, `15000` | how many package-manager-backed servers may cold-start at once. `npx`, `uvx`, `dnx` and friends share one cache, and starting several together can corrupt it — this queues them. Detected from the command, or forced either way with per-server `sharedPackageCache`. Servers that use no package manager are never gated. If no slot frees within the wait, the spawn proceeds ungated rather than hold a client request. `0` disables |
 | Pooling advice | `MCP_POOL_ADVICE_MS`, `MCP_WARM_MAX` | 2s, 8 | recommend pooling once a server's measured cold start passes this, and cap the suggested (and auto-sized) pool here. Advice only — the bridge never enables pooling on its own |
 | Session resume | `MCP_RESUME`, `MCP_RESUME_TTL_MS` | on, 24h | re-establish a session id the bridge has not seen — after a restart, recycle or idle reap. `MCP_RESUME=0` disables |
@@ -367,6 +425,48 @@ and HTTP servers share the cached token across all of them. The dashboard, `top`
 | Durable log | `MCP_LOG_MAX_BYTES` | `5242880` (5 MB) | `bridge.log` next to your config, rolled to `bridge.log.1` at this size. `0` disables. The dashboard only keeps the last few hundred lines in memory, which a chatty client fills in minutes |
 | Config watching | `MCP_CONFIG_WATCH` | on | reload `servers.json` when it is saved. `0` requires an explicit `mcp-pacemaker reload`. Either way, only servers whose definition changed are restarted, and an unparseable file is rejected without disturbing anything |
 | Health probing | `MCP_HEALTH_INTERVAL_MS`, or per-server `healthIntervalMinutes` | off | periodically call an HTTP server so it has a health verdict before a client needs it. Passive health from real traffic is always on and costs nothing |
+
+### Measuring process churn
+
+For stdio servers, `/api/status` reports `spawn.total` (successful process launches),
+`spawn.attempts`, `spawn.failures`, `spawn.warmAdoptions`, `spawn.sessionStarts`, and
+`spawn.sessionResumes`. Launches include classic SSE, Streamable HTTP, warm-pool refill,
+and replacements after recycle or resume. Adopting an existing warm child does not count
+as another launch. The unit is one bridge-launched process, not all of its descendants.
+
+These cumulative counters do not share the 50-sample latency limit. They reset when the
+bridge process restarts; compare snapshots only within the same `instanceId`. `startedAt`
+identifies that interval. Save the final snapshot before a planned restart for a before/after
+comparison. HTTP-proxied servers have no local process counters (`spawn: null`).
+
+`spawn.samples` and p50/p95/max still describe the latest 50 directly observed, successful
+cold initializations, not all launches. Latencies are `null` until observed; a warm child's
+idle lifetime is not a cold-start sample. The existing `requests` count covers routed HTTP
+requests, not just `tools/call`; do not label it as a tool-call count.
+
+### Shared mode
+
+Set `"sharing": "shared"` on a stdio server only when its tools are stateless, operate on
+explicit inputs and use one common credential context. This is an operator assertion, not
+something latency or matching capabilities can prove. Leave workspace-, conversation- or
+client-account-dependent servers isolated.
+
+Compatible sessions have identical full initialization parameters, including `clientInfo`,
+and empty client capabilities. One child receives one real initialization; each virtual session
+gets its own IDs, progress, cancellation and tools-list cursors. Only the upstream's actual
+tools capability is exposed. Roots, sampling, elicitation, tasks, resource subscriptions and
+other stateful methods are not supported. Incompatible clients fail explicitly, without
+silently falling back to a different mode.
+
+Deleting one session leaves the others running. The initialized child is retained between
+compatible reconnects for up to `sharedLingerMs` (30 minutes by default). Recycle drains work,
+then replaces the generation on later use. A timeout or child exit never triggers automatic
+replay of a potentially executed tool call.
+
+The server keeps its existing credential provider and configured `recycleMinutes`. Shared
+mode does not promise silent credential renewal. The dashboard and `prewarm` CLI show the
+actual shared-child state, members, queued work and cumulative process launches.
+See [the shared-session contract](docs/shared-sessions.md) for limits and failure semantics.
 
 ## Uninstall
 
