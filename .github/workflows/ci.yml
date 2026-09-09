@@ -41,6 +41,7 @@ jobs:
           node --check bin/config-checks.mjs
           node --check bin/server-metrics.mjs
           node --check bin/pooling-config.mjs
+          node --check bin/pooling-execution.mjs
           node --check bin/pooling-writer.mjs
           node --check bin/prewarm.mjs
           node --check bin/logs.mjs

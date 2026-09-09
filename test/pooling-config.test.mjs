@@ -12,6 +12,7 @@ import {
 } from '../bin/pooling-config.mjs';
 
 const BASE = '{"echo":{"command":"node"}}\n';
+const WINDOWS_HELPER = fileURLToPath(new URL('../bin/windows/PoolingSecurityHelper.exe', import.meta.url));
 
 class Fixture {
   constructor(t, text = BASE) {
@@ -146,14 +147,55 @@ $acl.AddAuditRule($rule)
 
   denyAuditInspection(t) {
     const originalSpawn = childProcess.spawnSync;
+    let inspections = 0;
+    t.after(() => assert.ok(inspections > 0, 'partial-audit seam must intercept the real packaged helper'));
     t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
-      const script = args.at(-1).replace(
-        '$audit = [System.IO.File]::GetAccessControl($Path, $auditSection).GetSecurityDescriptorBinaryForm()',
-        "throw [System.Security.AccessControl.PrivilegeNotHeldException]::new('SeSecurityPrivilege')");
-      return originalSpawn(command, [...args.slice(0, -1), script], options);
+      const result = originalSpawn(command, args, options);
+      if (command !== WINDOWS_HELPER) return result;
+      assert.deepEqual(args, ['inspect'], 'partial security must be refused before copy');
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0);
+      const fingerprint = result.stdout.trim();
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      assert.equal(fingerprint.length, 46);
+      assert.ok(fingerprint.startsWith('F:') || fingerprint.startsWith('P:'));
+      assert.equal(fingerprint[45], '=');
+      assert.ok([...fingerprint.slice(2, 45)].every((character) => alphabet.includes(character)));
+      inspections++;
+      // This tests Node's partial-result boundary, not the C# audit-denial catch path.
+      return { ...result, stdout: `P:${result.stdout.slice(2)}` };
     });
   }
 }
+
+test('Windows config operations invoke the fixed packaged helper without a shell', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = new Fixture(t);
+  const calls = [];
+  const originalSpawn = childProcess.spawnSync;
+  t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    assert.equal(command, WINDOWS_HELPER);
+    assert.equal(options.shell, false);
+    assert.equal(options.timeout, 10000);
+    assert.equal(options.env.MCP_POOL_SOURCE, fixture.path);
+    assert.equal(args.length, 1);
+    assert.ok(args[0] === 'inspect' || args[0] === 'copy');
+    if (args[0] === 'copy') {
+      assert.ok(options.env.MCP_POOL_SECURITY.startsWith('F:'));
+      assert.equal(fs.statSync(options.env.MCP_POOL_TEMP).size, 0);
+      assert.equal(fs.statSync(options.env.MCP_POOL_BACKUP).size, 0);
+    }
+    calls.push(args[0]);
+    return originalSpawn(command, args, options);
+  });
+  const applied = fixture.apply();
+  assert.equal(applied.ok, true);
+  assert.equal(fixture.undo(applied).ok, true);
+  assert.equal(calls.filter((operation) => operation === 'copy').length, 2);
+  assert.ok(calls.filter((operation) => operation === 'inspect').length >= 2);
+  assert.equal(fixture.text(), BASE);
+});
 
 test('snapshot is internal, revision hashes exact bytes, and reads never opt in', (t) => {
   const text = '{"echo":{"command":"node-secret","env":{"TOKEN":"secret-value"}}}\r\n';
@@ -1093,8 +1135,8 @@ test('regression proofs fail when guards or byte preservation are removed in dis
     },
     {
       name: 'last revision check',
-      from: "this.#checkCurrent(current);\n      fs.renameSync(files[0].path, this.#configPath);",
-      to: "fs.renameSync(files[0].path, this.#configPath);",
+      from: "this.#checkCurrent(current);\n      this.#execution?.beginCommit();\n      fs.renameSync(files[0].path, this.#configPath);",
+      to: "this.#execution?.beginCommit();\n      fs.renameSync(files[0].path, this.#configPath);",
       filter: '^backup is flushed before replacement',
     },
     {
@@ -1140,6 +1182,9 @@ test('regression proofs fail when guards or byte preservation are removed in dis
     const root = join(fixture.dir, String(index));
     fs.mkdirSync(join(root, 'bin'), { recursive: true });
     fs.mkdirSync(join(root, 'test'));
+    if (process.platform === 'win32') {
+      fs.cpSync(new URL('../bin/windows', import.meta.url), join(root, 'bin', 'windows'), { recursive: true });
+    }
     fs.writeFileSync(join(root, 'bin', 'pooling-config.mjs'), source.replace(mutation.from, mutation.to));
     const testPath = join(root, 'test', 'pooling-config.test.mjs');
     fs.writeFileSync(testPath, tests);

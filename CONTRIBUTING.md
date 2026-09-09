@@ -12,7 +12,7 @@ npm ci
 npm test
 ```
 
-Node 20 or newer. The bridge itself (`bin/mcp-bridge.mjs`) has **zero runtime dependencies**
+Node 20 or newer. The bridge itself (`bin/mcp-bridge.mjs`) has **zero npm runtime dependencies**
 and must stay that way; it runs 24/7 on a developer's machine and its dependency surface is
 part of its security posture. The setup CLI and the dashboard may use dependencies.
 
@@ -38,6 +38,15 @@ ports, because files run in parallel; the current allocation is listed at the to
 The complete Windows suite needs audit-read rights for successful configuration-write cases.
 Security-specific fixtures modify only their own temporary files. Automatic writes deliberately
 fail closed when audit policy is unreadable; the suite also exercises that restricted path.
+
+Windows automatic edits use the packaged .NET Framework 4.6.2 helper. Changes to its source
+must rebuild the executable and metadata with
+`tools/windows-security-helper/build.ps1`, then pass `-Verify` with the recorded compiler
+and reference assemblies. See the [helper build instructions](tools/windows-security-helper/README.md).
+The portable Node suite checks normalized source/build-script and binary hashes on every CI
+platform; Windows also exercises the real executable. Those checks do not replace the
+byte-for-byte rebuild, and a rolling CI image may not contain the recorded compiler.
+No compiler or PowerShell host runs in the production config-write path.
 
 **A regression test must be shown to fail without its fix.** Revert the fix, watch the test
 fail, restore it, watch it pass. Several bugs in this repo were originally "covered" by tests

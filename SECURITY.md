@@ -42,6 +42,12 @@ so a few properties matter more than usual:
   These checks detect stale clients and observed editor changes; a non-cooperating external
   writer can still race the final filesystem check/rename because portable filesystem CAS
   is unavailable. Do not edit the file concurrently with an admin action.
+- **Timeout is not proof of rollback.** Pooling operations have a nine-second budget and
+  shared cancellation before file-replacement ownership. Once replacement has started, it
+  can finish after cancellation or timeout. Uncertain and late-committed outcomes are reported
+  explicitly; saved state is reloaded, including after worker failure with config watching off.
+  Reconciliation failures are logged, not treated as success. Operations are never replayed,
+  and a failed worker refuses subsequent writes until the bridge restarts.
 - **Config backups and Undo contain config data.** `servers.json.bak` has the previous config
   and is protected like the source file, including its Windows DACL. Temporary files are given
   the same permissions before data is written. Bounded in-memory Undo records can include
@@ -52,6 +58,9 @@ so a few properties matter more than usual:
   Unreadable audit policy is refused before staging; security that cannot be preserved on both
   replacement and backup files is also refused. No automatic elevation or security-policy
   changes are performed. The built-in audit-read API uses only rights assigned to the account.
+  Inspection uses the bundled own-source .NET Framework helper, with no runtime compilation,
+  download or PowerShell fallback. Build metadata checks source/binary consistency; it is not
+  code signing or protection against replacement of the entire package.
 - **Shared mode is not a user-security boundary.** It is opt-in for stateless tools with one
   common credential context. Only a tools capability derived from the real upstream is exposed;
   unsupported client capabilities and protocol methods fail explicitly. IDs, progress,
