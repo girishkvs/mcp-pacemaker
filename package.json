@@ -11,6 +11,7 @@
     "bin/",
     "autostart/",
     "supervisor/",
+    "tools/windows-security-helper/",
     "examples/",
     "ui/dist/",
     "README.md",
@@ -47,7 +48,7 @@
   "scripts": {
     "bridge": "node bin/mcp-bridge.mjs",
     "cli": "node bin/cli.mjs",
-    "test": "node --test test/bridge.test.mjs test/bridge-controls.test.mjs test/kill-tree.test.mjs test/keepalive.test.mjs test/auth-token.test.mjs test/cold-start.test.mjs test/crash-report.test.mjs test/resume.test.mjs test/config-checks.test.mjs test/config-reload.test.mjs test/health.test.mjs test/cli.test.mjs test/logs.test.mjs test/prewarm.test.mjs test/pooling-config.test.mjs test/pooling-writer.test.mjs test/pooling-api.test.mjs test/tui.test.mjs test/warm-pool.test.mjs test/server-metrics.test.mjs test/admission.test.mjs test/shared-sessions.test.mjs test/shared-http.test.mjs test/cross-host.test.mjs test/suite-integrity.test.mjs"
+    "test": "node --test test/bridge.test.mjs test/bridge-controls.test.mjs test/kill-tree.test.mjs test/keepalive.test.mjs test/auth-token.test.mjs test/cold-start.test.mjs test/crash-report.test.mjs test/resume.test.mjs test/config-checks.test.mjs test/config-reload.test.mjs test/health.test.mjs test/cli.test.mjs test/logs.test.mjs test/prewarm.test.mjs test/pooling-config.test.mjs test/pooling-writer.test.mjs test/pooling-api.test.mjs test/pooling-deadlines.test.mjs test/pooling-queue-budget.test.mjs test/windows-security-helper.test.mjs test/tui.test.mjs test/warm-pool.test.mjs test/server-metrics.test.mjs test/admission.test.mjs test/shared-sessions.test.mjs test/shared-http.test.mjs test/cross-host.test.mjs test/suite-integrity.test.mjs"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",

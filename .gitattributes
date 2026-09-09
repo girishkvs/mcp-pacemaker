@@ -15,6 +15,7 @@
 
 # Built dashboard assets are shipped exactly as produced (no line-ending conversion).
 ui/dist/** -text
+bin/windows/*.exe binary
 
 # Images are binary — never line-ending converted.
 *.png   binary

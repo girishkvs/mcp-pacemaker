@@ -203,6 +203,20 @@ If security cannot be verified or preserved, the action is refused before config
 the bridge does not elevate itself. Existing sessions keep running. Configuration writes run in
 a serialized worker so permission inspection does not block MCP traffic.
 
+Windows security inspection uses the bundled, own-source .NET Framework helper rather than
+starting PowerShell or compiling code on each write. Automatic edits require .NET Framework
+4.6.2 or later; modern Windows includes it. The helper's source, build instructions and
+integrity metadata are [included in the package](tools/windows-security-helper/README.md).
+Windows ARM64 execution is not yet validated.
+
+Pooling writes have a nine-second budget, including queueing and permission inspection.
+Expired or cancelled work cannot start a file replacement. A replacement already in progress
+can finish after the deadline: the action reports an unknown or late-committed outcome, and
+the bridge reloads the saved configuration. It never automatically retries or claims that a
+timed-out write was rolled back. Reread the settings before taking another action.
+If the writer worker exits, further automatic edits are refused until the bridge restarts;
+existing MCP sessions continue.
+
 ### Health
 
 The `Health` tab runs the same checks as `mcp-pacemaker doctor`, so you can see them without a

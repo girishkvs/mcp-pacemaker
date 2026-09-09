@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import childProcess from 'node:child_process';
 
 export const MAX_MIN_WARM = 32;
@@ -8,94 +9,7 @@ export const MAX_UNDO_ENTRIES = 32;
 export const MAX_UNDO_BYTES = 8 * 1024 * 1024;
 export const MAX_CONFIG_BYTES = 1024 * 1024;
 
-const WINDOWS_SECURITY_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-
-public sealed class PoolingSecurityReader
-{
-    private const uint ReadControlSections = 0x1f7;
-
-    /// <summary>Reads native owner, DACL and non-audit security sections.</summary>
-    /// <param name="path">File whose descriptor is queried.</param>
-    /// <returns>The unfiltered sections in canonical binary form.</returns>
-    public byte[] ReadControlDescriptor(string path)
-    {
-        IntPtr descriptor = IntPtr.Zero;
-        try
-        {
-            uint status = GetNamedSecurityInfo(path, 1, ReadControlSections,
-                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out descriptor);
-            if (status != 0)
-            {
-                throw new Win32Exception((int)status);
-            }
-            var native = new byte[GetSecurityDescriptorLength(descriptor)];
-            Marshal.Copy(descriptor, native, 0, native.Length);
-            var raw = new RawSecurityDescriptor(native, 0);
-            var canonical = new byte[raw.BinaryLength];
-            raw.GetBinaryForm(canonical, 0);
-            return canonical;
-        }
-        finally
-        {
-            if (descriptor != IntPtr.Zero) LocalFree(descriptor);
-        }
-    }
-
-    [DllImport("advapi32.dll", EntryPoint = "GetNamedSecurityInfoW", CharSet = CharSet.Unicode)]
-    private static extern uint GetNamedSecurityInfo(string path, uint objectType, uint sections,
-        IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
-
-    [DllImport("advapi32.dll")]
-    private static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-}
-'@
-$nativeReader = [PoolingSecurityReader]::new()
-function Get-PoolingFileSecurity {
-  param([string]$Path = $env:MCP_POOL_SOURCE)
-  $acl = [System.IO.File]::GetAccessControl($Path)
-  $sections = [System.Security.AccessControl.AccessControlSections]'Access, Owner, Group'
-  $descriptor = $acl.GetSecurityDescriptorSddlForm($sections)
-  $native = $nativeReader.ReadControlDescriptor($Path)
-  $complete = $true
-  [byte[]]$audit = @()
-  try {
-    $auditSection = [System.Security.AccessControl.AccessControlSections]::Audit
-    $audit = [System.IO.File]::GetAccessControl($Path, $auditSection).GetSecurityDescriptorBinaryForm()
-  } catch [System.Security.AccessControl.PrivilegeNotHeldException] {
-    $complete = $false
-  } catch [System.UnauthorizedAccessException] {
-    $complete = $false
-  }
-  $attributes = [int][System.IO.File]::GetAttributes($Path)
-  $hash = [System.Security.Cryptography.SHA256]::Create()
-  $buffer = [System.IO.MemoryStream]::new()
-  $writer = [System.IO.BinaryWriter]::new($buffer)
-  try {
-    $writer.Write([int]$native.Length)
-    $writer.Write([byte[]]$native)
-    $writer.Write([int]$audit.Length)
-    $writer.Write([byte[]]$audit)
-    $writer.Write($attributes)
-    $writer.Flush()
-    $scope = if ($complete) { 'F:' } else { 'P:' }
-    $fingerprint = $scope + [Convert]::ToBase64String($hash.ComputeHash($buffer.ToArray()))
-  } finally {
-    $writer.Dispose()
-    $buffer.Dispose()
-    $hash.Dispose()
-  }
-  [pscustomobject]@{ Acl = $acl; Descriptor = $descriptor; Sections = $sections; Fingerprint = $fingerprint }
-}
-`;
+const WINDOWS_SECURITY_HELPER = fileURLToPath(new URL('./windows/PoolingSecurityHelper.exe', import.meta.url));
 
 export class PoolingConfigError extends Error {
   constructor(statusCode, code, message) {
@@ -242,6 +156,7 @@ export class PoolingConfigStore {
   #configPath;
   #undos = new Map();
   #undoBytes = 0;
+  #execution;
 
   constructor(configPath) {
     if (typeof configPath !== 'string' ||
@@ -262,7 +177,25 @@ export class PoolingConfigStore {
     return this.snapshot().revision;
   }
 
-  apply(request) {
+  apply(request, execution) {
+    return this.#execute(() => this.#apply(request), execution);
+  }
+
+  undo(request, execution) {
+    return this.#execute(() => this.#undo(request), execution);
+  }
+
+  #execute(operation, execution) {
+    this.#execution = execution;
+    try {
+      execution?.check();
+      return operation();
+    } finally {
+      this.#execution = undefined;
+    }
+  }
+
+  #apply(request) {
     this.#validateRequest(request, ['name', 'mode', 'minWarm', 'revision']);
     if (request.mode !== 'pool' &&
         request.mode !== 'isolated') {
@@ -306,7 +239,7 @@ export class PoolingConfigStore {
     return { ok: true, ...state, revision, undoId };
   }
 
-  undo(request) {
+  #undo(request) {
     this.#validateRequest(request, ['name', 'undoId', 'revision']);
     if (typeof request.undoId !== 'string' ||
         !/^[0-9a-f-]{36}$/.test(request.undoId)) {
@@ -410,6 +343,7 @@ export class PoolingConfigStore {
   }
 
   #read(captureSecurity = false) {
+    this.#execution?.check();
     let fd;
     try {
       const pathStat = fs.lstatSync(this.#configPath);
@@ -472,16 +406,16 @@ export class PoolingConfigStore {
     }
   }
 
-  #runWindowsSecurity(script, environment = {}) {
-    const result = childProcess.spawnSync(join(process.env.SystemRoot || 'C:\\Windows',
-      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_SECURITY_SCRIPT + script], {
+  #runWindowsSecurity(operation, environment = {}) {
+    const result = childProcess.spawnSync(WINDOWS_SECURITY_HELPER, [operation], {
+      shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       encoding: 'utf8',
-      timeout: 10000,
+      timeout: Math.min(10000, this.#execution?.remainingMs() ?? 10000),
       env: { ...process.env, MCP_POOL_SOURCE: this.#configPath, ...environment },
     });
+    this.#execution?.check();
     if (result.status === 3) {
       throw new PoolingConfigError(409, 'REVISION_CONFLICT', 'Config permissions or file attributes changed. Reread the config.');
     }
@@ -493,7 +427,7 @@ export class PoolingConfigStore {
   }
 
   #windowsSecurity() {
-    const fingerprint = this.#runWindowsSecurity('\n(Get-PoolingFileSecurity).Fingerprint\n');
+    const fingerprint = this.#runWindowsSecurity('inspect');
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
     const valid = fingerprint.length === 46 &&
       (fingerprint[0] === 'F' || fingerprint[0] === 'P') &&
@@ -508,29 +442,7 @@ export class PoolingConfigStore {
   #permissions(files, current) {
     if (process.platform === 'win32') {
       // chmod on Windows cannot preserve a restrictive DACL. Copy it before writing secrets.
-      const script = `
-$source = Get-PoolingFileSecurity
-if ($source.Fingerprint -cne $env:MCP_POOL_SECURITY) { exit 3 }
-$section = $source.Sections
-$expected = $source.Descriptor
-foreach ($path in @($env:MCP_POOL_TEMP, $env:MCP_POOL_BACKUP)) {
-  $actual = [System.IO.File]::GetAccessControl($path)
-  if ($actual.GetSecurityDescriptorSddlForm($section) -cne $expected) {
-    $copy = [System.Security.AccessControl.FileSecurity]::new()
-    $copy.SetSecurityDescriptorSddlForm($expected, $section)
-    [System.IO.File]::SetAccessControl($path, $copy)
-    $actual = [System.IO.File]::GetAccessControl($path)
-  }
-  if ($actual.GetSecurityDescriptorSddlForm($section) -cne $expected) {
-    throw 'Permission mismatch'
-  }
-  if ((Get-PoolingFileSecurity -Path $path).Fingerprint -cne $env:MCP_POOL_SECURITY) {
-    throw 'Security metadata cannot be preserved'
-  }
-}
-if ((Get-PoolingFileSecurity).Fingerprint -cne $env:MCP_POOL_SECURITY) { exit 3 }
-`;
-      this.#runWindowsSecurity(script, {
+      this.#runWindowsSecurity('copy', {
         MCP_POOL_TEMP: files[0].path,
         MCP_POOL_BACKUP: files[1].path,
         MCP_POOL_SECURITY: current.security,
@@ -548,6 +460,7 @@ if ((Get-PoolingFileSecurity).Fingerprint -cne $env:MCP_POOL_SECURITY) { exit 3 
   }
 
   #replace(current, bytes) {
+    this.#execution?.check();
     if (process.platform === 'win32' &&
         !current.security.startsWith('F:')) {
       throw new PoolingConfigError(403, 'SECURITY_UNAVAILABLE',
@@ -556,12 +469,14 @@ if ((Get-PoolingFileSecurity).Fingerprint -cne $env:MCP_POOL_SECURITY) { exit 3 
     const files = [];
     try {
       for (let index = 0; index < 2; index++) {
+        this.#execution?.check();
         const path = join(dirname(this.#configPath), `.pooling-${randomUUID()}.tmp`);
         const fd = fs.openSync(path, 'wx', 0o600);
         files.push({ path, fd, owned: true });
       }
       this.#permissions(files, current);
       for (const [index, file] of files.entries()) {
+        this.#execution?.check();
         fs.writeFileSync(file.fd, index === 0 ? bytes : current.bytes);
         if (process.platform !== 'win32') {
           fs.fchmodSync(file.fd, current.stat.mode & 0o7777);
@@ -571,10 +486,12 @@ if ((Get-PoolingFileSecurity).Fingerprint -cne $env:MCP_POOL_SECURITY) { exit 3 
         file.fd = undefined;
       }
       this.#checkCurrent(current);
+      this.#execution?.check();
       fs.renameSync(files[1].path, `${this.#configPath}.bak`);
       files[1].owned = false;
       // No portable filesystem CAS: an external writer can still race this last check + rename.
       this.#checkCurrent(current);
+      this.#execution?.beginCommit();
       fs.renameSync(files[0].path, this.#configPath);
       files[0].owned = false;
     } catch (error) {

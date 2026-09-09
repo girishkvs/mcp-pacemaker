@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   audit policy cannot be verified or preserved.
 - Run configuration writes in a bounded, serialized worker so Windows permission inspection
   does not block the bridge's request processing.
+- Replace per-write PowerShell startup and C# compilation with a bundled, reproducibly built
+  Windows security helper while retaining the same permission-preservation checks.
+- Bound configuration-write queueing and execution with shared cancellation. Report uncertain
+  or late-committed replacements honestly and reload saved state after a worker exits, even
+  with config watching disabled. Never replay a timed-out operation.
 - Update the UI build's `browserslist` dependency to 4.28.9 to address its published memory-growth
   and custom-stats advisories.
 

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "binary": "PoolingSecurityHelper.exe",
+  "binarySha256": "effdc8deb06beab195523f714b8d1a396ec53f00b6b4a437e251a25d94234c9e",
+  "inputs": {
+    "targetFramework": ".NETFramework,Version=v4.6.2",
+    "platform": "AnyCPU",
+    "compilerVersion": "5.9.0-1.26357.3 (35d9211b841e7613c1d2f8f5af6d628ace696c4c)",
+    "compilerSha256": "3aafb7b9c54fa31a7092af35148971ee616965e7f9a0b80fb7fdc4bdd1d1a555",
+    "compilerArguments": [
+      "/nologo",
+      "/noconfig",
+      "/nostdlib+",
+      "/target:exe",
+      "/platform:anycpu",
+      "/langversion:7.3",
+      "/optimize+",
+      "/debug-",
+      "/deterministic+",
+      "/checked-",
+      "/unsafe-",
+      "/warn:4",
+      "/warnaserror+",
+      "/utf8output"
+    ],
+    "pathMap": "/_/mcp-pacemaker/windows-security-helper",
+    "sourceEncoding": "UTF-8 without BOM, LF line endings",
+    "sourceSha256": {
+      "AssemblyInfo.cs": "e81e107352fbcb82818d8265dfcdf392eac8d25df37e6d65ca7f02d1e63a6c9a",
+      "PoolingSecurityReader.cs": "91620ba5e0b3c6fcc673319f59c96466115a6be74fd8b93808f08f07087b7038",
+      "PoolingSecurityHelper.cs": "aff0222cf28258f1004908b0ad6e471d00012d5ea7dd90af163d83eb743df6f0"
+    },
+    "buildScriptSha256": "29dcb4641182bfe5552e9e913f90d4a37e99ddc7677b65b7dcb22cae16d98c60",
+    "referenceSha256": {
+      "mscorlib.dll": "7118fe658567606fa0538f7b5a2071e4606756c07e9062e1e5b24fa49e97d1f6",
+      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125"
+    }
+  }
+}

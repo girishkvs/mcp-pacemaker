@@ -36,6 +36,7 @@ import { checkServerPaths, checkReservedName } from './config-checks.mjs';
 import { ServerMetrics } from './server-metrics.mjs';
 import { MAX_MIN_WARM } from './pooling-config.mjs';
 import { PoolingConfigWriter } from './pooling-writer.mjs';
+import { POOLING_BUDGET_MS } from './pooling-execution.mjs';
 import { SharedSessionManager, SHARED_DEFAULTS } from './shared-sessions.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -314,6 +315,8 @@ function handleAdmin(url, req, res) {
 
 function handlePoolingChange(encodedName, req, res) {
   const reply = (status, body) => {
+    if (res.destroyed ||
+        res.writableEnded) return;
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   };
@@ -332,7 +335,35 @@ function handlePoolingChange(encodedName, req, res) {
   const chunks = [];
   let bytes = 0;
   let rejected = false;
+  const controller = new AbortController();
+  const execution = {
+    signal: controller.signal,
+    deadline: process.hrtime.bigint() + BigInt(POOLING_BUDGET_MS) * 1000000n,
+    onLateSettlement: ({ error, committed, commitStarted }) => {
+      if (error &&
+          error.code !== 'WRITER_CANCELLED' &&
+          error.code !== 'WRITER_DEADLINE') {
+        log(`pooling operation settled without a normal result (${error.code}); reread the config`);
+      }
+      if (!committed &&
+          !commitStarted) return;
+      const reloaded = reloadConfig('pooling commit settled without a normal result');
+      if (!reloaded.ok) log('pooling commit settled but reload failed; reread the config');
+    },
+  };
+  const bodyTimer = setTimeout(() => {
+    rejected = true;
+    chunks.length = 0;
+    controller.abort();
+    reply(408, { error: 'Pooling request body deadline exceeded. No change was submitted.' });
+  }, POOLING_BUDGET_MS);
+  res.on('close', () => {
+    clearTimeout(bodyTimer);
+    if (!res.writableFinished) controller.abort();
+  });
   req.on('error', () => {
+    clearTimeout(bodyTimer);
+    controller.abort();
     rejected = true;
     chunks.length = 0;
     log('pooling request interrupted before completion');
@@ -349,6 +380,7 @@ function handlePoolingChange(encodedName, req, res) {
     chunks.push(chunk);
   });
   req.on('end', async () => {
+    clearTimeout(bodyTimer);
     if (rejected) return;
     let body;
     let name;
@@ -368,8 +400,8 @@ function handlePoolingChange(encodedName, req, res) {
     }
     try {
       const result = Object.hasOwn(body, 'undoId')
-        ? await poolingConfig.undo({ ...body, name })
-        : await poolingConfig.apply({ ...body, name });
+        ? await poolingConfig.undo({ ...body, name }, execution)
+        : await poolingConfig.apply({ ...body, name }, execution);
       const reloaded = reloadConfig('pooling action');
       if (!reloaded.ok) {
         log(`[${name}] pooling settings saved but reload failed`);
