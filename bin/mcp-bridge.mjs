@@ -34,8 +34,8 @@ import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { checkServerPaths, checkReservedName } from './config-checks.mjs';
 import { ServerMetrics } from './server-metrics.mjs';
-import { MAX_MIN_WARM } from './pooling-config.mjs';
-import { PoolingConfigWriter } from './pooling-writer.mjs';
+import { MAX_MIN_WARM, hasPoolingTransaction, recoverPoolingConfig } from './pooling-config.mjs';
+import { PoolingBatches } from './pooling-batches.mjs';
 import { POOLING_BUDGET_MS } from './pooling-execution.mjs';
 import { SharedSessionManager, SHARED_DEFAULTS } from './shared-sessions.mjs';
 
@@ -47,7 +47,8 @@ const getArg = (name, def) => {
 };
 
 const HOME = resolve(homedir(), '.mcp-pacemaker');
-const defaultConfig = existsSync(resolve(process.cwd(), 'servers.json'))
+const localConfig = resolve(process.cwd(), 'servers.json');
+const defaultConfig = existsSync(localConfig) || hasPoolingTransaction(localConfig)
   ? resolve(process.cwd(), 'servers.json')
   : resolve(HOME, 'servers.json');
 const CONFIG = resolve(process.cwd(), getArg('--config', defaultConfig));
@@ -58,12 +59,21 @@ const VERSION = (() => { try { return JSON.parse(readFileSync(resolve(__dirname,
 const BASE_CWD = resolve(getArg('--cwd', dirname(CONFIG)));
 
 /** @type {Record<string, any>} */
+if (hasPoolingTransaction(CONFIG)) recoverPoolingConfig(CONFIG);
 const servers = JSON.parse(readFileSync(CONFIG, 'utf8'));
-const poolingConfig = new PoolingConfigWriter(CONFIG);
+const poolingConfig = new PoolingBatches({
+  configPath: CONFIG,
+  reload: reloadConfig,
+  revision: () => createHash('sha256').update(lastConfigText ?? '').digest('hex'),
+  notify: publishSnapshot,
+  captureSnapshot: richSnapshot,
+  onError: (error) => log(`pooling reload failed (${error.code || 'IO_ERROR'}); reread batch status`),
+});
 
 /* ----------------------------- dashboard backbone --------------------------- */
 const startedAt = Date.now();
 const instanceId = randomUUID();
+let snapshotVersion = 0;
 const serverMetrics = new ServerMetrics();
 const ADMIN_NONCE = randomUUID();
 const NONCE_FILE = resolve(dirname(CONFIG), 'admin.nonce');
@@ -185,8 +195,20 @@ function richSnapshot() {
   // breached. Report the number the cap actually counts alongside it.
   for (const s of sessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; if (s.child?.pid) b.pids.push(s.child.pid); } }
   for (const s of httpSessions.values()) { const b = byName[s.name]; if (b) { b.sessions++; b.cappedSessions++; if (s.child?.pid && !b.pids.includes(s.child.pid)) b.pids.push(s.child.pid); if (s.clientInfo && s.clientInfo.name && !b.clients.includes(s.clientInfo.name)) b.clients.push(s.clientInfo.name); } }
-  const prewarm = { revision: createHash('sha256').update(lastConfigText ?? '').digest('hex'), maxWarm: MAX_MIN_WARM };
-  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, instanceId, startedAt: new Date(startedAt).toISOString(), prewarm, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, restart: restartStatus(), servers: Object.values(byName) };
+  const prewarm = {
+    revision: createHash('sha256').update(lastConfigText ?? '').digest('hex'),
+    maxWarm: MAX_MIN_WARM, ...poolingConfig.snapshot(),
+  };
+  snapshotVersion++;
+  return { ok: true, service: 'mcp-pacemaker', version: VERSION, port: PORT, instanceId, snapshotVersion, startedAt: new Date(startedAt).toISOString(), prewarm, uptimeSec: Math.round((Date.now() - startedAt) / 1000), sessions: sessions.size + httpSessions.size, restart: restartStatus(), servers: Object.values(byName) };
+}
+
+function publishSnapshot() {
+  if (!snapClients.size) return;
+  const frame = `data: ${JSON.stringify(richSnapshot())}\n\n`;
+  for (const client of snapClients) {
+    try { client.write(frame); } catch { /* disconnected */ }
+  }
 }
 
 function prewarmingState(name) {
@@ -298,9 +320,20 @@ function handleAdmin(url, req, res) {
     return;
   }
   if (req.method === 'POST' && parts[1] === 'reload') {
-    const r = reloadConfig('admin request');
-    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(r));
+    poolingConfig.reloadNow().then((result) => {
+      if (res.destroyed) return;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ...result, snapshot: richSnapshot() }));
+    }).catch((error) => {
+      if (res.destroyed) return;
+      res.writeHead(error.statusCode ?? 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: false, error: error.statusCode ? error.message : 'Unable to reload the saved config.',
+        code: error.statusCode ? error.code : 'RELOAD_FAILED',
+        ...(error.commitState ? { commitState: error.commitState } : {}),
+        snapshot: richSnapshot(),
+      }));
+    });
     return;
   }
   if (req.method === 'POST' && parts[1] === 'recycle') {
@@ -332,6 +365,11 @@ function handlePoolingChange(encodedName, req, res) {
     req.resume();
     return;
   }
+  if (req.headers['x-mcp-pooling-batch'] !== '1') {
+    reply(409, { error: 'Reload the dashboard or update the CLI before changing pooling settings.' });
+    req.resume();
+    return;
+  }
   const chunks = [];
   let bytes = 0;
   let rejected = false;
@@ -339,17 +377,6 @@ function handlePoolingChange(encodedName, req, res) {
   const execution = {
     signal: controller.signal,
     deadline: process.hrtime.bigint() + BigInt(POOLING_BUDGET_MS) * 1000000n,
-    onLateSettlement: ({ error, committed, commitStarted }) => {
-      if (error &&
-          error.code !== 'WRITER_CANCELLED' &&
-          error.code !== 'WRITER_DEADLINE') {
-        log(`pooling operation settled without a normal result (${error.code}); reread the config`);
-      }
-      if (!committed &&
-          !commitStarted) return;
-      const reloaded = reloadConfig('pooling commit settled without a normal result');
-      if (!reloaded.ok) log('pooling commit settled but reload failed; reread the config');
-    },
   };
   const bodyTimer = setTimeout(() => {
     rejected = true;
@@ -399,21 +426,16 @@ function handlePoolingChange(encodedName, req, res) {
       return;
     }
     try {
-      const result = Object.hasOwn(body, 'undoId')
-        ? await poolingConfig.undo({ ...body, name }, execution)
-        : await poolingConfig.apply({ ...body, name }, execution);
-      const reloaded = reloadConfig('pooling action');
-      if (!reloaded.ok) {
-        log(`[${name}] pooling settings saved but reload failed`);
-        reply(500, { error: 'Settings were saved, but could not be activated. Reread the config before retrying.', revision: result.revision });
-        return;
-      }
-      log(`[${name}] pooling ${Object.hasOwn(body, 'undoId') ? 'undo' : result.mode} applied`);
-      reply(200, { ...result, snapshot: richSnapshot() });
+      const result = await poolingConfig.stage({ ...body, name }, execution);
+      log(`[${name}] pooling ${result.pending ? 'batch staged' : result.cancelled ? 'batch cancelled' : 'unchanged'}`);
+      reply(result.pending ? 202 : 200, result);
     } catch (error) {
       const status = Number.isInteger(error.statusCode) ? error.statusCode : 500;
       log(`pooling action rejected (${error.code || 'IO_ERROR'})`);
-      reply(status, { error: error.statusCode ? error.message : 'Unable to apply pooling settings.' });
+      reply(status, {
+        error: error.statusCode ? error.message : 'Unable to stage pooling settings.',
+        ...(error.commitState ? { commitState: error.commitState } : {}),
+      });
     }
   });
 }
@@ -435,7 +457,7 @@ function handleUi(pathname, res) {
 }
 
 // Push snapshots to /api/events subscribers on an interval.
-setInterval(() => { if (!snapClients.size) return; const p = `data: ${JSON.stringify(richSnapshot())}\n\n`; for (const c of snapClients) { try { c.write(p); } catch { /* gone */ } } }, 2000).unref();
+setInterval(publishSnapshot, 2000).unref();
 
 /* ------------------------------ pluggable auth ------------------------------ */
 const tokenCache = new Map(); // key -> { value, exp }
@@ -619,6 +641,8 @@ function killTree(child, sync = false) {
     child.detach();
     return;
   }
+  if (child.exitCode != null ||
+      child.signalCode != null) return;
   // Teardown we initiated. taskkill /F reports exit code 1, so without this every recycle,
   // idle reap and session close would be recorded as a crash.
   child.__bridgeKilled = true;
@@ -1427,22 +1451,36 @@ let lastConfigText = (() => { try { return readFileSync(CONFIG, 'utf8'); } catch
 function reloadConfig(reason) {
   let text;
   try { text = readFileSync(CONFIG, 'utf8'); }
-  catch (e) { return { ok: false, error: `cannot read ${CONFIG}: ${e.message}` }; }
+  catch {
+    return { ok: false, statusCode: 500, code: 'CONFIG_READ_FAILED',
+      publicError: 'Unable to read the saved configuration.' };
+  }
   if (text === lastConfigText) return { ok: true, unchanged: true, added: [], removed: [], changed: [], restarted: 0 };
 
   // An invalid file must never take working servers down — a half-written save from an editor
   // looks exactly like this. Keep serving what is already in memory and report the problem.
   let next;
   try { next = JSON.parse(text); }
-  catch (e) { log(`config reload rejected: invalid JSON (${e.message})`); return { ok: false, error: `invalid JSON: ${e.message}` }; }
-  if (!next || typeof next !== 'object' || Array.isArray(next)) {
-    log('config reload rejected: top level must be an object of server definitions');
-    return { ok: false, error: 'top level must be an object of server definitions' };
+  catch {
+    log('config reload rejected: invalid JSON');
+    return { ok: false, statusCode: 400, code: 'INVALID_CONFIG_JSON',
+      publicError: 'Saved config contains invalid JSON.' };
   }
-  for (const [n, d] of Object.entries(next)) {
-    if (!d || typeof d !== 'object' || (!d.command && !d.url)) {
-      log(`config reload rejected: "${n}" has neither "command" nor "url"`);
-      return { ok: false, error: `server "${n}" has neither "command" nor "url"` };
+  if (!next ||
+      typeof next !== 'object' ||
+      Array.isArray(next)) {
+    log('config reload rejected: top level must be an object of server definitions');
+    return { ok: false, statusCode: 400, code: 'INVALID_CONFIG_ROOT',
+      publicError: 'Config top level must be an object of server definitions.' };
+  }
+  for (const d of Object.values(next)) {
+    if (!d ||
+        typeof d !== 'object' ||
+        (!d.command &&
+         !d.url)) {
+      log('config reload rejected: a server has neither "command" nor "url"');
+      return { ok: false, statusCode: 400, code: 'INVALID_SERVER_DEFINITION',
+        publicError: 'A server definition has neither "command" nor "url".' };
     }
   }
 
@@ -1469,7 +1507,11 @@ if (process.env.MCP_CONFIG_WATCH !== '0') {
     try {
       watcher = watch(CONFIG, () => {
         clearTimeout(timer);
-        timer = setTimeout(() => { reloadConfig('file changed'); rearm(); }, 300);
+        timer = setTimeout(() => {
+          poolingConfig.reloadSaved('file changed')
+            .catch(() => log('config watcher could not reload the saved configuration'))
+            .finally(rearm);
+        }, 300);
       });
       watcher.unref?.();
     } catch { /* watching is best effort; /admin/reload still works */ }

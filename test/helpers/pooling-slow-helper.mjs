@@ -2,12 +2,16 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const [directory, helper, operation] = process.argv.slice(2);
-fs.writeFileSync(join(directory, 'entered'), 'slow-helper');
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+const [directory, helper, operation, delayMs = '1500'] = process.argv.slice(2);
+if (operation === 'inspect-access') {
+  fs.writeFileSync(join(directory, 'entered-next'), 'slow-helper');
+  fs.renameSync(join(directory, 'entered-next'), join(directory, 'entered'));
+}
+const input = fs.readFileSync(0);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(delayMs));
 const result = spawnSync(helper, [operation], {
-  shell: false, windowsHide: true, encoding: 'utf8', timeout: 10000,
-  stdio: ['ignore', 'pipe', 'pipe'],
+  shell: false, windowsHide: true, encoding: 'utf8', timeout: 10000, input,
+  stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 16384,
 });
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);

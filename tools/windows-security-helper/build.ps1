@@ -70,8 +70,8 @@ $sourceDirectory = Join-Path $binaryDirectory 'src'
 $binaryName = 'PoolingSecurityHelper.exe'
 $binaryPath = Join-Path $binaryDirectory $binaryName
 $metadataPath = Join-Path $binaryDirectory 'PoolingSecurityHelper.build.json'
-$sourceNames = @('AssemblyInfo.cs', 'PoolingSecurityReader.cs', 'PoolingSecurityHelper.cs')
-$referenceNames = @('mscorlib.dll', 'System.dll')
+$sourceNames = @('AssemblyInfo.cs', 'PoolingSecurityReader.cs', 'PoolingSecurityHelper.cs', 'PoolingNativeFiles.cs')
+$referenceNames = @('mscorlib.dll', 'System.dll', 'System.Core.dll', 'System.Web.Extensions.dll')
 
 if (-not $CompilerPath) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

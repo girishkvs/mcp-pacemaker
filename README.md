@@ -19,6 +19,12 @@ is separate planned work.
 
 ## Quick start
 
+Pooling compatibility coverage is scoped to **1.3.0 and 2.0.0**. A 2.0.0 client still handles
+1.3.0's immediate saves. A 1.3.0 client cannot write pooling settings to a 2.0.0 bridge:
+update the CLI and refresh old dashboard tabs. Before downgrading, settle any pending or
+interrupted transaction with 2.0.0. See the [real-version CI gates](CONTRIBUTING.md#real-version-compatibility-gates)
+for exact cases and local commands; other minor versions are not covered.
+
 ```bash
 npm i -g github:girishkvs/mcp-pacemaker
 mcp-pacemaker init
@@ -180,7 +186,18 @@ HTTP proxies are excluded because the bridge does not launch their processes.
 Choose **Enable pre-warming (N)** on a slow-server card or in the table. The button shows
 the exact warm count and the extra resident-process cost before you click. Nothing enables
 it automatically. **Disable pre-warming** removes idle warm children without killing active
-sessions; **Undo** restores the prior config only if no intervening edit has occurred.
+sessions after the change is applied.
+
+Changes are batched in a **complete pending copy** of `servers.json`. Every accepted change
+resets a five-second countdown. When editing stops, reload validates the pending copy, retains
+the original as `servers.previous.json`, flips the pending file into place, and activates the
+new settings. The dashboard shows **Pending** or **Applying** until that succeeds; active
+mode and warm counts are not changed early. **Reload now** flushes the same batch immediately.
+
+**Cancel batch** discards a pending batch without changing active settings. **Undo batch**
+stages the full previous configuration for another five-second batch, only if no intervening
+active-file edit has occurred. These actions affect the entire batch; the dashboard names all
+affected servers. An unrelated pending batch must be cancelled or applied before Undo.
 
 The same controls are available without a browser:
 
@@ -188,20 +205,27 @@ The same controls are available without a browser:
 mcp-pacemaker prewarm --port 8791
 mcp-pacemaker prewarm --port 8791 --enable filesystem --count 2
 mcp-pacemaker prewarm --port 8791 --disable filesystem
-# An applied change prints its own --server / --undo command.
+# Changes are queued; the printed command cancels a pending batch or undoes it after application.
 ```
 
 Use `--config <path>` when the bridge's config and admin nonce are outside the default
 directory. `--json` returns the measured snapshot. The CLI and UI use the same server
 eligibility and recommendation data; a missing latency sample is not reported as a zero-cost
-startup. Config writes preserve unrelated JSON and permissions, create `.bak`, and require
-a matching content revision. Conflicts are shown rather than retried over someone else's edit.
-Config remains strict JSON, not JSONC.
+startup. The CLI returns after staging, so consecutive commands can join the same batch.
+`prewarm` shows pending settings separately from active values. Config remains strict JSON,
+not JSONC; the pending copy preserves unrelated JSON and requires a matching active revision.
+Conflicts are reported rather than overwriting someone else's edit.
 
-On Windows, automatic edits require readable audit policy as well as ordinary file access.
-If security cannot be verified or preserved, the action is refused before config data is written;
-the bridge does not elevate itself. Existing sessions keep running. Configuration writes run in
-a serialized worker so permission inspection does not block MCP traffic.
+On Windows, saves run with the normal bridge account and use **directory-inherited auditing**.
+The dashboard gives a non-blocking notice: custom per-file audit rules may not carry forward
+to the new active copy. The retained original keeps its original metadata. No audit-read
+privilege, UAC prompt, or permanently elevated bridge is required.
+
+This does not permit broader access to configuration data. Candidates must have appropriate
+access restrictions before any configuration bytes are written, and supported integrity
+protections must be retained. Actual source write denial or unsupported protection remains
+an error. Configuration operations run in a serialized worker so file inspection does not
+block MCP traffic.
 
 Windows security inspection uses the bundled, own-source .NET Framework helper rather than
 starting PowerShell or compiling code on each write. Automatic edits require .NET Framework
@@ -209,11 +233,36 @@ starting PowerShell or compiling code on each write. Automatic edits require .NE
 integrity metadata are [included in the package](tools/windows-security-helper/README.md).
 Windows ARM64 execution is not yet validated.
 
-Pooling writes have a nine-second budget, including queueing and permission inspection.
-Expired or cancelled work cannot start a file replacement. A replacement already in progress
-can finish after the deadline: the action reports an unknown or late-committed outcome, and
-the bridge reloads the saved configuration. It never automatically retries or claims that a
-timed-out write was rolled back. Reread the settings before taking another action.
+Staging requests and file commits each have a bounded execution budget; the acknowledged
+five-second batching delay does not keep the original HTTP request open. A commit already in
+progress can finish after its deadline. The result distinguishes a pre-commit failure from
+a committed or unknown outcome; it never automatically retries or claims a timed-out write
+was rolled back.
+
+The two file moves are not an atomic exchange. Reload coordinates them with validated recovery
+state and non-replacing destination placement. Existing MCP traffic continues using the
+previous in-memory configuration during the flip; an external reader can briefly find the
+active path absent. Recovery must not overwrite a file created by an external editor.
+Reread the settings after an uncertain result.
+
+### Upgrading from 1.3.0
+
+Version 2.0.0 changes the configuration-save protocol; it does not require a new `servers.json`
+format. Update the bridge and CLI together, then reload any open dashboard pages. A 1.3.0
+client with a current nonce gets HTTP 409 before staging, with an instruction to update the
+client. An already-open tab retains the old nonce after a bridge restart and gets HTTP 401;
+refresh it to load the new dashboard and admin session.
+
+Custom API clients must send `x-mcp-pooling-batch: 1`. Treat HTTP 202 as acceptance, not
+completion, and follow the returned batch ID in `prewarm.batches` until it is applied,
+cancelled or failed. CLI scripts must likewise wait for application before relying on new
+settings. Undo now restores the complete batch and may affect several servers.
+Updated clients still understand the immediate HTTP 200 response from a 1.3.0 bridge.
+
+Before downgrading, cancel or apply pending changes with 2.0 and resolve any interrupted
+transaction using 2.0 recovery. Stop that bridge before starting 1.3.0 with the active config.
+Do not use a 1.3.0 binary to recover 2.0 transaction files or delete those files to bypass a
+recovery error. Keep a protected backup of the configuration before changing versions.
 If the writer worker exits, further automatic edits are refused until the bridge restarts;
 existing MCP sessions continue.
 
@@ -319,7 +368,7 @@ than the request it is meant to pre-empt.
 ## HTTP API
 
 Everything the dashboards show is plain HTTP on the same loopback port, so you can script it.
-Read endpoints need no auth; the one state-changing endpoint requires a nonce.
+Read endpoints need no auth; administrative writes require a nonce.
 
 | Endpoint | Method | Returns |
 |---|---|---|
@@ -329,11 +378,20 @@ Read endpoints need no auth; the one state-changing endpoint requires a nonce.
 | `/api/events` | GET (SSE) | The same snapshot pushed every 2s — what the dashboard consumes |
 | `/api/logs` | GET (SSE) | Bridge log: replays the last 100 lines, then streams. For anything older, read `bridge.log` next to your config |
 | `/admin/recycle/<name>` | POST | Restart a server's processes. Omit `<name>` to recycle everything |
-| `/admin/reload` | POST | Re-read `servers.json`. Only servers whose definition changed are restarted |
-| `/admin/servers/<name>/pooling` | POST | Explicit enable/disable/undo with admin nonce, bounded input and a matching config revision |
+| `/admin/reload` | POST | Flush a pending configuration batch, or re-read an externally edited `servers.json`. Only changed definitions are reconfigured |
+| `/admin/servers/<name>/pooling` | POST | Stage enable/disable or batch cancel/undo with admin nonce, bounded input and a matching config revision |
 | `/<name>/mcp` | POST/GET/DELETE | Streamable HTTP transport for that server |
 | `/<name>/sse` | GET | HTTP+SSE transport for that server |
 | `/.well-known/oauth-protected-resource/<name>` | GET | OAuth discovery relayed from the upstream, for HTTP servers where the client authenticates |
+
+Pooling mutations require `x-mcp-pooling-batch: 1`. A staged change returns **HTTP 202** with
+`pending: true`, a batch ID, a private cancel/undo receipt, and the public snapshot. Acceptance
+is not activation. `prewarm.batches` in the snapshot reports bounded pending, applying and
+completed outcomes; it does not expose receipt tokens or full configurations.
+Clients without the batch header are rejected before a change is queued, rather than letting
+an older client report a queued save as already enabled.
+Rich snapshots carry an instance-scoped `snapshotVersion` so a delayed HTTP response or older
+SSE frame cannot replace newer active settings or prematurely expire a batch receipt.
 
 ```bash
 # is a server actually running, and who is using it?

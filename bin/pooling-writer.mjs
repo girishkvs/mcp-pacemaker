@@ -7,26 +7,39 @@ if (!isMainThread &&
   const store = new PoolingConfigStore(workerData.configPath);
   parentPort.on('message', ({ id, method, request, deadline, buffer }) => {
     if (method === 'close') {
+      store.close();
       parentPort.close();
       return;
     }
     const execution = new PoolingExecution(deadline, buffer);
+    let cancelledBatchId;
     try {
       execution.check();
-      if (method !== 'apply' &&
-          method !== 'undo') {
+      if (!['apply', 'undo', 'stageApply', 'stageUndo', 'rejectStage', 'commitBatch'].includes(method)) {
         throw new PoolingConfigError(400, 'INVALID_REQUEST', 'Unknown pooling operation.');
       }
       const result = store[method](request, execution);
-      const completedLate = execution.complete();
+      if (result.cancelled) cancelledBatchId = result.batchId;
+      let completedLate;
+      try {
+        completedLate = execution.complete();
+      } catch (error) {
+        if (result.pending &&
+            result.accepted !== false) {
+          store.rejectStage(result, new PoolingExecution(
+            process.hrtime.bigint() + BigInt(POOLING_BUDGET_MS) * 1000000n));
+        }
+        throw error;
+      }
       parentPort.postMessage({ id, result, completedLate });
     } catch (error) {
-      execution.fail();
+      execution.fail(error.commitState);
       const known = error instanceof PoolingConfigError;
-      parentPort.postMessage({ id, error: {
+      parentPort.postMessage({ id, cancelledBatchId, error: {
         statusCode: known ? error.statusCode : 500,
         code: known ? error.code : 'WRITER_FAILED',
         message: known ? error.message : 'Pooling writer failed. Reread the config before retrying.',
+        commitState: error.commitState,
       } });
     }
   });
@@ -54,6 +67,22 @@ export class PoolingConfigWriter {
     return this.#send('undo', request, options);
   }
 
+  stageApply(request, options = {}) {
+    return this.#send('stageApply', request, options);
+  }
+
+  stageUndo(request, options = {}) {
+    return this.#send('stageUndo', request, options);
+  }
+
+  commitBatch(request, options = {}) {
+    return this.#send('commitBatch', request, options);
+  }
+
+  rejectStage(request) {
+    return this.#send('rejectStage', request, {});
+  }
+
   #send(method, request, options) {
     if (this.#closed) {
       return Promise.reject(new PoolingConfigError(503, 'WRITER_CLOSED', 'Pooling writer is shutting down.'));
@@ -75,7 +104,7 @@ export class PoolingConfigWriter {
     if (!this.#worker) this.#start();
     const id = ++this.#sequence;
     return new Promise((resolve, reject) => {
-      const pending = { resolve, reject, execution, options, settled: false };
+      const pending = { resolve, reject, execution, options, method, settled: false };
       const cancel = (expired) => {
         if (pending.settled) return;
         const error = execution.cancel(expired);
@@ -99,13 +128,38 @@ export class PoolingConfigWriter {
     this.#worker = new Worker(new URL(import.meta.url), {
       workerData: { kind: 'mcp-pooling-writer', configPath: this.#configPath },
     });
-    this.#worker.on('message', ({ id, result, error, completedLate }) => {
+    this.#worker.on('message', async ({ id, result, error, completedLate, cancelledBatchId }) => {
       const pending = this.#pending.get(id);
       if (!pending) return;
       this.#pending.delete(id);
-      const failure = error
+      let failure = error
         ? new PoolingConfigError(error.statusCode, error.code, error.message)
         : completedLate ? pending.execution.committedLate() : undefined;
+      cancelledBatchId ??= result?.cancelled ? result.batchId : undefined;
+      if (!failure &&
+          cancelledBatchId &&
+          pending.options.signal?.aborted) {
+        failure = new PoolingConfigError(408, 'WRITER_CANCELLED',
+          'Pooling change was cancelled before config commit.');
+      }
+      if (failure) {
+        failure.commitState = error?.commitState ?? failure.commitState ??
+          (pending.method === 'commitBatch' ? 'not-committed' : undefined);
+        if (cancelledBatchId) failure.cancelledBatchId = cancelledBatchId;
+      }
+      if (!failure &&
+          result?.pending &&
+          result.accepted !== false &&
+          pending.options.signal?.aborted) {
+        try {
+          await this.rejectStage({ generation: result.generation });
+          this.#settle(pending, new PoolingConfigError(408, 'WRITER_CANCELLED',
+            'Pooling change was cancelled before config commit.'));
+        } catch (cleanupError) {
+          this.#settle(pending, cleanupError);
+        }
+        return;
+      }
       if (pending.settled ||
           completedLate) this.#lateSettlement(pending, failure, result);
       this.#settle(pending, failure, result);
@@ -147,7 +201,13 @@ export class PoolingConfigWriter {
   #lateSettlement(pending, error, result, commitStarted = false) {
     if (pending.options.onLateSettlement) {
       try {
-        pending.options.onLateSettlement({ error, committed: Boolean(result), commitStarted });
+        pending.options.onLateSettlement({
+          error, result,
+          committed: Boolean(result && !result.pending && !result.cancelled) ||
+            error?.commitState === 'committed',
+          cancelledBatchId: error?.cancelledBatchId ?? (result?.cancelled ? result.batchId : undefined),
+          commitStarted,
+        });
       } catch {
         process.emitWarning('Unable to reconcile a pooling operation without a normal result.');
       }
