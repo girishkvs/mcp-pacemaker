@@ -11,6 +11,8 @@ import { execFileSync } from 'node:child_process';
 
 export function killBridge(child) {
   if (!child) return;
+  if (child.exitCode != null ||
+      child.signalCode != null) return;
   const pid = child.pid;
   if (process.platform !== 'win32' || !pid) {
     try { child.kill(); } catch { /* already gone */ }

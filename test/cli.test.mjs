@@ -2,7 +2,7 @@
 // with a known servers.json and assert the wired-entry shape each host gets. No bridge, no network.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -54,6 +54,30 @@ test('codex: valid TOML [mcp_servers.*] tables with streamable http url', () => 
   assert.match(out, /\[mcp_servers\.h1\]/);
   assert.match(out, new RegExp(`url = "http://127\\.0\\.0\\.1:${PORT}/h1"`));
 });
+
+for (const { name, input, expected } of [
+  { name: 'unclosed array', input: 'a=[1 #' },
+  { name: 'unclosed inline table', input: 'a={ b=1 #' },
+  { name: 'valid array', input: 'a=[1] #', expected: { a: [1] } },
+  { name: 'valid inline table', input: 'a={ b=1 } #', expected: { a: { b: 1 } } },
+]) {
+  test(`codex parser: ${name} with an EOF comment does not hang`, () => {
+    const script = "import { parse } from 'smol-toml'; process.stdout.write(JSON.stringify(parse(process.argv[1])));";
+    // Keep a regressed parser from hanging the test runner (CVE-2026-85730).
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script, input], {
+      cwd: resolve(__dirname, '..'), encoding: 'utf8', timeout: 5000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    if (expected) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), expected);
+    } else {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /TomlError/);
+    }
+  });
+}
 
 test('claude-code: native `claude mcp add` commands', () => {
   const out = emit('claude-code');

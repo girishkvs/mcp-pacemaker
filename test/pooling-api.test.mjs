@@ -73,7 +73,14 @@ class PoolingBridge {
   }
 
   async change(body, name = 'alpha', headers = {}) {
-    return this.request('POST', `/admin/servers/${encodeURIComponent(name)}/pooling`, body, { 'x-mcp-nonce': this.nonce, ...headers });
+    return this.request('POST', `/admin/servers/${encodeURIComponent(name)}/pooling`, body,
+      { 'x-mcp-nonce': this.nonce, 'x-mcp-pooling-batch': '1', ...headers });
+  }
+
+  async reload() {
+    const response = await this.request('POST', '/admin/reload', undefined, { 'x-mcp-nonce': this.nonce });
+    assert.equal(response.status, 200, response.text);
+    return JSON.parse(response.text);
   }
 }
 
@@ -95,9 +102,11 @@ test('one-click apply and undo preserve active sessions even when file watching 
   const before = await bridge.snapshot();
   const pid = before.servers.find((server) => server.name === 'alpha').pids[0];
   const applied = await bridge.change({ mode: 'pool', minWarm: 1, revision: before.prewarm.revision });
-  assert.equal(applied.status, 200, applied.text);
+  assert.equal(applied.status, 202, applied.text);
   const result = JSON.parse(applied.text);
   assert.ok(result.undoId);
+  assert.equal(readFileSync(bridge.config, 'utf8'), bridge.original);
+  await bridge.reload();
   const after = await bridge.snapshot();
   const alpha = after.servers.find((server) => server.name === 'alpha');
   assert.equal(alpha.sharing, 'pool');
@@ -105,8 +114,9 @@ test('one-click apply and undo preserve active sessions even when file watching 
   assert.deepEqual(alpha.pids, [pid], 'changing warm slots must not recycle the active child');
   const call = await bridge.request('POST', '/alpha/mcp', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'mcp-session-id': init.headers['mcp-session-id'] });
   assert.ok(JSON.parse(call.text).result);
-  const undone = await bridge.change({ undoId: result.undoId, revision: result.revision });
-  assert.equal(undone.status, 200, undone.text);
+  const undone = await bridge.change({ undoId: result.undoId, revision: after.prewarm.revision });
+  assert.equal(undone.status, 202, undone.text);
+  await bridge.reload();
   assert.equal(readFileSync(bridge.config, 'utf8'), bridge.original);
   assert.equal((await bridge.snapshot()).servers.find((server) => server.name === 'alpha').sharing, 'isolated');
 });
@@ -123,7 +133,7 @@ test('admin mutation rejects missing nonce, foreign Origin, oversized bodies and
   assert.equal(readFileSync(bridge.config, 'utf8'), bridge.original);
 });
 
-test('stale concurrent edits and undo cannot overwrite newer configuration', async (t) => {
+test('concurrent edits batch together but stale edits and Undo cannot overwrite newer configuration', async (t) => {
   const bridge = new PoolingBridge(t);
   await bridge.ready();
   const revision = (await bridge.snapshot()).prewarm.revision;
@@ -131,11 +141,16 @@ test('stale concurrent edits and undo cannot overwrite newer configuration', asy
     bridge.change({ mode: 'pool', minWarm: 1, revision }, 'alpha'),
     bridge.change({ mode: 'pool', minWarm: 1, revision }, 'beta'),
   ]);
-  assert.deepEqual(replies.map((reply) => reply.status).sort(), [200, 409]);
-  const success = JSON.parse(replies.find((reply) => reply.status === 200).text);
+  assert.deepEqual(replies.map((reply) => reply.status).sort(), [202, 202]);
+  const success = JSON.parse(replies[0].text);
+  assert.equal(JSON.parse(replies[1].text).batchId, success.batchId);
+  const reloaded = await bridge.reload();
+  const stale = await bridge.change({ mode: 'isolated', revision });
+  assert.equal(stale.status, 409);
   const edited = readFileSync(bridge.config, 'utf8') + '\n';
   writeFileSync(bridge.config, edited);
-  const undone = await bridge.change({ undoId: success.undoId, revision: success.revision }, success.name);
+  const undone = await bridge.change({ undoId: success.undoId,
+    revision: reloaded.snapshot.prewarm.revision }, success.name);
   assert.equal(undone.status, 409);
   assert.equal(readFileSync(bridge.config, 'utf8'), edited);
 });
@@ -156,10 +171,12 @@ test('undoing Disable with a legacy negative target cannot spin the bridge', asy
   await bridge.ready();
   const revision = (await bridge.snapshot()).prewarm.revision;
   const disabled = await bridge.change({ mode: 'isolated', revision });
-  assert.equal(disabled.status, 200, disabled.text);
+  assert.equal(disabled.status, 202, disabled.text);
   const change = JSON.parse(disabled.text);
-  const undone = await bridge.change({ undoId: change.undoId, revision: change.revision });
-  assert.equal(undone.status, 200, undone.text);
+  const reloaded = await bridge.reload();
+  const undone = await bridge.change({ undoId: change.undoId, revision: reloaded.snapshot.prewarm.revision });
+  assert.equal(undone.status, 202, undone.text);
+  await bridge.reload();
   assert.equal(readFileSync(bridge.config, 'utf8'), bridge.original);
   assert.equal((await bridge.snapshot()).servers.find((server) => server.name === 'alpha').warm, 0);
 });

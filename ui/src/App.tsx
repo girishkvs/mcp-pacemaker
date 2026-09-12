@@ -5,6 +5,7 @@ import { ServerCard } from './components/ServerCard';
 import { LogDrawer } from './components/LogDrawer';
 import { HealthPage } from './components/HealthPage';
 import { PrewarmingPage } from './components/PrewarmingPage';
+import { PoolingBatchStatus } from './components/PoolingBatchStatus';
 import { usePoolingActions } from './hooks/usePoolingActions';
 import type { Snapshot } from './types';
 
@@ -16,7 +17,7 @@ function fmtUptime(sec: number): string {
 }
 
 export default function App() {
-  const { data, connected, setData } = useEventSource<Snapshot>('/api/events');
+  const { data, connected, error: snapshotError, setData } = useEventSource<Snapshot>('/api/events');
   const history = useReqHistory(data);
   const [view, setView] = useState<'dashboard' | 'pre-warming' | 'health'>('dashboard');
   const servers = data?.servers ?? [];
@@ -67,6 +68,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <PoolingBatchStatus actions={poolingActions} snapshot={data} connected={connected} snapshotError={snapshotError} />
 
       {view === 'dashboard' ? (
         <>

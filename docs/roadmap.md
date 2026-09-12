@@ -4,6 +4,14 @@ Tracks the work to make pacemaker wire *any* MCP host (editors **and** CLIs), su
 one-shared-bridge **and** bridge-per-host topologies, and serve multiple concurrent agents
 efficiently.
 
+## 2.0.0 pooling compatibility gate
+
+Permanent CI gates cover only **1.3.0 ↔ 2.0.0** with immutable 1.3.0 source and the packed
+2.0.0 candidate, not mock backends. CLI/API pairs run on Windows/Linux/macOS, Node 20/22;
+built dashboard pairs run once on Linux Chromium, including an actual old-tab bridge restart.
+See [scope, limitations and local commands](../CONTRIBUTING.md#real-version-compatibility-gates).
+This is not a claim about other minor versions or unfinished-transaction downgrades.
+
 ## Goal
 Auto-detect **every installed MCP host** on the machine — VS Code, Cursor, Claude Desktop,
 Claude Code, Copilot CLI, Codex CLI, Gemini CLI — and wire each to a pacemaker bridge over one
@@ -94,7 +102,14 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 |---|---|---|
 | **1.1.0** | Active health probing + config hot-reload | shipped |
 | **1.2.0** | Cold-start measurement, spawn gate, warm-pool correctness, health semantics, restart reporting | shipped |
-| **1.3.0** | **B21** process counters, **B18** safe pooling changes, **B19** one-click controls, **B20** unified pre-warming view in UI/CLI, **B10** logs CLI, **B6** opt-in shared mode | implemented; one release commit |
+| **1.3.0** | **B21** process counters, **B18** safe pooling changes, **B19** one-click controls, **B20** unified pre-warming view in UI/CLI, **B10** logs CLI, **B6** opt-in shared mode | shipped |
+| **2.0.0** | Batched configuration saves and whole-batch Undo/Cancel, ordinary-account Windows saves with inherited auditing, patched TOML parser | local release evaluation; not published |
+
+The 2.0 major version identifies the incompatible pooling-save protocol and completion
+semantics. Release gates include actual 1.3.0/2.0.0 client pairing, isolated upgrade and recovery,
+safe downgrade after resolving transactions, ordinary-account Windows execution, and the
+exact release commit passing the Linux/macOS/Windows CI matrix. Existing 1.3.0 releases and
+tags remain unchanged.
 
 `B10` and `B6` were originally slated for 1.2.0. 1.2.0 was taken by unplanned work that came out
 of running the live bridge — a pool that had silently stopped refilling, and a cold start nobody

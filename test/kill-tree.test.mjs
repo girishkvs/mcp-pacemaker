@@ -15,7 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,3 +130,92 @@ test('DELETE of a Streamable HTTP session leaves no orphaned process', async (t)
 
   await assertNoSurvivors(hb, 'DELETE');
 });
+
+class KillDispatchRun {
+  async run(t, mode, outcome) {
+    const env = { ...process.env };
+    delete env.NODE_OPTIONS;
+    delete env.NODE_PATH;
+    const child = spawn(process.execPath, [
+      join(__dirname, 'fixtures', 'kill-dispatch-recorder.mjs'), mode, outcome,
+    ], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    const closed = once(child, 'close');
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8192); });
+    t.after(async () => {
+      if (child.exitCode == null &&
+          child.signalCode == null) child.send({ cleanup: true });
+      await closed;
+    });
+    const [code, signal] = await closed;
+    assert.equal(signal, null, stderr);
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    const result = JSON.parse(stdout);
+    t.diagnostic(JSON.stringify(result));
+    assert.equal(result.directoryRemoved, true);
+    assert.equal(existsSync(result.directory), false);
+    assert.equal(result.scenario.recorderActive, true);
+    assert.deepEqual(result.scenario.probes, ['sync', 'async']);
+    assert.equal(result.cleanup.blockedCalls, 0);
+    assert.equal(result.cleanup.attempts, result.cleanup.calls.length);
+    assert.ok(result.cleanup.children.every((item) => item.exitCode != null ||
+      item.signalCode != null));
+    return result.scenario;
+  }
+
+  assertExit(child, outcome) {
+    assert.equal(child.exitCode, outcome === 'signal' ? null : (outcome === 'zero' ? 0 : 23));
+    assert.equal(child.signalCode, outcome === 'signal' ? 'SIGKILL' : null);
+  }
+}
+
+for (const outcome of ['zero', 'nonzero', 'signal']) {
+  test(`numeric PID guard: resume does not dispatch taskkill after ${outcome} exit`,
+    { skip: !IS_WIN, timeout: 30000 }, async (t) => {
+      const fixture = new KillDispatchRun();
+      const result = await fixture.run(t, 'resume', outcome);
+      assert.equal(result.children.length, 2);
+      assert.equal(result.children[1].resumedInitialize, true);
+      fixture.assertExit(result.children[1], outcome);
+      assert.equal(result.calls.length, 0, JSON.stringify(result.calls));
+    });
+
+  test(`numeric PID guard: test cleanup does not dispatch taskkill after ${outcome} exit`,
+    { skip: !IS_WIN, timeout: 30000 }, async (t) => {
+      const fixture = new KillDispatchRun();
+      const result = await fixture.run(t, 'helper', outcome);
+      fixture.assertExit(result.children[0], outcome);
+      assert.equal(result.calls.length, 0, JSON.stringify(result.calls));
+    });
+}
+
+test('numeric PID guard: active test cleanup still dispatches synchronously',
+  { skip: !IS_WIN, timeout: 30000 }, async (t) => {
+    const result = await new KillDispatchRun().run(t, 'helper', 'live');
+    assert.equal(result.calls.length, 1);
+    assert.equal(result.calls[0].transport, 'sync');
+    assert.equal(result.calls[0].exitCode, null);
+    assert.equal(result.calls[0].signalCode, null);
+  });
+
+test('numeric PID guard: shutdown still dispatches synchronously after an async request',
+  { skip: !IS_WIN, timeout: 30000 }, async (t) => {
+    const result = await new KillDispatchRun().run(t, 'shutdown', 'live');
+    assert.deepEqual(result.calls.map((call) => call.transport), ['async', 'sync']);
+    assert.equal(result.calls[0].pid, result.calls[1].pid);
+    assert.equal(result.calls[1].marked, true);
+    assert.equal(result.calls[1].shutdown, true);
+    for (const call of result.calls) {
+      assert.equal(call.exitCode, null);
+      assert.equal(call.signalCode, null);
+    }
+  });
+
+test('numeric PID guard: shared detach leaves the other virtual session active',
+  { skip: !IS_WIN, timeout: 30000 }, async (t) => {
+    const result = await new KillDispatchRun().run(t, 'shared', 'live');
+    assert.equal(result.calls.length, 0);
+    assert.equal(result.children.length, 1);
+  });

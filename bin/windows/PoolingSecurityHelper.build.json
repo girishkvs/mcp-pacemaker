@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "binary": "PoolingSecurityHelper.exe",
-  "binarySha256": "effdc8deb06beab195523f714b8d1a396ec53f00b6b4a437e251a25d94234c9e",
+  "binarySha256": "db026df3593cf4b9467aa1a6a445f2dd4f3290198becb5bbdbfb484ce6b0ccc0",
   "inputs": {
     "targetFramework": ".NETFramework,Version=v4.6.2",
     "platform": "AnyCPU",
@@ -28,12 +28,15 @@
     "sourceSha256": {
       "AssemblyInfo.cs": "e81e107352fbcb82818d8265dfcdf392eac8d25df37e6d65ca7f02d1e63a6c9a",
       "PoolingSecurityReader.cs": "91620ba5e0b3c6fcc673319f59c96466115a6be74fd8b93808f08f07087b7038",
-      "PoolingSecurityHelper.cs": "aff0222cf28258f1004908b0ad6e471d00012d5ea7dd90af163d83eb743df6f0"
+      "PoolingSecurityHelper.cs": "1d14768fbf602368f20302bbe382e6d195e12db6008edb3aa95be0de88d75935",
+      "PoolingNativeFiles.cs": "1234fd12fb41910981385010a071358476b6a8a4c42827714f3f270f05f23c1d"
     },
-    "buildScriptSha256": "29dcb4641182bfe5552e9e913f90d4a37e99ddc7677b65b7dcb22cae16d98c60",
+    "buildScriptSha256": "8413c3ea3239a474379103cbf456f52a0a3bc75fcdb23b5f769474abe4a1eea0",
     "referenceSha256": {
       "mscorlib.dll": "7118fe658567606fa0538f7b5a2071e4606756c07e9062e1e5b24fa49e97d1f6",
-      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125"
+      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125",
+      "System.Core.dll": "774e965a6c25891a96d6d3b838ae10226ed9963a73b09e4be7c2ec275ffb5886",
+      "System.Web.Extensions.dll": "7a32bf3263aebed93c3a0847294aebdde15f7427541ed223a4cc4eb93c36d556"
     }
   }
 }

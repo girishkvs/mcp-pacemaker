@@ -16,15 +16,17 @@ export function PrewarmingPage({ snapshot, actions, connected }: {
     <div className="max-w-[1400px] mx-auto p-6">
       <h1 className="text-xl font-bold">Pre-warming</h1>
       <p className="mt-2 mb-4 text-sm text-muted">
-        {eligible.length} pre-warming candidates, {pooled.length} pooled, {shared.length} shared.
+        {eligible.length} pre-warming candidates, {pooled.length} actively pooled, {shared.length} shared.
         {' '}A warm slot is an exclusive, pre-started process, not a shared initialized session.
         Nothing is enabled automatically.
+        {' '}Mode and warm counts below are active values, not pending requests.
+        {!connected && ' Disconnected: these are the last reported values; configuration actions are disabled.'}
       </p>
       <div className="overflow-x-auto rounded-xl border border-line bg-panel">
         <table className="w-full text-sm text-left">
           <thead className="bg-panel2 text-muted">
             <tr>
-              {['Server / mode', 'Cold start p50 / p95', 'Peak sessions', 'Process starts', 'Warm / target', 'Shared child', 'Action'].map((label) =>
+              {['Server / active mode', 'Cold start p50 / p95', 'Peak sessions', 'Process starts', 'Active warm / target', 'Shared child', 'Configuration action'].map((label) =>
                 <th key={label} className="p-3 font-medium">{label}</th>)}
             </tr>
           </thead>

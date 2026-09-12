@@ -54,6 +54,26 @@ export interface ServerStat {
   health?: ServerHealth;
 }
 
+export type PoolingBatchChange = { name: string } & (
+  | { mode: 'pool'; minWarm?: number }
+  | { mode: 'isolated' }
+);
+
+export type PoolingCommitState = 'not-committed' | 'committed' | 'unknown';
+
+interface PoolingBatchSummary {
+  id: string;
+  applyAt: number | null;
+  revision: string;
+  changes: PoolingBatchChange[];
+  error?: string;
+}
+
+export type PoolingBatch = PoolingBatchSummary & (
+  | { status: 'failed'; commitState: PoolingCommitState }
+  | { status: 'pending' | 'applying' | 'applied' | 'cancelled'; commitState?: PoolingCommitState }
+);
+
 export interface Snapshot {
   ok: boolean;
   service: string;
@@ -61,8 +81,15 @@ export interface Snapshot {
   port: number;
   uptimeSec: number;
   instanceId?: string;
+  snapshotVersion?: number;
   startedAt?: string;
-  prewarm?: { revision: string; maxWarm: number };
+  prewarm?: {
+    revision: string;
+    maxWarm: number;
+    batchDelayMs?: number;
+    saveWarning?: string;
+    batches?: PoolingBatch[];
+  };
   sessions: number;
   restart?: { sinceSec: number; resumable: number; staleClients: number } | null;
   servers: ServerStat[];

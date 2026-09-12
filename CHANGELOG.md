@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Version 2.0 changes the pooling save contract from immediate application to queued batches.
+  API clients must send `x-mcp-pooling-batch: 1` and distinguish HTTP 202 acceptance from
+  activation. Older clients are rejected without staging a change.
+- The `prewarm` CLI returns after staging, not after activation. Scripts must observe the batch
+  result before relying on the new settings. Undo restores the whole batch, not one server.
+- Update the CLI and reload open dashboard pages when upgrading the bridge from 1.3.0.
+  Before downgrading, use 2.0 to resolve any pending or interrupted configuration transaction.
+
+### Changed
+
+- Pooling changes stage a complete configuration copy and reload five seconds after the last
+  accepted change. The UI and CLI distinguish Pending, Applying and completed activation;
+  Reload now flushes a batch, and Cancel/Undo explicitly applies to the whole batch.
+- Batch-capable clients identify the asynchronous save protocol. Older clients are rejected
+  before staging instead of reporting an accepted change as already enabled.
+- Windows configuration saves use directory-inherited auditing without requiring audit-read
+  privilege. A non-blocking notice explains that custom per-file audit rules may not carry
+  forward; ordinary access and supported integrity protections remain required.
+- Windows saves retain an existing owner that matches the caller user or token default owner,
+  preserving supported legacy writes after downgrade. Other owners still use checked transfer,
+  and source write access remains required.
+
+### Added
+
+- Permanent real-version compatibility gates for **1.3.0 and 2.0.0 only**, using pinned
+  published 1.3.0 code and an actual packed 2.0.0 candidate. CI covers CLI/API pairs on
+  Windows/Linux/macOS with Node 20/22 and built dashboard pairs in the Linux Chromium job:
+  immediate legacy saves/Undo, fresh-nonce protocol refusal, actual old-tab restart/refresh,
+  queued save/Cancel/Undo, settled upgrade/downgrade configuration bytes, and same-authority
+  legacy write/Undo capability after downgrade (or the unchanged known Windows audit refusal).
+
+### Fixed
+
+- Preserve recovery checkpoints after uncertain post-placement failures without replaying
+  writes or accepting corrupt journals.
+- Avoid dispatching process-tree termination for children already known to have exited,
+  including failed session resumes.
+
+### Security
+
+- Raise the `smol-toml` minimum and locked version from 1.7.0 to 1.8.0 to address
+  [CVE-2026-85730](https://github.com/squirrelchat/smol-toml/security/advisories/GHSA-7w5x-hrqm-74c2).
+  Malformed TOML ending with a comment in an unclosed array or inline table now produces a
+  parse error instead of hanging the CLI while reading Codex configuration.
+
 ## [1.3.0] - 2026-09-08
 
 ### Added

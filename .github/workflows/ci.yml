@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev/girishkvs/pooling-batch-reload]
   pull_request:
 
 jobs:
@@ -12,12 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Reject non-public registry URLs
-        run: |
-          if grep -nE '"resolved": "https://(?!registry\.npmjs\.org/)' -P package-lock.json ui/package-lock.json; then
-            echo "::error::A lockfile resolves to a non-public registry. Regenerate with --registry https://registry.npmjs.org/"
-            exit 1
-          fi
-          echo "both lockfiles resolve to registry.npmjs.org only"
+        run: >-
+          node --input-type=module -e
+          "import { checkLockfile } from './tools/compatibility/fixtures.mjs';
+          checkLockfile('package-lock.json'); checkLockfile('ui/package-lock.json');"
 
   test:
     strategy:
@@ -42,12 +40,24 @@ jobs:
           node --check bin/server-metrics.mjs
           node --check bin/pooling-config.mjs
           node --check bin/pooling-execution.mjs
+          node --check bin/pooling-batch-scheduler.mjs
+          node --check bin/pooling-batches.mjs
+          node --check bin/pooling-editor.mjs
+          node --check bin/pooling-errors.mjs
+          node --check bin/pooling-files.mjs
           node --check bin/pooling-writer.mjs
           node --check bin/prewarm.mjs
           node --check bin/logs.mjs
           node --check bin/shared-sessions.mjs
       - name: Test
         run: npm test
+      - name: Prepare pinned 1.3.0 and packed 2.0.0
+        run: npm run compat:prepare
+      - name: Real-version CLI and API compatibility
+        run: npm run test:compat
+      - name: Clean owned compatibility fixtures
+        if: always()
+        run: npm run compat:clean
 
   ui:
     runs-on: ubuntu-latest
@@ -58,9 +68,22 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - name: Build web dashboard
+      - name: Test and build web dashboard
         working-directory: ui
         run: |
           npm ci
           npm run typecheck
+          npm test
           npm run build
+      - name: Install CLI dependencies
+        run: npm ci
+      - name: Install bundled Chromium for compatibility
+        working-directory: ui
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Prepare pinned 1.3.0 and packed 2.0.0 with built dashboard
+        run: npm run compat:prepare
+      - name: Real-version browser compatibility
+        run: npm run test:compat:browser
+      - name: Clean owned compatibility fixtures
+        if: always()
+        run: npm run compat:clean

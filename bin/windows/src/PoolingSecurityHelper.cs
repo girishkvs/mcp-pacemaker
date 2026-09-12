@@ -10,16 +10,16 @@ public sealed class PoolingSecurityHelper
     private readonly AccessControlSections sections =
         AccessControlSections.Access | AccessControlSections.Owner | AccessControlSections.Group;
 
-    /// <summary>Inspects or preserves Windows file security.</summary>
-    /// <param name="args">One action: inspect or copy. File paths come from MCP_POOL environment variables.</param>
+    /// <summary>Inspects, stages, moves, or preserves Windows file security.</summary>
+    /// <param name="args">One action. File paths come from MCP_POOL environment variables.</param>
     /// <returns>Zero on success, three on a source security conflict, or one on failure.</returns>
     public static int Main(string[] args)
     {
         return new PoolingSecurityHelper().Run(args);
     }
 
-    /// <summary>Runs a security operation without changing file contents.</summary>
-    /// <param name="args">One action: inspect or copy.</param>
+    /// <summary>Runs a native file operation or a legacy security operation.</summary>
+    /// <param name="args">One of inspect-access, stage, move-no-replace, inspect, or copy.</param>
     /// <returns>Zero on success, three on a source security conflict, or one on failure.</returns>
     public int Run(string[] args)
     {
@@ -31,6 +31,15 @@ public sealed class PoolingSecurityHelper
             }
 
             var sourcePath = this.RequiredEnvironment("MCP_POOL_SOURCE");
+            if (args[0] == "inspect-access" ||
+                args[0] == "stage" ||
+                args[0] == "move-no-replace")
+            {
+                var files = new PoolingNativeFiles();
+                Console.WriteLine(files.Run(args[0], sourcePath));
+                return 0;
+            }
+
             if (args[0] == "inspect")
             {
                 Console.WriteLine(this.ReadSecurity(sourcePath).Fingerprint);
@@ -53,7 +62,11 @@ public sealed class PoolingSecurityHelper
                 Console.Error.WriteLine("MCPERR nativeError=" + nativeError.NativeErrorCode);
             }
 
-            return 1;
+            bool conflict = error is PoolingConflictException ||
+                (nativeError != null &&
+                    (nativeError.NativeErrorCode == 80 ||
+                     nativeError.NativeErrorCode == 183));
+            return conflict ? 3 : 1;
         }
     }
 

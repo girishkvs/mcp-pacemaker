@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HELPER_ROOT = join(ROOT, 'bin', 'windows');
 const HELPER = join(HELPER_ROOT, 'PoolingSecurityHelper.exe');
-const SOURCES = ['AssemblyInfo.cs', 'PoolingSecurityHelper.cs', 'PoolingSecurityReader.cs'];
+const SOURCES = ['AssemblyInfo.cs', 'PoolingNativeFiles.cs', 'PoolingSecurityHelper.cs', 'PoolingSecurityReader.cs'];
 const WINDOWS = { skip: process.platform !== 'win32' };
 
 test('packaged helper binary and normalized build inputs match recorded hashes', () => {

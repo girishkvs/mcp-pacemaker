@@ -2,11 +2,12 @@
 
 ## Supported versions
 
-Fixes land on the latest released minor version only.
+Security fixes land on the latest released version only. Compatibility coverage
+for an older version does not imply security backports to that version.
 
 | Version | Supported |
 | ------- | --------- |
-| Latest released 1.x minor | yes |
+| Latest released version | yes |
 | Earlier releases | no |
 
 ## Reporting a vulnerability
@@ -37,30 +38,40 @@ so a few properties matter more than usual:
   buttons and the equivalent CLI actions require the admin nonce. Browser writes also require
   a matching Origin when provided. Only `sharing` and `minWarm` can be changed; commands,
   environment and auth settings are not accepted. Requests are bounded to 4 KiB.
-  Edits require a content revision, preserve unrelated JSON, keep a backup and replace the file
-  atomically. Undo restores the previous bytes only while that revision is still current.
-  These checks detect stale clients and observed editor changes; a non-cooperating external
-  writer can still race the final filesystem check/rename because portable filesystem CAS
-  is unavailable. Do not edit the file concurrently with an admin action.
-- **Timeout is not proof of rollback.** Pooling operations have a nine-second budget and
-  shared cancellation before file-replacement ownership. Once replacement has started, it
-  can finish after cancellation or timeout. Uncertain and late-committed outcomes are reported
-  explicitly; saved state is reloaded, including after worker failure with config watching off.
-  Reconciliation failures are logged, not treated as success. Operations are never replayed,
-  and a failed worker refuses subsequent writes until the bridge restarts.
-- **Config backups and Undo contain config data.** `servers.json.bak` has the previous config
-  and is protected like the source file, including its Windows DACL. Temporary files are given
-  the same permissions before data is written. Bounded in-memory Undo records can include
-  credential-bearing configuration; they are not returned to the browser or written elsewhere.
-- **Windows timestamp changes are not permission changes by themselves.** Automatic writes
-  capture native non-audit security sections, audit policy and file attributes. A changed
-  timestamp is accepted only when that verified state, content and file identity still match.
-  Unreadable audit policy is refused before staging; security that cannot be preserved on both
-  replacement and backup files is also refused. No automatic elevation or security-policy
-  changes are performed. The built-in audit-read API uses only rights assigned to the account.
-  Inspection uses the bundled own-source .NET Framework helper, with no runtime compilation,
-  download or PowerShell fallback. Build metadata checks source/binary consistency; it is not
-  code signing or protection against replacement of the entire package.
+  Edits require a content revision and accumulate in a complete pending copy, preserving
+  unrelated JSON. Five seconds after the last accepted change, reload validates and flips the
+  files. HTTP 202 means staged, not applied. A batch-capable client header is required so an
+  older client cannot mistake acceptance for activation. Cancel and Undo affect a whole batch;
+  stale receipts cannot overwrite intervening active-file edits.
+- **File flipping is recoverable, not an atomic two-file exchange.** The original is retained
+  as the previous file. Destination placement must not overwrite an unexpected contender.
+  Recovery uses validated transaction state and object/content checks, not blind renames or
+  deletion of unknown files. There can be a brief absent-active-path interval between moves.
+  These checks are not a universal filesystem compare-and-swap guarantee; avoid concurrent
+  manual edits during activation.
+- **Timeout is not proof of rollback.** Staging and commit operations have bounded execution
+  budgets; the acknowledged debounce wait is separate. Once a commit starts, it can finish
+  after cancellation or timeout. Failed outcomes distinguish not-committed, committed and
+  unknown states. Reconciliation failures are surfaced, not treated as success, and uncertain
+  writes are never replayed automatically.
+- **Pending files, previous files and Undo contain config data.** Complete copies must not
+  broaden access to credential-bearing bytes. The retained original keeps its original
+  security metadata. Bounded Undo records are internal; public batch summaries contain only
+  status and requested pooling settings. Receipt tokens are delivered only in authorized
+  responses, not broadcast in snapshots.
+- **Windows saves do not require audit-read privilege.** New copies use directory-inherited
+  auditing. Explicit per-file audit rules are not guaranteed to carry forward to the new active
+  copy, and the UI displays this as a non-blocking notice. This is not a claim that custom rules
+  were detected or that the complete original security descriptor was cloned.
+  Ordinary data-access restrictions and supported integrity protections must be established
+  before writing candidate contents. Source write denial cannot be bypassed using parent
+  directory replacement rights. Unsupported protections are refused rather than weakened.
+  A source owner matching the caller's user or token default owner is retained. Other owners
+  require the existing checked transfer to the caller's user; source write access is still
+  required in either case.
+  The bundled own-source helper does not elevate the bridge, change account privileges, compile
+  at runtime, download code or use a PowerShell fallback. Build metadata checks consistency,
+  not code signing or protection against replacement of the entire package.
 - **Shared mode is not a user-security boundary.** It is opt-in for stateless tools with one
   common credential context. Only a tools capability derived from the real upstream is exposed;
   unsupported client capabilities and protocol methods fail explicitly. IDs, progress,

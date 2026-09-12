@@ -1,4 +1,4 @@
-import { PoolingConfigError } from './pooling-config.mjs';
+import { PoolingConfigError } from './pooling-errors.mjs';
 
 export const POOLING_BUDGET_MS = 9000;
 
@@ -54,8 +54,15 @@ export class PoolingExecution {
     if (Atomics.compareExchange(this.state, 0, ACTIVE, FINISHED) !== ACTIVE) this.check();
   }
 
-  fail() {
-    Atomics.store(this.state, 0, FINISHED);
+  fail(commitState = 'not-committed') {
+    if (commitState === 'unknown') {
+      Atomics.store(this.state, 0, COMMITTING);
+    } else if (commitState === 'committed') {
+      Atomics.store(this.state, 0, process.hrtime.bigint() >= this.deadline
+        ? FINISHED_LATE : FINISHED_COMMITTED);
+    } else {
+      Atomics.store(this.state, 0, FINISHED);
+    }
   }
 
   cancel(expired = false) {
@@ -64,8 +71,10 @@ export class PoolingExecution {
         state === FINISHED_COMMITTED) return undefined;
     if (state === FINISHED_LATE) return this.committedLate();
     if (state === COMMITTING) {
-      return new PoolingConfigError(504, 'WRITER_OUTCOME_UNKNOWN',
+      const error = new PoolingConfigError(504, 'WRITER_OUTCOME_UNKNOWN',
         'Config commit already started. Its outcome is not yet known. Do not replay this change; reread the config.');
+      error.commitState = 'unknown';
+      return error;
     }
     try {
       this.check();
@@ -75,8 +84,10 @@ export class PoolingExecution {
   }
 
   committedLate() {
-    return new PoolingConfigError(504, 'WRITER_DEADLINE_COMMITTED',
+    const error = new PoolingConfigError(504, 'WRITER_DEADLINE_COMMITTED',
       'Config commit finished after its deadline. Do not replay this change; reread the config.');
+    error.commitState = 'committed';
+    return error;
   }
 
   workerFailure() {
@@ -84,8 +95,10 @@ export class PoolingExecution {
     if (state === FINISHED_LATE) return this.committedLate();
     if (state === COMMITTING ||
         state === FINISHED_COMMITTED) {
-      return new PoolingConfigError(500, 'WRITER_OUTCOME_UNKNOWN',
+      const error = new PoolingConfigError(500, 'WRITER_OUTCOME_UNKNOWN',
         'Pooling writer stopped after config commit started. Its outcome is unknown. Do not replay this change; reread the config.');
+      error.commitState = state === FINISHED_COMMITTED ? 'committed' : 'unknown';
+      return error;
     }
   }
 }
