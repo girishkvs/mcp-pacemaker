@@ -5,6 +5,7 @@ import { dirname, extname, basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PoolingConfigError, poolingIOError, poolingConflict, recoveryError } from './pooling-errors.mjs';
 import { JsonSpans } from './pooling-editor.mjs';
+import { traceErrorCode } from './pooling-trace.mjs';
 
 export const MAX_CONFIG_BYTES = 1024 * 1024;
 export const MAX_TRANSACTION_BYTES = 16384;
@@ -145,7 +146,7 @@ export class PoolingFiles {
 
   helper(action, source, destination, body, execution) {
     execution?.check();
-    const result = childProcess.spawnSync(HELPER, [action], {
+    const options = {
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -154,6 +155,13 @@ export class PoolingFiles {
       maxBuffer: 16384,
       timeout: Math.min(10000, execution?.remainingMs() ?? 10000),
       env: { ...process.env, MCP_POOL_SOURCE: source, MCP_POOL_TEMP: destination ?? '' },
+    };
+    const trace = execution?.trace;
+    const call = trace?.helper();
+    trace?.record('helper-start', { action, call, timeoutMs: options.timeout });
+    const result = childProcess.spawnSync(HELPER, [action], options);
+    trace?.record('helper-end', {
+      action, call, helperPid: result.pid ?? 0, exit: result.status, code: traceErrorCode(result.error),
     });
     // The caller must inspect disk state after a late/failed move. Do not turn
     // an entered commit into a supposedly cancelled operation here.

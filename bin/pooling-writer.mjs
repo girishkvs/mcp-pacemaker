@@ -1,17 +1,21 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { PoolingConfigStore, PoolingConfigError } from './pooling-config.mjs';
 import { PoolingExecution, POOLING_BUDGET_MS } from './pooling-execution.mjs';
+import { poolingTrace, traceErrorCode } from './pooling-trace.mjs';
 
 if (!isMainThread &&
     workerData?.kind === 'mcp-pooling-writer') {
+  poolingTrace.operation(undefined, workerData.traceContext)?.record('worker-ready');
   const store = new PoolingConfigStore(workerData.configPath);
-  parentPort.on('message', ({ id, method, request, deadline, buffer }) => {
+  parentPort.on('message', ({ id, method, request, deadline, buffer, traceContext }) => {
     if (method === 'close') {
       store.close();
       parentPort.close();
       return;
     }
     const execution = new PoolingExecution(deadline, buffer);
+    execution.trace = poolingTrace.operation(deadline, traceContext);
+    execution.trace?.record('worker-enter', { method, state: Atomics.load(execution.state, 0) });
     let cancelledBatchId;
     try {
       execution.check();
@@ -31,8 +35,10 @@ if (!isMainThread &&
         }
         throw error;
       }
+      execution.trace?.record('worker-result', { state: Atomics.load(execution.state, 0) });
       parentPort.postMessage({ id, result, completedLate });
     } catch (error) {
+      execution.trace?.record('worker-error', { code: traceErrorCode(error), state: Atomics.load(execution.state, 0) });
       execution.fail(error.commitState);
       const known = error instanceof PoolingConfigError;
       parentPort.postMessage({ id, cancelledBatchId, error: {
@@ -92,6 +98,7 @@ export class PoolingConfigWriter {
     const deadline = options.deadline === undefined ? defaultDeadline
       : options.deadline < defaultDeadline ? options.deadline : defaultDeadline;
     const execution = new PoolingExecution(deadline);
+    execution.trace = options.trace ?? poolingTrace.operation(deadline);
     if (options.signal?.aborted) return Promise.reject(execution.cancel());
     try {
       execution.check();
@@ -101,12 +108,14 @@ export class PoolingConfigWriter {
     if (this.#pending.size >= 16) {
       return Promise.reject(new PoolingConfigError(503, 'WRITER_BUSY', 'Too many pending pooling changes.'));
     }
-    if (!this.#worker) this.#start();
+    execution.trace?.record('writer-send', { method, queued: this.#pending.size, cold: !this.#worker });
+    if (!this.#worker) this.#start(execution.trace);
     const id = ++this.#sequence;
     return new Promise((resolve, reject) => {
       const pending = { resolve, reject, execution, options, method, settled: false };
       const cancel = (expired) => {
         if (pending.settled) return;
+        execution.trace?.record('writer-expire', { expired, state: Atomics.load(execution.state, 0) });
         const error = execution.cancel(expired);
         if (!error) return;
         this.#settle(pending, error);
@@ -116,7 +125,8 @@ export class PoolingConfigWriter {
       try {
         options.signal?.addEventListener('abort', pending.abort, { once: true });
         pending.timer = setTimeout(() => cancel(true), execution.remainingMs());
-        this.#worker.postMessage({ id, method, request, deadline, buffer: execution.state.buffer });
+        this.#worker.postMessage({ id, method, request, deadline, buffer: execution.state.buffer,
+          traceContext: execution.trace?.context });
       } catch (error) {
         this.#pending.delete(id);
         this.#settle(pending, error);
@@ -124,13 +134,16 @@ export class PoolingConfigWriter {
     });
   }
 
-  #start() {
+  #start(trace) {
     this.#worker = new Worker(new URL(import.meta.url), {
-      workerData: { kind: 'mcp-pooling-writer', configPath: this.#configPath },
+      workerData: { kind: 'mcp-pooling-writer', configPath: this.#configPath, traceContext: trace?.context },
     });
     this.#worker.on('message', async ({ id, result, error, completedLate, cancelledBatchId }) => {
       const pending = this.#pending.get(id);
       if (!pending) return;
+      pending.execution.trace?.record('writer-result', {
+        code: traceErrorCode(error), state: Atomics.load(pending.execution.state, 0),
+      });
       this.#pending.delete(id);
       let failure = error
         ? new PoolingConfigError(error.statusCode, error.code, error.message)

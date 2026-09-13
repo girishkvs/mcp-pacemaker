@@ -51,6 +51,20 @@ jobs:
           node --check bin/shared-sessions.mjs
       - name: Test
         run: npm test
+        env:
+          MCP_POOLING_TRACE_ARTIFACT_DIR: ${{ matrix.os == 'windows-latest' && matrix.node == 22 && 'pooling-deadline-trace' || '' }}
+      - name: Validate pooling deadline trace
+        id: pooling_trace
+        if: ${{ always() && matrix.os == 'windows-latest' && matrix.node == 22 }}
+        run: node tools/pooling-trace-artifact.mjs pooling-deadline-trace/captured.json pooling-deadline-upload/trace.json
+      - name: Upload validated pooling deadline trace
+        if: ${{ always() && matrix.os == 'windows-latest' && matrix.node == 22 && steps.pooling_trace.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pooling-deadline-windows-node22
+          path: pooling-deadline-upload/trace.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Prepare pinned 1.3.0 and packed 2.0.0
         run: npm run compat:prepare
       - name: Real-version CLI and API compatibility

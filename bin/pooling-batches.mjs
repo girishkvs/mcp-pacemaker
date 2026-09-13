@@ -55,8 +55,10 @@ export class PoolingBatches {
     const deadline = options.deadline ??
       process.hrtime.bigint() + BigInt(POOLING_BUDGET_MS) * 1000000n;
     const arrivingDuring = this.#applying;
+    options.trace?.record('queue-enter', { queued: this.#queued, applying: Boolean(this.#applying) });
     this.#queued++;
     return this.#enqueue(async () => {
+      options.trace?.record('queue-leave');
       if (this.#closed) throw this.#closedError();
       let submitted = request;
       if (!Object.hasOwn(request, 'undoId') &&

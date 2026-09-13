@@ -143,6 +143,7 @@ export class PoolingConfigStore {
   }
 
   #start() {
+    this.#execution?.trace?.record('store-start');
     this.#execution?.check();
     this.#files.acquire();
     if (!this.#started) {
@@ -155,6 +156,7 @@ export class PoolingConfigStore {
       // these owned, unentered bytes; it never replays the failed request.
       this.#files.discard(this.#execution);
     }
+    this.#execution?.trace?.record('store-ready');
   }
 
   #read() {
@@ -273,12 +275,14 @@ export class PoolingConfigStore {
         files.move(files.paths.next, files.paths.pending, draft, this.#execution);
       }
       this.#execution?.check();
+      this.#execution?.trace?.record('publish-start');
       files.save({
         // Retain the prior native draft until this publication is durable.
         // A later operation can clean it using the recorded identity.
         phase: 'pending', base, draft, next: prior?.draft ?? null,
         previous: files.record?.previous ?? null,
       });
+      this.#execution?.trace?.record('publish-end');
     } catch (error) {
       // Before publication, only a returned, verified identity authorizes
       // deleting the new file. Failed helper output is not ownership proof.

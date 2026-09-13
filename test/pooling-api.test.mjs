@@ -3,16 +3,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { killBridge } from './helpers/kill-bridge.mjs';
+import { PoolingTraceArtifact } from './helpers/pooling-trace-artifact.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const port = 8871;
+const port = Number(process.env.MCP_POOLING_API_TEST_PORT || 8871);
 const echo = { command: process.execPath, args: [join(root, 'test', 'fixtures', 'echo-mcp-server.mjs')] };
 
 class PoolingBridge {
@@ -21,9 +22,22 @@ class PoolingBridge {
     this.config = join(this.dir, 'servers.json');
     this.original = JSON.stringify({ alpha, beta: { ...echo, env: { PRIVATE_SENTINEL: 'must-not-leak' } }, remote: { type: 'http', url: 'http://127.0.0.1:1' } }, null, 2) + '\n';
     writeFileSync(this.config, this.original);
+    const capture = process.env.MCP_POOLING_TRACE_ARTIFACT_DIR &&
+      t.name === 'one-click apply and undo preserve active sessions even when file watching is off';
+    let traceDirectory;
+    if (capture) {
+      try {
+        const directory = join(this.dir, 'trace');
+        mkdirSync(directory);
+        traceDirectory = directory;
+      } catch {
+        t.diagnostic('POOLING_TRACE_CAPTURE setup failed; original test continues without tracing');
+      }
+    }
     this.child = spawn(process.execPath, [join(root, 'bin', 'mcp-bridge.mjs'), '--port', String(port), '--config', this.config], {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env, MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0', MCP_IDLE_TIMEOUT_MS: '0', MCP_HEALTH_INTERVAL_MS: '0' },
+      env: { ...process.env, MCP_POOLING_TRACE_DIR: traceDirectory ?? '',
+        MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0', MCP_IDLE_TIMEOUT_MS: '0', MCP_HEALTH_INTERVAL_MS: '0' },
     });
     this.stderr = '';
     this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
@@ -31,6 +45,16 @@ class PoolingBridge {
     t.after(async () => {
       killBridge(this.child);
       await this.exited;
+      if (capture) {
+        try {
+          const artifacts = new PoolingTraceArtifact();
+          artifacts.write(join(process.env.MCP_POOLING_TRACE_ARTIFACT_DIR, 'captured.json'),
+            artifacts.collect(traceDirectory, this.dir));
+          t.diagnostic('POOLING_TRACE_CAPTURE validated snapshot; process tails are unsealed');
+        } catch {
+          t.diagnostic('POOLING_TRACE_CAPTURE failed; original test result is unchanged');
+        }
+      }
       rmSync(this.dir, { recursive: true, force: true });
     });
   }
