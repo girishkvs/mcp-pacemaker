@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-09-12
 
 ### Breaking
 
@@ -424,6 +424,8 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
+[2.0.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.0
+[1.3.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.3.0
 [1.2.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.2.0
 [1.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.1.0
 [1.0.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.0.0
