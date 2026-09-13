@@ -103,7 +103,7 @@ multiple hosts/agents coexist with no cross-talk, and HTTP servers share the tok
 | **1.1.0** | Active health probing + config hot-reload | shipped |
 | **1.2.0** | Cold-start measurement, spawn gate, warm-pool correctness, health semantics, restart reporting | shipped |
 | **1.3.0** | **B21** process counters, **B18** safe pooling changes, **B19** one-click controls, **B20** unified pre-warming view in UI/CLI, **B10** logs CLI, **B6** opt-in shared mode | shipped |
-| **2.0.0** | Batched configuration saves and whole-batch Undo/Cancel, ordinary-account Windows saves with inherited auditing, patched TOML parser | local release evaluation; not published |
+| **2.0.0** | Batched configuration saves and whole-batch Undo/Cancel, ordinary-account Windows saves with inherited auditing, patched TOML parser | ready for release |
 
 The 2.0 major version identifies the incompatible pooling-save protocol and completion
 semantics. Release gates include actual 1.3.0/2.0.0 client pairing, isolated upgrade and recovery,
