@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
-import { POLICY, digest, sameDigests, validatePackage, validateSource } from './policy.mjs';
+import { POLICY, digest, publicationTagName, sameDigests, validatePackage, validateSource } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -56,7 +56,7 @@ export function validateMatrixContext(env, approval, event) {
   assert.equal(approval.approver, POLICY.owner);
   assert.equal(approval.name, POLICY.name);
   assert.ok(['1.3.1', '2.0.1'].includes(approval.version));
-  assert.equal(approval.ref, `refs/tags/v${approval.version}`);
+  publicationTagName(approval.ref, approval.version);
   for (const key of ['tagObject', 'commit', 'tree']) assert.match(approval[key] ?? '', /^[a-f0-9]{40}$/);
   // Source preparation checks freshness once. Long-running gates do not spend another approval.
   if (event) {

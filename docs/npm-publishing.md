@@ -8,7 +8,8 @@ a version, approve a stage, change a dist-tag, or configure an account or trust.
 
 1. Commit this workflow and its tools in each candidate. Put the workflow on the
    default branch too, so GitHub permits manual dispatch. Create an approved
-   annotated `v1.3.1` or `v2.0.1` tag on the exact green source commit.
+   annotated publication tag on the exact green source commit. For each supported
+   version, only `v<version>` and `npm/v<version>` are accepted.
 2. Required source CI is `.github/workflows/ci.yml`, an exact successful **push**
    run/attempt, including lockfiles, all Windows/Linux/macOS Node 20/22/24 test
    jobs, UI, and every additional job. Skipped or missing required jobs fail.
@@ -39,6 +40,21 @@ peeled commit/tree, checkout HEAD/tree, actual event SHA/ref, and workflow SHA/r
 to match. Never override `GITHUB_SHA`, `GITHUB_REF` or workflow identity to attest
 older code from a newer workflow.
 
+### Separate publication tags
+
+Use `npm/v1.3.1` and `npm/v2.0.1` when preparing the same unpublished package
+versions after publishing-tool repairs. Keep existing GitHub release tags and
+releases unchanged. Each new publication tag needs explicit approval and points
+to its own green commit containing the workflow and tools that actually run.
+Do not move a release tag or reuse an approval for a different tag object.
+
+The complete ref, including `npm/`, remains bound through source checkout, CI,
+consumer artifacts, peer transfer, protected-environment tag policy and staged
+provenance. A source bundle from `v<version>` cannot be relabeled as one from
+`npm/v<version>`. Prepare fresh artifacts for the new source; package versions
+and the derived `latest`/`legacy` npm channels do not change. Existing registry
+versions remain immutable, including when only the publisher tools changed.
+
 ## Manual inputs
 
 There are two dispatch inputs: `action` (default **prepare**) and `approval`
@@ -52,7 +68,7 @@ Preparation approval fields:
   "schemaVersion": 1,
   "name": "mcp-pacemaker",
   "version": "1.3.1",
-  "ref": "refs/tags/v1.3.1",
+  "ref": "refs/tags/npm/v1.3.1",
   "tagObject": "<approved 40-character annotated tag object>",
   "commit": "<approved 40-character commit>",
   "tree": "<approved 40-character tree>",
@@ -117,7 +133,7 @@ provenance subject. Supply this additional prepare approval field:
     "runAttempt": 1,
     "manifestSha256": "<opposite prepared.json SHA256>",
     "version": "<opposite patch: 1.3.1 or 2.0.1>",
-    "ref": "<opposite refs/tags/vVERSION>",
+    "ref": "<opposite approved refs/tags/npm/vVERSION or refs/tags/vVERSION>",
     "tagObject": "<opposite annotated tag object>",
     "commit": "<opposite source commit>",
     "tree": "<opposite source tree>",

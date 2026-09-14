@@ -92,7 +92,11 @@ export function releaseExecutable(archive, executable) {
     const sum = [...header].reduce((total, byte, index) => total + (index >= 148 && index < 156 ? 32 : byte), 0);
     requireValue(sum === octal(148, 8), 'Release tar header checksum mismatch');
     const name = `${text(345, 155) ? `${text(345, 155)}/` : ''}${text(0, 100)}`;
-    requireValue(/^[A-Za-z0-9_.+-]+$/.test(name) &&
+    const safeRelativePath = name.split('/').every(segment =>
+      /^[A-Za-z0-9_.+-]+$/.test(segment) &&
+      segment !== '.' &&
+      segment !== '..');
+    requireValue(safeRelativePath &&
       !seen.has(name) &&
       ['', '0'].includes(text(156, 1)), 'Unreviewed release archive entry');
     seen.add(name);

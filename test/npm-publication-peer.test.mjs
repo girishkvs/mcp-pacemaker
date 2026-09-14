@@ -21,14 +21,15 @@ const gitHash = character => character.repeat(40);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 class Fixture {
-  constructor(t, version = '2.0.1', temporaryParent = tmpdir()) {
+  constructor(t, version = '2.0.1', temporaryParent = tmpdir(), namespaces = {}) {
     this.home = mkdtempSync(join(realpathSync.native(temporaryParent), 'pacemaker-peer-unit-'));
     t.after(() => rmSync(this.home, { recursive: true, force: true }));
     assert.equal(realpathSync.native(this.home), this.home, 'Owned peer fixture must use the native canonical path');
     this.directory = join(this.home, 'peer');
     this.approval = {
       schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version,
-      ref: `refs/tags/v${version}`, tagObject: gitHash('a'), commit: gitHash('b'), tree: gitHash('c'),
+      ref: `refs/tags/${namespaces.current ?? ''}v${version}`,
+      tagObject: gitHash('a'), commit: gitHash('b'), tree: gitHash('c'),
       ciRunId: '90', ciAttempt: 1,
     };
     this.env = Object.freeze({
@@ -46,7 +47,7 @@ class Fixture {
       version: version === '2.0.1' ? '1.3.1' : '2.0.1',
       tagObject: gitHash('d'), commit: gitHash('e'), tree: gitHash('f'),
     };
-    this.peer.ref = `refs/tags/v${this.peer.version}`;
+    this.peer.ref = `refs/tags/${namespaces.peer ?? ''}v${this.peer.version}`;
     this.bytes = this.tarball();
     Object.assign(this.peer, digest(this.bytes));
     const owner = { login: POLICY.owner, id: 10 };
@@ -67,7 +68,7 @@ class Fixture {
       { ...this.job('stage', 509), conclusion: 'skipped' },
     ];
     this.tagRef = { ref: this.peer.ref, object: { type: 'tag', sha: this.peer.tagObject } };
-    this.tag = { sha: this.peer.tagObject, tag: `v${this.peer.version}`,
+    this.tag = { sha: this.peer.tagObject, tag: `${namespaces.peer ?? ''}v${this.peer.version}`,
       object: { type: 'commit', sha: this.peer.commit } };
     this.commit = { sha: this.peer.commit, tree: { sha: this.peer.tree } };
     this.sourceReport = {
@@ -218,6 +219,33 @@ for (const version of ['1.3.1', '2.0.1']) {
     ]);
   });
 }
+
+for (const version of ['1.3.1', '2.0.1']) {
+  for (const namespaces of [
+    { current: 'npm/', peer: 'npm/' }, { current: 'npm/', peer: '' }, { current: '', peer: 'npm/' },
+  ]) {
+    test(`peer transfer preserves exact refs: ${version} ${JSON.stringify(namespaces)}`, async t => {
+      const f = new Fixture(t, version, tmpdir(), namespaces);
+      assert.deepEqual(validatePeerApproval(f.approval, f.env), f.peer);
+      const result = await downloadPeer(f.options());
+      assert.deepEqual(readFileSync(result.tarball), f.bytes);
+      assert.equal(result.evidence.source.ref, f.peer.ref);
+      assert.equal(result.prepared.workflow.ref, `${POLICY.repository}/${POLICY.workflow}@${f.peer.ref}`);
+      assert.ok(f.calls.some(([name, value]) => name === 'readTag' && value === f.peer.ref));
+      f.tag.tag = `${namespaces.peer ? '' : 'npm/'}v${f.peer.version}`;
+      assert.throws(() => validatePeerBundle(f.bundle()));
+    });
+  }
+}
+
+test('peer approval cannot relabel an existing source artifact into the npm namespace', t => {
+  const f = new Fixture(t);
+  f.peer.ref = `refs/tags/npm/v${f.peer.version}`;
+  assert.throws(() => validatePeerBundle(f.bundle()));
+  f.tagRef.ref = f.peer.ref;
+  f.tag.tag = `npm/v${f.peer.version}`;
+  assert.throws(() => validatePeerBundle(f.bundle()));
+});
 
 test('missing peer explains the non-circular next prepare and writes nothing', async t => {
   const f = new Fixture(t);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POLICY, digest, sameDigests } from './policy.mjs';
+import { POLICY, digest, publicationTagName, sameDigests } from './policy.mjs';
 import { MATRIX, githubReaders, zipFiles } from './matrix.mjs';
 import { inspectTarball } from './tarball.mjs';
 
@@ -27,7 +27,7 @@ function id(value) {
 
 function gitSource(value) {
   assert.ok(['1.3.1', '2.0.1'].includes(value.version), 'Only opposite PATCH candidates are supported');
-  assert.equal(value.ref, `refs/tags/v${value.version}`);
+  publicationTagName(value.ref, value.version);
   for (const key of ['tagObject', 'commit', 'tree']) {
     assert.match(value[key] ?? '', /^[a-f0-9]{40}$/, `Invalid ${key}`);
   }
@@ -139,7 +139,7 @@ function gitBinding(peer, tagRef, tag, commit) {
   assert.equal(tagRef.object?.type, 'tag', 'Peer release ref must be an annotated tag');
   assert.equal(tagRef.object.sha, peer.tagObject, 'Peer release tag moved');
   assert.equal(tag?.sha, peer.tagObject);
-  assert.equal(tag.tag, `v${peer.version}`);
+  assert.equal(tag.tag, publicationTagName(peer.ref, peer.version));
   assert.equal(tag.object?.type, 'commit', 'Peer tag must peel directly to a commit');
   assert.equal(tag.object.sha, peer.commit);
   assert.equal(commit?.sha, peer.commit);
@@ -299,7 +299,7 @@ function gitReaders(env) {
   };
   return {
     readRun: runId => get(`actions/runs/${id(runId)}`),
-    // readTag is called with refs/tags/vX, then the independently approved annotated object SHA.
+    // Resolve the complete approved ref before reading its independently approved tag object.
     readTag: refOrObject => get(refOrObject.startsWith('refs/tags/')
       ? `git/ref/tags/${refOrObject.slice('refs/tags/'.length)}` : `git/tags/${refOrObject}`),
     readCommit: commit => get(`git/commits/${commit}`),
