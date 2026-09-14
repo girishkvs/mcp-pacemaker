@@ -7,7 +7,8 @@ import { gzipSync } from 'node:zlib';
 import { digest, POLICY } from '../tools/npm-publication/policy.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import {
-  MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, verifyMatrixReports, verifyPreparedBundle, zipFiles,
+  MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, validateMatrixContext,
+  verifyMatrixReports, verifyPreparedBundle, zipFiles,
 } from '../tools/npm-publication/matrix.mjs';
 import {
   bootstrapNpmCli, installConsumerToolchain,
@@ -251,6 +252,27 @@ class Fixture {
     metadata.digest = `sha256:${hash(archive)}`;
   }
 }
+
+test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
+  const f = new Fixture(t);
+  for (const version of ['1.3.1', '2.0.1']) {
+    const a = { ...approval, version, ref: `refs/tags/npm/v${version}` };
+    const env = { ...f.env, GITHUB_REF: a.ref,
+      GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
+    const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };
+    validateMatrixContext(env, a, event);
+    assert.throws(() => validateMatrixContext({ ...env, GITHUB_REF: `refs/tags/v${version}` }, a, event));
+    assert.throws(() => validateMatrixContext({ ...env,
+      GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
+    }, a, event));
+    for (const ref of ['refs/heads/main', `refs/tags/npm/v${version}-other`, `refs/tags/other/v${version}`]) {
+      const invalid = { ...a, ref };
+      const invalidEnv = { ...env, GITHUB_REF: ref,
+        GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };
+      assert.throws(() => validateMatrixContext(invalidEnv, invalid), /exact approved/);
+    }
+  }
+});
 
 test('all six lanes execute both modes; finalizer binds actual archives and successful jobs', async t => {
   const fixture = new Fixture(t);

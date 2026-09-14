@@ -4,24 +4,24 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
+import { POLICY, channelFor, digest } from '../tools/npm-publication/policy.mjs';
 import { extractTarball, inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import { ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { verifyStaged } from '../tools/npm-publication/verify-staged.mjs';
 
-function fixture() {
+function fixture(version = '1.3.1', namespace = '') {
   const bytes = Buffer.from('synthetic proof fixture, not a real signed npm package');
-  const source = { ref: 'refs/tags/v1.3.1', commit: 'a'.repeat(40) };
+  const source = { ref: `refs/tags/${namespace}v${version}`, commit: 'a'.repeat(40) };
   const record = {
     status: 'submitted-awaiting-owner-verification', stageId: 'b24a7be2-f726-407a-8ae3-367189f1f236',
-    version: '1.3.1', source, artifact: digest(bytes), workflow: { runId: '42', attempt: 1 },
+    version, source, artifact: digest(bytes), workflow: { runId: '42', attempt: 1 },
     ownerPreflight: { expectedDistTags: { latest: '2.0.1' } },
   };
-  const view = { id: record.stageId, packageName: POLICY.name, version: '1.3.1', tag: 'legacy',
+  const view = { id: record.stageId, packageName: POLICY.name, version, tag: channelFor(version),
     shasum: createHash('sha1').update(bytes).digest('hex') };
   const payload = {
     _type: 'https://in-toto.io/Statement/v1', predicateType: 'https://slsa.dev/provenance/v1',
-    subject: [{ name: 'pkg:npm/mcp-pacemaker@1.3.1', digest: { sha512: record.artifact.sha512 } }],
+    subject: [{ name: `pkg:npm/mcp-pacemaker@${version}`, digest: { sha512: record.artifact.sha512 } }],
     predicate: {
       buildDefinition: {
         buildType: 'https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1',
@@ -61,6 +61,25 @@ test('T12/T44: hashes alone never complete provenance verification or authorize 
   assert.equal(result.registrySignatures, 'pending-publication');
   assert.equal(result.ownerPublicationApproval, 'not-performed');
 });
+
+for (const version of ['1.3.1', '2.0.1']) {
+  test(`staged proof retains the complete npm publication ref for ${version}`, async () => {
+    const f = fixture(version, 'npm/');
+    let calls = 0;
+    const verifyBundle = async (_bundle, options) => {
+      calls++;
+      const identity = new RegExp(options.certificateIdentityURI);
+      assert.ok(identity.test(`https://github.com/${POLICY.repository}/${POLICY.workflow}@${f.record.source.ref}`));
+      assert.ok(!identity.test(`https://github.com/${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`));
+    };
+    await verifyStaged({ ...f, bundle: f.bundle(f.payload), verifyBundle });
+    assert.equal(calls, 1);
+    const differentRef = structuredClone(f.payload);
+    differentRef.predicate.buildDefinition.externalParameters.workflow.ref = `refs/tags/v${version}`;
+    await assert.rejects(() => verifyStaged({ ...f, bundle: f.bundle(differentRef), verifyBundle }));
+    assert.equal(calls, 1, 'A ref mismatch must fail before signature verification.');
+  });
+}
 
 test('T44: cryptographic verifier failure blocks matching hashes and matching metadata', async () => {
   const f = fixture();
