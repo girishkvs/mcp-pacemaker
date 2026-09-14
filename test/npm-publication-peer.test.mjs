@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
@@ -19,9 +21,10 @@ const gitHash = character => character.repeat(40);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 class Fixture {
-  constructor(t, version = '2.0.1') {
-    this.home = mkdtempSync(join(tmpdir(), 'pacemaker-peer-unit-'));
+  constructor(t, version = '2.0.1', temporaryParent = tmpdir()) {
+    this.home = mkdtempSync(join(realpathSync.native(temporaryParent), 'pacemaker-peer-unit-'));
     t.after(() => rmSync(this.home, { recursive: true, force: true }));
+    assert.equal(realpathSync.native(this.home), this.home, 'Owned peer fixture must use the native canonical path');
     this.directory = join(this.home, 'peer');
     this.approval = {
       schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version,
@@ -414,6 +417,35 @@ test('requires a new absolute directory outside the checkout, without following 
   await downloadPeer(f.options());
   await assert.rejects(downloadPeer(f.options()), /exist/i);
   assert.deepEqual(readFileSync(join(f.directory, 'peer.tgz')), f.bytes);
+});
+
+test('owned peer fixtures canonicalize real aliased temp parents', async t => {
+  const parent = mkdtempSync(join(realpathSync.native(tmpdir()), 'publication-peer-alias-'));
+  t.after(() => rmSync(parent, { recursive: true }));
+  const physical = join(parent, 'physical');
+  const alias = join(parent, 'alias');
+  mkdirSync(physical);
+  symlinkSync(physical, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.notEqual(realpathSync(alias), resolve(alias));
+
+  await t.test('canonical fixture downloads exact approved bytes', async child => {
+    const f = new Fixture(child, '2.0.1', alias);
+    assert.equal(dirname(f.home), physical);
+    assert.equal(realpathSync.native(f.home), f.home);
+    await downloadPeer(f.options());
+    assert.deepEqual(readFileSync(join(f.directory, 'peer.tgz')), f.bytes);
+  });
+
+  await t.test('external alias still rejects before readers; existing bytes survive', async child => {
+    const f = new Fixture(child, '2.0.1', alias);
+    const directory = join(alias, basename(f.home), 'peer');
+    await assert.rejects(downloadPeer({ ...f.options(), directory }), /ancestors must be real directories/);
+    assert.deepEqual(f.calls, []);
+    assert.equal(existsSync(f.directory), false);
+    await downloadPeer(f.options());
+    await assert.rejects(downloadPeer(f.options()), /exist/i);
+    assert.deepEqual(readFileSync(join(f.directory, 'peer.tgz')), f.bytes);
+  });
 });
 
 test('rechecks the exclusive destination after remote reads', async t => {

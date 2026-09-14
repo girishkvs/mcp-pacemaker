@@ -1,5 +1,12 @@
-import { isAbsolute, relative, resolve, win32 } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseJson, requireCondition } from './core.mjs';
+
+export function isForeignWindowsPath(file, platform = process.platform) {
+  const windowsRoot = /^[a-z]:/i.test(file) ||
+    file.startsWith('\\') ||
+    file.startsWith('//');
+  return platform !== 'win32' && windowsRoot;
+}
 
 export function diagnosticLocations(name, result, root, entries) {
   requireCondition(['gitleaks', 'trufflehog'].includes(name), 'unsupported-diagnostic-tool');
@@ -15,8 +22,8 @@ export function diagnosticLocations(name, result, root, entries) {
     const file = name === 'gitleaks' ? finding.File : metadata?.file;
     requireCondition(typeof file === 'string' && !/[\x00-\x1f\x7f]/.test(file),
       'diagnostic-location-schema');
-    requireCondition(process.platform === 'win32' || !win32.isAbsolute(file), 'diagnostic-path-outside-snapshot');
-    const path = relative(root, isAbsolute(file) ? file : resolve(root, file)).replaceAll('\\', '/');
+    requireCondition(!isForeignWindowsPath(file), 'diagnostic-path-outside-snapshot');
+    const path = relative(root, isAbsolute(file) ? file : resolve(root, file)).split(sep).join('/');
     const approvedPath = paths.get(process.platform === 'win32' ? path.toLowerCase() : path);
     requireCondition(Boolean(approvedPath), 'diagnostic-path-outside-snapshot');
     const material = name === 'gitleaks' ? [finding.Secret, finding.Match] : [finding.Raw, finding.RawV2];

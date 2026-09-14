@@ -62,15 +62,17 @@ export async function guarded(kind, action) {
 }
 
 export async function workspace(action) {
-  const root = await mkdtemp(join(tmpdir(), 'publication-scanners-'));
-  const identity = await lstat(root);
+  // Only owned scratch creation resolves temp aliases; external scan roots retain their strict guards.
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'publication-scanners-'));
+  const identity = await lstat(root, { bigint: true });
+  requireCondition(identity.isDirectory() && !identity.isSymbolicLink(), 'temporary-directory-identity-changed');
   try {
     await mkdir(join(root, 'home'));
     await writeFile(join(root, 'gitconfig'), '');
     return await action(root);
   } finally {
-    const current = await lstat(root);
-    requireCondition(current.isDirectory() && current.ino === identity.ino &&
+    const current = await lstat(root, { bigint: true });
+    requireCondition(current.isDirectory() && !current.isSymbolicLink() && current.ino === identity.ino &&
       current.dev === identity.dev, 'temporary-directory-identity-changed');
     await rm(root, { recursive: true, force: false });
   }

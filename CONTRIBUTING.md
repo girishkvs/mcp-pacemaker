@@ -35,6 +35,18 @@ Tests are `node:test` only, no framework. Each test file that starts a bridge ow
 ports, because files run in parallel; the current allocation is listed at the top of
 `test/auth-token.test.mjs`. Pick unused ones for a new file.
 
+Before submitting, run the complete `npm test` command with its normal file concurrency.
+Focused or serialized runs help diagnose failures but do not replace that run. Record the
+exact Node and npm versions, OS, architecture, and command; matching only the Node major is
+not enough to reproduce a CI failure.
+
+Filesystem coverage must include native POSIX absolute paths, macOS temporary-directory
+aliases, and Windows 8.3 temporary paths as well as canonical paths. Preserve those inputs
+when reproducing a failure instead of normalizing the whole test environment. Canonicalize
+owned scratch roots and native watcher inputs at their boundaries; keep rejecting unexpected
+links, replaced directories, and files outside the approved inventory. A Windows-only pass
+does not establish Linux or macOS correctness; the hosted platform matrix remains required.
+
 The complete Windows suite needs audit-read rights for successful configuration-write cases.
 Security-specific fixtures modify only their own temporary files. Automatic writes deliberately
 fail closed when audit policy is unreadable; the suite also exercises that restricted path.

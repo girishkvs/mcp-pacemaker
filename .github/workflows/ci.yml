@@ -30,6 +30,15 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Record runtime and filesystem context
+        run: >-
+          node --input-type=module -e
+          "import { availableParallelism, tmpdir } from 'node:os';
+          import { realpathSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          console.log(JSON.stringify({ node: process.version, uv: process.versions.uv,
+          platform: process.platform, arch: process.arch, parallelism: availableParallelism(),
+          tempPathAliased: resolve(tmpdir()) !== realpathSync.native(tmpdir()) }));"
       - run: npm ci
       - name: Syntax check
         run: |

@@ -21,8 +21,8 @@ test('dashboard CI restores the root runtime before building its license supplem
 });
 
 class RuntimeFixture {
-  constructor(t) {
-    this.root = fs.mkdtempSync(path.join(tmpdir(), 'mcp-runtime-notices-'));
+  constructor(t, tempRoot = tmpdir()) {
+    this.root = fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot, 'mcp-runtime-notices-')));
     t.after(() => fs.rmSync(this.root, { recursive: true, force: true }));
     const source = '/** @license MIT fixture notice */\nexport default 1;\n';
     this.entry = {
@@ -51,6 +51,52 @@ class RuntimeFixture {
   records() {
     return runtimeNotices(this.root, [this.entry], this.root);
   }
+}
+
+test('runtime notice fixture root uses native canonical spelling', (t) => {
+  const fixture = new RuntimeFixture(t);
+  assert.equal(fixture.root, fs.realpathSync.native(fixture.root));
+});
+
+test('runtime notice fixtures canonicalize an aliased temporary parent', (t) => {
+  const sandbox = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'mcp-runtime-notices-alias-')));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const target = path.join(sandbox, 'physical');
+  const alias = path.join(sandbox, 'alias');
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    assert.notEqual(fs.realpathSync.native(alias), path.resolve(alias));
+    const fixture = new RuntimeFixture(t, alias);
+    const records = fixture.records();
+    assert.equal(fixture.root, fs.realpathSync.native(fixture.root));
+    assert.equal(path.dirname(fixture.root), target);
+    assert.equal(records[0].licenses[0].text, MIT);
+    assert.deepEqual(records[0].resolution, fixture.entry.resolution);
+  } finally {
+    fs.unlinkSync(alias);
+  }
+  assert.equal(fs.lstatSync(alias, { throwIfNoEntry: false }), undefined);
+  assert.ok(fs.existsSync(target));
+});
+
+for (const lockPath of ['node_modules/runtime-fixture', 'node_modules']) {
+  test(`runtime notice inventory rejects linked ${lockPath}`, (t) => {
+    const fixture = new RuntimeFixture(t);
+    assert.equal(fixture.records()[0].licenses[0].text, MIT);
+    const directory = path.join(fixture.root, lockPath);
+    const target = path.join(fixture.root, 'linked-runtime-target');
+    fs.renameSync(directory, target);
+    fs.symlinkSync(target, directory, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      assert.ok(fs.lstatSync(directory).isSymbolicLink());
+      assert.throws(() => fixture.records(), /Linked runtime package requires license review/);
+    } finally {
+      fs.unlinkSync(directory);
+    }
+    assert.equal(fs.lstatSync(directory, { throwIfNoEntry: false }), undefined);
+    assert.ok(fs.existsSync(target));
+  });
 }
 
 test('runtime MIT supplement retains full terms and source notice without claiming UI bundling', (t) => {

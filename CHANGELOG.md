@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve native directory watcher paths before watching logs and test control files,
+  avoiding Windows short-path watcher crashes without changing the selected files.
+
 ### Security
 
 - Prepare 1.3.1 with a `smol-toml` minimum and locked version of 1.8.0. Bounded malformed-TOML

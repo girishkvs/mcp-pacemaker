@@ -13,8 +13,8 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const MIT = normalizeText(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8'));
 
 class NoticeFixture {
-  constructor(t) {
-    this.root = fs.mkdtempSync(path.join(tmpdir(), 'mcp-notices-'));
+  constructor(t, tempRoot = tmpdir()) {
+    this.root = fs.realpathSync.native(fs.mkdtempSync(path.join(tempRoot, 'mcp-notices-')));
     this.ui = path.join(this.root, 'ui');
     this.policy = {};
     this.lock = { lockfileVersion: 3, packages: {} };
@@ -79,6 +79,53 @@ class NoticeFixture {
     this.write('ui/dist/assets/ui.js', bundle['assets/ui.js'].code);
     return manifest;
   }
+}
+
+test('bundled notice fixture root uses native canonical spelling', (t) => {
+  const fixture = new NoticeFixture(t);
+  assert.equal(fixture.root, fs.realpathSync.native(fixture.root));
+});
+
+test('bundled notice fixtures canonicalize an aliased temporary parent', (t) => {
+  const sandbox = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'mcp-notices-alias-')));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const target = path.join(sandbox, 'physical');
+  const alias = path.join(sandbox, 'alias');
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    assert.notEqual(fs.realpathSync.native(alias), path.resolve(alias));
+    const fixture = new NoticeFixture(t, alias);
+    const manifest = fixture.artifacts();
+    assert.equal(fixture.root, fs.realpathSync.native(fixture.root));
+    assert.equal(path.dirname(fixture.root), target);
+    assert.deepEqual(verifyArtifacts(fixture.root), manifest);
+  } finally {
+    fs.unlinkSync(alias);
+  }
+  assert.equal(fs.lstatSync(alias, { throwIfNoEntry: false }), undefined);
+  assert.ok(fs.existsSync(target));
+});
+
+for (const lockPath of ['node_modules/included', 'node_modules']) {
+  test(`bundled notice inventory rejects linked ${lockPath}`, (t) => {
+    const fixture = new NoticeFixture(t);
+    const file = fixture.package('included');
+    const bundle = fixture.bundle({ [file]: { renderedLength: 20 } });
+    assert.equal(fixture.inventory().collect(bundle)[0].modules[0].package, 'included@1.0.0');
+    const directory = path.join(fixture.ui, lockPath);
+    const target = path.join(fixture.root, 'linked-producer-target');
+    fs.renameSync(directory, target);
+    fs.symlinkSync(target, directory, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      assert.ok(fs.lstatSync(directory).isSymbolicLink());
+      assert.throws(() => fixture.inventory().collect(bundle), /Linked producer packages require notice review/);
+    } finally {
+      fs.unlinkSync(directory);
+    }
+    assert.equal(fs.lstatSync(directory, { throwIfNoEntry: false }), undefined);
+    assert.ok(fs.existsSync(target));
+  });
 }
 
 test('only rendered modules are attributed, not installed or tree-shaken dependencies', (t) => {
