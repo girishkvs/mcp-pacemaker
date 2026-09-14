@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'maintenance/**', 'dev/**']
   pull_request:
 
 jobs:
@@ -12,19 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Reject non-public registry URLs
-        run: |
-          if grep -nE '"resolved": "https://(?!registry\.npmjs\.org/)' -P package-lock.json ui/package-lock.json; then
-            echo "::error::A lockfile resolves to a non-public registry. Regenerate with --registry https://registry.npmjs.org/"
-            exit 1
-          fi
-          echo "both lockfiles resolve to registry.npmjs.org only"
+        run: >-
+          node --input-type=module -e
+          "import { checkLockfile } from './tools/compatibility/fixtures.mjs';
+          checkLockfile('package-lock.json'); checkLockfile('ui/package-lock.json');"
 
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [20, 22]
+        node: [20, 22, 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +30,15 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Record runtime and filesystem context
+        run: >-
+          node --input-type=module -e
+          "import { availableParallelism, tmpdir } from 'node:os';
+          import { realpathSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          console.log(JSON.stringify({ node: process.version, uv: process.versions.uv,
+          platform: process.platform, arch: process.arch, parallelism: availableParallelism(),
+          tempPathAliased: resolve(tmpdir()) !== realpathSync.native(tmpdir()) }));"
       - run: npm ci
       - name: Syntax check
         run: |
@@ -48,6 +55,13 @@ jobs:
           node --check bin/shared-sessions.mjs
       - name: Test
         run: npm test
+      - name: Prepare the exact release and patch compatibility pair
+        run: npm run compat:prepare
+      - name: Real-version CLI and API compatibility
+        run: npm run test:compat
+      - name: Clean owned compatibility fixtures
+        if: always()
+        run: npm run compat:clean
 
   ui:
     runs-on: ubuntu-latest
@@ -58,9 +72,21 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Install CLI dependencies
+        run: npm ci
       - name: Build web dashboard
         working-directory: ui
         run: |
           npm ci
           npm run typecheck
           npm run build
+      - name: Install bundled Chromium for compatibility
+        working-directory: ui
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Prepare the exact release and patch pair with built dashboard
+        run: npm run compat:prepare
+      - name: Real-version browser compatibility
+        run: npm run test:compat:browser
+      - name: Clean owned compatibility fixtures
+        if: always()
+        run: npm run compat:clean

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, watch } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -13,7 +13,7 @@ class SharedHttpPeer {
     this.progressSent = new Set();
     mkdirSync(this.controlsDirectory, { recursive: true });
     this.record({ event: 'spawn' });
-    this.watcher = watch(this.controlsDirectory, () => this.controls());
+    this.watcher = watch(realpathSync.native(this.controlsDirectory), () => this.controls());
     this.watcher.on('error', (error) => {
       process.stderr.write(`Fixture control watcher failed: ${error.message}\n`);
       process.exit(1);

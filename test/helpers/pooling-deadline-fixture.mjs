@@ -61,7 +61,9 @@ class ExecutionClock {
 }
 
 export class DeadlineFixture {
-  constructor(t, stage, { controlledClock = false } = {}) {
+  constructor(t, stage, {
+    controlledClock = false, startupDelayMs = 0, operationCostMs = 0, pauseWorker = false,
+  } = {}) {
     this.directory = fs.mkdtempSync(join(tmpdir(), 'pooling-deadline-'));
     this.config = join(this.directory, 'servers.json');
     this.original = '{"alpha":{"command":"node"},"beta":{"command":"node"}}\n';
@@ -70,12 +72,16 @@ export class DeadlineFixture {
     this.revision = createHash('sha256').update(this.original).digest('hex');
     this.clock = controlledClock ? new ExecutionClock() : undefined;
     const testClock = this.clock?.value.buffer;
+    this.startGate = pauseWorker ? new Int32Array(new SharedArrayBuffer(4)) : undefined;
+    const startGate = this.startGate?.buffer;
     this.Worker = workerThreads.Worker;
     workerThreads.Worker = class extends this.Worker {
       constructor(filename, options) {
         super(filename, {
           ...options, execArgv: ['--import', hooks],
-          workerData: testClock ? { ...options.workerData, poolingTestClock: testClock } : options.workerData,
+          workerData: { ...options.workerData, poolingTestClock: testClock,
+            poolingTestStartupDelayMs: startupDelayMs, poolingTestOperationCostMs: operationCostMs,
+            poolingTestStartGate: startGate },
         });
       }
     };
@@ -109,6 +115,17 @@ export class DeadlineFixture {
 
   release() {
     fs.writeFileSync(join(this.directory, 'release'), 'release');
+    if (this.startGate) {
+      Atomics.store(this.startGate, 0, 1);
+      Atomics.notify(this.startGate, 0);
+    }
+  }
+
+  async ready() {
+    // An invalid request acknowledges loaded worker code without invoking a
+    // native helper or changing the config. It does not warm the tested helper.
+    await assert.rejects(this.writer.apply({}), { code: 'INVALID_REQUEST' });
+    this.record('worker-ready');
   }
 
   abandon(controller) {

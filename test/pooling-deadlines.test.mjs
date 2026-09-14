@@ -25,7 +25,8 @@ test('queued expiry skips the mutation, never replays, and preserves the active 
 });
 
 test('a slow helper uses the remaining total deadline and cannot commit after timeout', windows, async (t) => {
-  const fixture = new Fixture(t, 'slow-helper');
+  const fixture = new Fixture(t, 'slow-helper', { startupDelayMs: 800 });
+  await fixture.ready();
   const result = await Promise.allSettled([
     fixture.writer.apply(fixture.request(), { deadline: fixture.limit(500) }),
   ]);
@@ -35,6 +36,18 @@ test('a slow helper uses the remaining total deadline and cannot commit after ti
   const events = fixture.events();
   assert.equal(events.find((event) => event.event === 'helper-return').error, 'ETIMEDOUT');
   assert.ok(events.find((event) => event.event === 'helper').timeout <= 500);
+  assert.equal(fs.existsSync(`${fixture.config}.bak`), false);
+});
+
+test('deadline during worker startup expires before any native helper runs', windows, async (t) => {
+  const fixture = new Fixture(t, 'slow-helper', { startupDelayMs: 800 });
+  await assert.rejects(fixture.writer.apply(fixture.request(), { deadline: fixture.limit(500) }),
+    { code: 'WRITER_DEADLINE' });
+  await fixture.writer.close();
+  const events = fixture.events();
+  assert.equal(events.some((event) => event.event === 'helper'), false);
+  assert.equal(events.find((event) => event.event === 'operation-result').code, 'WRITER_DEADLINE');
+  fixture.unchanged();
   assert.equal(fs.existsSync(`${fixture.config}.bak`), false);
 });
 
