@@ -51,6 +51,14 @@ export function channelFor(version) {
   return version.startsWith('1.') ? 'legacy' : 'latest';
 }
 
+export function publicationTagName(ref, version) {
+  channelFor(version);
+  const tag = `v${version}`;
+  assert.ok([`refs/tags/${tag}`, `refs/tags/npm/${tag}`].includes(ref),
+    'Publication requires the exact approved release or npm tag');
+  return ref.slice('refs/tags/'.length);
+}
+
 export function fresh(value, now = Date.now()) {
   const age = now - Date.parse(value);
   assert.ok(Number.isFinite(age) &&
@@ -63,7 +71,7 @@ export function validateApproval(approval, action, now = Date.now()) {
   assert.equal(approval.schemaVersion, 1);
   assert.equal(approval.name, POLICY.name);
   const channel = channelFor(approval.version);
-  assert.equal(approval.ref, `refs/tags/v${approval.version}`);
+  publicationTagName(approval.ref, approval.version);
   for (const key of ['tagObject', 'commit', 'tree']) {
     assert.match(approval[key] ?? '', /^[a-f0-9]{40}$/, `Invalid approved ${key}`);
   }
