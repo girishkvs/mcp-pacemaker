@@ -10,12 +10,221 @@ import { DeadlineFixture as Fixture } from './helpers/pooling-deadline-fixture.m
 import { PoolingCheckpoint, FIXTURE_DEADLOCK_MS } from './helpers/pooling-checkpoint.mjs';
 import { PoolingFiles } from '../bin/pooling-files.mjs';
 import { PoolingExecution } from '../bin/pooling-execution.mjs';
+import { createHash } from 'node:crypto';
+import { PoolingConflictDiagnostics } from './helpers/pooling-conflict-diagnostics.mjs';
 
 const test = (name, options, callback) => typeof options === 'function'
   ? nodeTest(name, { timeout: FIXTURE_DEADLOCK_MS }, options)
   : nodeTest(name, { timeout: FIXTURE_DEADLOCK_MS, ...options }, callback);
 
 const windows = { skip: process.platform !== 'win32' };
+
+test('bridge clock advance is invisible until its complete value is published', (t) => {
+  const fixture = new Fixture(t, 'worker-exit-after-placement');
+  const published = join(fixture.directory, 'advance-clock');
+  const write = fs.writeFileSync;
+  const observed = [];
+  t.mock.method(fs, 'writeFileSync', (path, value, options) => {
+    const descriptor = fs.openSync(path, options?.flag ?? 'w');
+    try {
+      observed.push(fs.existsSync(published));
+      write(descriptor, value, options);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  });
+  try {
+    fixture.advanceBridgeClock(9100);
+  } finally {
+    t.mock.restoreAll();
+  }
+  assert.deepEqual(observed, [false]);
+  assert.equal(fs.readFileSync(published, 'utf8'), '9100');
+  assert.equal(fs.existsSync(join(fixture.directory, 'advance-clock-next')), false);
+});
+
+class ConflictDiagnosticFixture {
+  constructor() {
+    this.path = 'private-config-path';
+    this.bytes = Buffer.from('private-config-contents');
+    const stat = { dev: 1n, ino: 2n, size: BigInt(this.bytes.length), mtimeNs: 3n, ctimeNs: 4n };
+    this.before = { ...stat };
+    this.opened = { ...stat };
+    this.after = { ...stat };
+    this.revision = createHash('sha256').update(this.bytes).digest('hex');
+    this.failure = Object.freeze(Object.assign(new Error('private-error-message'), {
+      code: 'REVISION_CONFLICT', statusCode: 409, stack: 'private-error-stack',
+      headers: 'private-headers', nonce: 'private-nonce', acl: 'private-acl',
+    }));
+    this.calls = { lstat: 0, open: 0, fstat: 0, read: 0, close: 0 };
+    this.files = {
+      lstatSync: () => { this.calls.lstat++; return this.before; },
+      openSync: () => { this.calls.open++; return 7; },
+      fstatSync: () => ++this.calls.fstat === 1 ? this.opened : this.after,
+      readSync: (fd, buffer, offset) => {
+        if (++this.calls.read !== 1) return 0;
+        return this.bytes.copy(buffer, offset);
+      },
+      closeSync: () => { this.calls.close++; },
+    };
+    this.originals = { ...this.files };
+    this.diagnostics = new PoolingConflictDiagnostics(this.files, this.path);
+  }
+
+  read({ stopAtOpen = false, failure = this.failure, extraStats = 0 } = {}) {
+    this.files.lstatSync(this.path, { bigint: true });
+    const fd = this.files.openSync(this.path, fs.constants.O_RDONLY);
+    try {
+      this.files.fstatSync(fd, { bigint: true });
+      if (!stopAtOpen) {
+        const buffer = Buffer.alloc(this.bytes.length);
+        this.files.readSync(fd, buffer, 0, buffer.length, null);
+        this.files.readSync(fd, buffer, 0, buffer.length, null);
+        this.files.fstatSync(fd, { bigint: true });
+        for (let index = 0; index < extraStats; index++) this.files.fstatSync(fd, { bigint: true });
+      }
+      if (failure) throw failure;
+      return this.bytes;
+    } finally {
+      this.files.closeSync(fd);
+    }
+  }
+
+  capture(options) {
+    return this.diagnostics.capture({ revision: this.revision }, () => this.read(options));
+  }
+
+  unchangedError(options) {
+    assert.throws(() => this.capture(options), (error) => error === this.failure && error.statusCode === 409);
+    for (const method of Object.keys(this.originals)) assert.equal(this.files[method], this.originals[method]);
+    assert.equal(this.diagnostics.state, undefined);
+  }
+}
+
+for (const [site, fields] of [
+  ['open', ['dev', 'ino', 'size']],
+  ['after-read', ['size', 'mtimeNs', 'ctimeNs']],
+]) {
+  for (const field of fields) {
+    test(`revision conflict diagnostics classify ${site} ${field}`, () => {
+      const fixture = new ConflictDiagnosticFixture();
+      const stat = site === 'open' ? fixture.opened : fixture.after;
+      stat[field] += 1n;
+      fixture.unchangedError({ stopAtOpen: site === 'open' });
+      assert.deepEqual(fixture.diagnostics.conflict,
+        { site: `boundedRead:${site}`, changedFields: [field], incomplete: false });
+      assert.deepEqual(fixture.calls, site === 'open'
+        ? { lstat: 1, open: 1, fstat: 1, read: 0, close: 1 }
+        : { lstat: 1, open: 1, fstat: 2, read: 2, close: 1 });
+    });
+  }
+}
+
+test('revision conflict diagnostics distinguish a request revision mismatch from other conflicts', () => {
+  const mismatch = new ConflictDiagnosticFixture();
+  mismatch.revision = '0'.repeat(64);
+  mismatch.unchangedError();
+  assert.deepEqual(mismatch.diagnostics.conflict,
+    { site: 'stageApply:request-revision', changedFields: ['revision'], incomplete: false });
+  const other = new ConflictDiagnosticFixture();
+  other.unchangedError();
+  assert.deepEqual(other.diagnostics.conflict,
+    { site: 'stageApply:unclassified', changedFields: [], incomplete: false });
+});
+
+test('revision conflict diagnostics emit only fixed labels and changed field names', () => {
+  const fixture = new ConflictDiagnosticFixture();
+  for (const field of ['size', 'mtimeNs', 'ctimeNs']) fixture.after[field] += 1n;
+  fixture.unchangedError();
+  assert.deepEqual(fixture.diagnostics.conflict, {
+    site: 'boundedRead:after-read', changedFields: ['size', 'mtimeNs', 'ctimeNs'], incomplete: false,
+  });
+  const encoded = JSON.stringify(fixture.diagnostics.conflict);
+  assert.ok(Buffer.byteLength(encoded) < 256);
+  assert.equal(encoded.includes('private-'), false);
+  assert.equal(encoded.includes(fixture.revision), false);
+});
+
+for (const value of [1n << 128n, 'private-stat-value'.repeat(1000), { secret: 'private-stat-object' }]) {
+  test(`revision conflict diagnostics bound unsupported ${typeof value} stat values`, () => {
+    const fixture = new ConflictDiagnosticFixture();
+    fixture.after.ctimeNs = value;
+    fixture.unchangedError();
+    assert.deepEqual(fixture.diagnostics.conflict,
+      { site: 'stageApply:unclassified', changedFields: [], incomplete: true });
+    assert.ok(Buffer.byteLength(JSON.stringify(fixture.diagnostics.conflict)) < 256);
+  });
+}
+
+test('revision conflict diagnostics cap captured stat samples and read bytes', () => {
+  const samples = new ConflictDiagnosticFixture();
+  samples.unchangedError({ extraStats: 1000 });
+  assert.equal(samples.diagnostics.conflict.incomplete, true);
+  const bytes = new ConflictDiagnosticFixture();
+  bytes.bytes = Buffer.alloc(1024 * 1024 + 1);
+  bytes.unchangedError();
+  assert.deepEqual(bytes.diagnostics.conflict,
+    { site: 'stageApply:unclassified', changedFields: [], incomplete: true });
+});
+
+test('revision conflict diagnostics preserve success and non-conflict errors without output', () => {
+  const success = new ConflictDiagnosticFixture();
+  assert.equal(success.capture({ failure: null }), success.bytes);
+  assert.equal(success.diagnostics.conflict, undefined);
+  for (const method of Object.keys(success.originals)) assert.equal(success.files[method], success.originals[method]);
+  const failed = new ConflictDiagnosticFixture();
+  const failure = Object.freeze(Object.assign(new Error('private-other-error'), { code: 'IO_ERROR' }));
+  assert.throws(() => failed.capture({ failure }), (error) => error === failure);
+  assert.equal(failed.diagnostics.conflict, undefined);
+  for (const method of Object.keys(failed.originals)) assert.equal(failed.files[method], failed.originals[method]);
+  assert.equal(failed.diagnostics.state, undefined);
+});
+
+test('revision conflict diagnostics preserve an original conflict when observation fails', () => {
+  const fixture = new ConflictDiagnosticFixture();
+  Object.defineProperty(fixture.after, 'ctimeNs', { get() { throw new Error('private-observer-error'); } });
+  fixture.unchangedError();
+  assert.deepEqual(fixture.diagnostics.conflict,
+    { site: 'stageApply:unclassified', changedFields: [], incomplete: true });
+});
+
+test('revision conflict diagnostics do not invoke revision getters or replace a conflict on inspection failure', () => {
+  const getter = new ConflictDiagnosticFixture();
+  const request = { get revision() { throw new Error('private-revision-getter'); } };
+  assert.throws(() => getter.diagnostics.capture(request, () => getter.read()),
+    (error) => error === getter.failure);
+  assert.deepEqual(getter.diagnostics.conflict,
+    { site: 'stageApply:unclassified', changedFields: [], incomplete: false });
+  const failed = new ConflictDiagnosticFixture();
+  const proxy = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('private-descriptor-error'); } });
+  assert.throws(() => failed.diagnostics.capture(proxy, () => failed.read()),
+    (error) => error === failed.failure);
+  assert.deepEqual(failed.diagnostics.conflict,
+    { site: 'stageApply:unclassified', changedFields: [], incomplete: true });
+});
+
+test('revision conflict diagnostics attach only to a conflicting worker result', async (t) => {
+  const fixture = new Fixture(t, 'stage-complete');
+  assert.equal((await fixture.writer.stageApply(fixture.request('isolated'))).ok, true);
+  fixture.disableHook();
+  await assert.rejects(fixture.writer.stageApply({ ...fixture.request('isolated'), revision: '0'.repeat(64) }),
+    { code: 'REVISION_CONFLICT', statusCode: 409 });
+  assert.equal((await fixture.writer.stageApply(fixture.request('isolated'))).ok, true);
+  await fixture.writer.close();
+  fixture.unchanged();
+  const events = fixture.events();
+  assert.deepEqual(events.map((event) => event.event), [
+    'hooks-ready', 'operation-start', 'operation-result', 'operation-start', 'operation-result',
+    'operation-start', 'operation-result',
+  ]);
+  const results = events.filter((event) => event.event === 'operation-result');
+  assert.equal(results.length, 3);
+  assert.equal(Object.hasOwn(results[0], 'conflict'), false);
+  assert.deepEqual(results[1].conflict,
+    { site: 'stageApply:request-revision', changedFields: ['revision'], incomplete: false });
+  assert.equal(Object.hasOwn(results[2], 'conflict'), false);
+  assert.equal(fixture.events().some((event) => event.event === 'helper'), false);
+});
 
 for (const mode of ['completion', 'teardown']) {
   test(`fixture guard bounds stalled ${mode} after a successful checkpoint`, () => {

@@ -6,6 +6,7 @@ import workerThreads, { isMainThread, parentPort, workerData } from 'node:worker
 import { syncBuiltinESMExports } from 'node:module';
 import { PoolingFiles, hashBytes } from '../../bin/pooling-files.mjs';
 import { PoolingConfigStore } from '../../bin/pooling-config.mjs';
+import { PoolingConflictDiagnostics } from './pooling-conflict-diagnostics.mjs';
 
 // Only disposable bridges with this fixture marker get an adjustable clock.
 // Advance the real 9s budget without holding a native-phase gate for 9s.
@@ -74,6 +75,7 @@ if (!isMainThread &&
     process.hrtime.bigint = () => readTime() + Atomics.load(offset, 0);
   }
   const directory = dirname(workerData.configPath);
+  const conflicts = new PoolingConflictDiagnostics(fs, workerData.configPath);
   const stage = fs.readFileSync(join(directory, 'stage'), 'utf8');
   const helper = fileURLToPath(new URL('../../bin/windows/PoolingSecurityHelper.exe', import.meta.url));
   const slowHelper = fileURLToPath(new URL('./pooling-slow-helper.mjs', import.meta.url));
@@ -123,6 +125,7 @@ if (!isMainThread &&
   record('hooks-ready');
   const on = parentPort.on.bind(parentPort);
   parentPort.on = (event, listener) => on(event, event === 'message' ? (message) => {
+    conflicts.conflict = undefined;
     method = message.method;
     deadline = message.deadline === undefined ? undefined : String(message.deadline);
     if (method !== 'close') record('operation-start');
@@ -131,7 +134,8 @@ if (!isMainThread &&
   const postMessage = parentPort.postMessage.bind(parentPort);
   parentPort.postMessage = (message, ...args) => {
     if (message.result?.commitState === 'committed') exitWorker('worker-exit-after-completion');
-    record('operation-result', { code: message.error?.code, completedLate: message.completedLate });
+    record('operation-result', { code: message.error?.code, completedLate: message.completedLate,
+      conflict: message.error?.code === 'REVISION_CONFLICT' ? conflicts.conflict : undefined });
     return postMessage(message, ...args);
   };
 
@@ -190,6 +194,10 @@ if (!isMainThread &&
     return result;
   };
 
+  const stageApply = PoolingConfigStore.prototype.stageApply;
+  PoolingConfigStore.prototype.stageApply = function (request, ...args) {
+    return conflicts.capture(request, () => stageApply.call(this, request, ...args));
+  };
   const nativeStage = PoolingFiles.prototype.stage;
   PoolingFiles.prototype.stage = function (path, source, descriptor, bytes, execution) {
     record('stage-start', { path: basename(path) });

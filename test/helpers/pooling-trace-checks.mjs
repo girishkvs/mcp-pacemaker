@@ -51,6 +51,34 @@ class TraceFixture {
     return this.artifacts.collect(this.source, this.directory);
   }
 
+  deadlineRecords(event) {
+    this.operation.record(event, event === 'writer-expire'
+      ? { expired: true, state: 4 } : { code: 'WRITER_DEADLINE', state: 4 });
+    this.operation.record('response', { status: 504 });
+    return this.records().map((record, index) =>
+      ({ ...record, elapsedMs: 9001 + index, remainingMs: -1 - index }));
+  }
+
+  deadlineResponse(records) {
+    const response = records.find((record) => record.event === 'response');
+    assert.ok(response, 'The controlled operation must record its response.');
+    assert.equal(response.status, 504);
+    assert.ok(response.elapsedMs >= 8900 && response.elapsedMs < 10000);
+    const outcome = records.find((record) => {
+      const isDeadline = (record.event === 'writer-expire' && record.expired === true) ||
+        (record.event === 'writer-result' && record.code === 'WRITER_DEADLINE');
+      return isDeadline &&
+        record.operation === response.operation &&
+        record.pid === response.pid &&
+        record.thread === response.thread &&
+        record.sequence < response.sequence;
+    });
+    assert.ok(outcome, 'The response must follow a deadline outcome from the same writer.');
+    assert.ok(outcome.remainingMs <= 0 && outcome.elapsedMs <= response.elapsedMs,
+      'The writer deadline must have elapsed before its response.');
+    return response;
+  }
+
   capture(target = 'api') {
     const capture = new PoolingTraceFixture({
       name: targets[target], diagnostic: (line) => this.diagnostics.push(line),
@@ -60,6 +88,39 @@ class TraceFixture {
     return capture;
   }
 }
+
+for (const event of ['writer-expire', 'writer-result']) {
+  test(`deadline trace accepts the ${event} deadline path`, (t) => {
+    const fixture = new TraceFixture(t);
+    const records = fixture.deadlineRecords(event);
+    records.forEach(validateTraceRecord);
+    assert.equal(fixture.deadlineResponse(records), records[1]);
+  });
+}
+
+for (const [name, change] of [
+  ['unrelated failure', (record) => { record.code = 'IO_ERROR'; }],
+  ['different operation', (record) => { record.operation = '00000000-0000-4000-8000-000000000000'; }],
+  ['different process', (record) => { record.pid += 1; }],
+  ['different thread', (record) => { record.thread += 1; }],
+  ['outcome after response', (record) => { record.sequence += 2; }],
+  ['unexpired budget', (record) => { record.remainingMs = 1; }],
+]) {
+  test(`deadline trace rejects ${name}`, (t) => {
+    const fixture = new TraceFixture(t);
+    const records = fixture.deadlineRecords('writer-result');
+    change(records[0]);
+    assert.throws(() => fixture.deadlineResponse(records));
+  });
+}
+
+test('deadline trace rejects cancellation and missing deadline evidence', (t) => {
+  const fixture = new TraceFixture(t);
+  const records = fixture.deadlineRecords('writer-expire');
+  records[0].expired = false;
+  assert.throws(() => fixture.deadlineResponse(records));
+  assert.throws(() => fixture.deadlineResponse(records.slice(1)));
+});
 
 test('disabled pooling tracing writes nothing and cannot initialize a writer', (t) => {
   const fixture = new TraceFixture(t);
@@ -565,10 +626,7 @@ for (const { target, fault } of cases) {
       }
       assert.deepEqual(artifact.issues, []);
       const records = artifact.records;
-      const response = records.find((record) => record.event === 'response');
-      assert.equal(response.status, 504);
-      assert.ok(response.elapsedMs >= 8900 && response.elapsedMs < 10000);
-      assert.equal(records.some((record) => record.event === 'writer-expire'), true);
+      const response = fixture.deadlineResponse(records);
       const helpers = records.filter((record) => record.event === 'helper-start');
       if (fault === 'worker-start') {
         assert.equal(helpers.length, 0);
