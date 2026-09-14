@@ -1,4 +1,4 @@
-import { open, lstat } from 'node:fs/promises';
+import { open, lstat, realpath } from 'node:fs/promises';
 import { constants, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -351,7 +351,7 @@ class LogReader {
     try {
       if (this.options.follow) {
         try {
-          watcher = watch(dirname(this.path), () => this.wake?.());
+          watcher = watch(await realpath(dirname(this.path)), () => this.wake?.());
           watcher.on('error', () => watcher.close());
         } catch (error) {
           if (error.code !== 'ENOENT') throw error;

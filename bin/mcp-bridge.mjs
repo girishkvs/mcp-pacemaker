@@ -37,6 +37,7 @@ import { ServerMetrics } from './server-metrics.mjs';
 import { MAX_MIN_WARM, hasPoolingTransaction, recoverPoolingConfig } from './pooling-config.mjs';
 import { PoolingBatches } from './pooling-batches.mjs';
 import { POOLING_BUDGET_MS } from './pooling-execution.mjs';
+import { poolingTrace } from './pooling-trace.mjs';
 import { SharedSessionManager, SHARED_DEFAULTS } from './shared-sessions.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -347,9 +348,11 @@ function handleAdmin(url, req, res) {
 }
 
 function handlePoolingChange(encodedName, req, res) {
+  let trace;
   const reply = (status, body) => {
     if (res.destroyed ||
         res.writableEnded) return;
+    trace?.record('response', { status });
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   };
@@ -378,6 +381,9 @@ function handlePoolingChange(encodedName, req, res) {
     signal: controller.signal,
     deadline: process.hrtime.bigint() + BigInt(POOLING_BUDGET_MS) * 1000000n,
   };
+  trace = poolingTrace.operation(execution.deadline);
+  execution.trace = trace;
+  trace?.record('request-start');
   const bodyTimer = setTimeout(() => {
     rejected = true;
     chunks.length = 0;
@@ -407,6 +413,7 @@ function handlePoolingChange(encodedName, req, res) {
     chunks.push(chunk);
   });
   req.on('end', async () => {
+    trace?.record('body-end', { bytes });
     clearTimeout(bodyTimer);
     if (rejected) return;
     let body;

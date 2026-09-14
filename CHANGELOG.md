@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve native directory watcher paths before watching logs and test control files,
+  avoiding Windows short-path watcher crashes without changing the selected files.
+
 ### Changed
 
 - Prepare 2.0.1 for a separate npm publication, with exact-version guidance from the current

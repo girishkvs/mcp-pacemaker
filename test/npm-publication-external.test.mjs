@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import {
@@ -32,9 +34,10 @@ function write(root, path, value) {
   mkdirSync(dirname(join(root, path)), { recursive: true });
   writeFileSync(join(root, path), typeof value === 'object' && !Buffer.isBuffer(value) ? JSON.stringify(value) : value);
 }
-function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), 'publication-external-unit-'));
+function fixture(t, temporaryParent = tmpdir()) {
+  const root = mkdtempSync(join(realpathSync.native(temporaryParent), 'publication-external-unit-'));
   t.after(() => rmSync(root, { recursive: true }));
+  assert.equal(realpathSync.native(root), root, 'Owned external fixture must use the native canonical path');
   const sourceRoot = join(root, 'source');
   const extractedRoot = join(root, 'payload');
   mkdirSync(sourceRoot);
@@ -514,6 +517,70 @@ test('CLI writes only new outside-root safe reports; no overwrite or unknown opt
   await assert.rejects(externalCli(['--request', input, '--output', output], injected));
   await assert.rejects(externalCli(['--request', input, '--output', join(f.sourceRoot, 'out.json')], injected));
   await assert.rejects(externalCli(['--request', input, '--fake-approval', output], injected));
+});
+
+test('owned external fixtures canonicalize real aliased temp parents', async t => {
+  const parent = mkdtempSync(join(realpathSync.native(tmpdir()), 'publication-external-alias-'));
+  t.after(() => rmSync(parent, { recursive: true }));
+  const physical = join(parent, 'physical');
+  const alias = join(parent, 'alias');
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  mkdirSync(physical);
+  symlinkSync(physical, alias, linkType);
+  assert.notEqual(realpathSync(alias), resolve(alias));
+
+  await t.test('canonical fixtures reach source, license and exclusive CLI checks', async child => {
+    const f = fixture(child, alias);
+    assert.equal(dirname(f.root), physical);
+    assert.equal(realpathSync.native(f.root), f.root);
+    const injected = { scanPublication: scanner, run: gitRunner(f) };
+    const native = await verifyNativeIdentity(f.request, injected);
+    assert.equal(native.baselineCommit, CURRENT_REF);
+    const consumers = normalizeMatrix(artifactRequest(f));
+    const licenses = await inspectRuntimeLicenses({
+      sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers,
+      name: 'mcp-pacemaker', version: '2.0.1',
+    }, { verifyNotices: fakeNotices });
+    assert.equal(licenses.packages.length, 2);
+    const input = join(f.root, 'request.json');
+    const output = join(f.root, 'output.json');
+    write(f.root, 'request.json', f.request);
+    assert.equal(await externalCli(['--request', input, '--output', output], injected), 0);
+    const bytes = readFileSync(output);
+    assert.equal(JSON.parse(bytes).gates['author-identity'].status, 'pending-owner-review');
+    await assert.rejects(externalCli(['--request', input, '--output', output], injected));
+    assert.deepEqual(readFileSync(output), bytes);
+  });
+
+  await t.test('external aliases and linked child evidence remain rejected', async child => {
+    const f = fixture(child, alias);
+    const request = artifactRequest(f);
+    const externalAlias = join(alias, basename(f.root));
+    assert.throws(() => verifyRuntimeClosure({
+      ...request, extractedRoot: join(externalAlias, 'payload'),
+    }), /Linked evidence path/);
+    write(f.root, 'request.json', f.request);
+    await assert.rejects(externalCli([
+      '--request', join(f.root, 'request.json'), '--output', join(externalAlias, 'rejected.json'),
+    ], { scanPublication: scanner, run: gitRunner(f) }), /Output parent must not be a link/);
+    assert.equal(existsSync(join(f.root, 'rejected.json')), false);
+    const retainedBin = join(f.root, 'retained-bin');
+    const bin = join(f.extractedRoot, 'bin');
+    const original = readFileSync(join(bin, 'cli.mjs'));
+    renameSync(bin, retainedBin);
+    symlinkSync(retainedBin, bin, linkType);
+    assert.throws(() => verifyRuntimeClosure(request), /Linked evidence path/);
+    assert.deepEqual(readFileSync(join(retainedBin, 'cli.mjs')), original);
+    const dependency = join(f.sourceRoot, 'node_modules', 'fixture-public');
+    const retainedDependency = join(f.root, 'retained-dependency');
+    renameSync(dependency, retainedDependency);
+    symlinkSync(retainedDependency, dependency, linkType);
+    await assert.rejects(inspectRuntimeLicenses({
+      sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers: normalizeMatrix(request),
+      name: 'mcp-pacemaker', version: '2.0.1',
+    }, { verifyNotices: fakeNotices }), /Linked installed dependency/);
+    assert.equal(readFileSync(join(retainedDependency, 'LICENSE'), 'utf8'), mit);
+  });
 });
 
 test('scanner bootstrap refuses local/self-hosted/wrong platform before network or execution', async t => {

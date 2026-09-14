@@ -112,6 +112,14 @@ if (!isMainThread &&
     record('worker-exit', { exitCode: 23 });
     process.exit(23);
   };
+  const startupDelayMs = workerData.poolingTestStartupDelayMs ?? 0;
+  if (!Number.isSafeInteger(startupDelayMs) ||
+      startupDelayMs < 0 ||
+      startupDelayMs > 2000) throw new Error('Invalid test startup delay');
+  if (startupDelayMs) {
+    record('startup-held', { milliseconds: startupDelayMs });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupDelayMs);
+  }
   record('hooks-ready');
   const on = parentPort.on.bind(parentPort);
   parentPort.on = (event, listener) => on(event, event === 'message' ? (message) => {
