@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  POLICY, REQUIRED_GATES, digest, channelFor, validateApproval, validateContext, validateSource,
+  POLICY, REQUIRED_GATES, digest, channelFor, publicationTagName, validateApproval, validateContext, validateSource,
   validatePackage, npm12Contents, validateRegistry, validateGates, validateCi,
   validateEnvironment, validateTransfer, validateGateStatus, stageArguments, submitOnce,
 } from '../tools/npm-publication/policy.mjs';
@@ -99,6 +99,45 @@ test('T01/T20: only approved stable candidate versions map to fixed channels', (
   }
 });
 
+for (const version of ['1.3.1', '2.0.1']) {
+  for (const namespace of ['', 'npm/']) {
+    test(`publication tag ${namespace}v${version} preserves approval, workflow and environment binding`, () => {
+      const a = approval(version);
+      a.ref = `refs/tags/${namespace}v${version}`;
+      assert.equal(publicationTagName(a.ref, version), `${namespace}v${version}`);
+      assert.equal(validateApproval(a, 'stage'), channelFor(version));
+      assert.equal(validateApproval({ ...a, scope: 'prepare' }, 'prepare'), channelFor(version));
+      const { env, event } = context(a);
+      validateContext(env, event, a);
+      const other = namespace ? `refs/tags/v${version}` : `refs/tags/npm/v${version}`;
+      assert.throws(() => validateContext({ ...env, GITHUB_REF: other }, event, a));
+      assert.throws(() => validateContext({
+        ...env, GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${other}`,
+      }, event, a));
+      const environment = { id: 12, name: POLICY.environment, protection_rules: [{
+        type: 'required_reviewers', prevent_self_review: false,
+        reviewers: [{ reviewer: { login: POLICY.owner } }],
+      }], deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
+      const policies = [{ type: 'tag', name: `${namespace}v${version}` }];
+      const reviews = [{ state: 'approved', user: { login: POLICY.owner },
+        environments: [{ id: 12, name: POLICY.environment }] }];
+      validateEnvironment(environment, policies, reviews, a);
+      assert.throws(() => validateEnvironment(environment,
+        [{ type: 'tag', name: other.slice('refs/tags/'.length) }], reviews, a));
+    });
+  }
+}
+
+test('publication tag approval rejects alternate refs and mismatched versions', () => {
+  const a = approval('2.0.1');
+  for (const ref of ['refs/heads/main', 'refs/tags/npm/v1.3.1', 'refs/tags/npm/v2.0.1-extra',
+    'refs/tags/npm/v2.0.1/other', 'refs/tags/npm//v2.0.1', 'refs/tags/npm/../v2.0.1',
+    'refs/tags/NPM/v2.0.1', 'refs/tags/other/v2.0.1', 'npm/v2.0.1', null]) {
+    assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved/);
+  }
+  assert.throws(() => publicationTagName('refs/tags/npm/v3.0.1', '3.0.1'));
+});
+
 test('T02/T03: each source identity independently fails closed', () => {
   const a = approval();
   const source = { tagType: 'tag', tagObject: a.tagObject, tagCommit: a.commit,
@@ -186,6 +225,19 @@ test('T10/T11/T20: exact tarball submitted once with explicit final tag and no a
     assert.equal(s.records[1].stageId, stageId);
     assert.equal(s.records[1].registrySignatures, 'pending-publication');
     assert.equal(s.records[1].ownerPublicationApproval, 'pending');
+  }
+});
+
+test('npm publication refs preserve fixed npm channels during stage submission', async () => {
+  for (const version of ['1.3.1', '2.0.1']) {
+    const a = approval(version);
+    a.ref = `refs/tags/npm/v${version}`;
+    const s = submission(a);
+    await submitOnce(s.args);
+    assert.equal(s.calls.length, 1);
+    assert.ok(s.calls[0].includes(`--tag=${channelFor(version)}`));
+    assert.ok(!s.calls[0].some(value => value.startsWith('--tag=npm/')));
+    assert.equal(s.records.at(-1).status, 'submitted-awaiting-owner-verification');
   }
 });
 

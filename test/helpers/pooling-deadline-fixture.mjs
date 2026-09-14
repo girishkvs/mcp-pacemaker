@@ -269,7 +269,9 @@ export class DeadlineFixture {
   }
 
   advanceBridgeClock(milliseconds) {
-    fs.writeFileSync(join(this.directory, 'advance-clock'), String(milliseconds));
+    const next = join(this.directory, 'advance-clock-next');
+    fs.writeFileSync(next, String(milliseconds), { flag: 'wx' });
+    fs.renameSync(next, join(this.directory, 'advance-clock'));
   }
 
   async stageForReload() {

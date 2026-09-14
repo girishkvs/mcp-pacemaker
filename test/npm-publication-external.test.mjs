@@ -609,18 +609,49 @@ test('scanner bootstrap refuses local/self-hosted/wrong platform before network 
   assert.equal(SCANNER_RELEASES.trufflehog.version, '3.97.1');
 });
 
-function tinyArchive(name = 'gitleaks', type = '0') {
+function tinyArchive(name = 'gitleaks', type = '0', companions = []) {
   const bytes = Buffer.from('tiny executable fixture; never executed');
-  const header = Buffer.alloc(512);
-  header.write(name);
-  header.write('0000700\0', 100);
-  header.write(`${bytes.length.toString(8).padStart(11, '0')}\0`, 124);
-  header.fill(32, 148, 156);
-  header.write(type, 156);
-  const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
-  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
-  return { bytes, archive: gzipSync(Buffer.concat([header, bytes, Buffer.alloc(512 - bytes.length), Buffer.alloc(1024)])) };
+  const records = [...companions, { name, type }].flatMap(entry => {
+    const header = Buffer.alloc(512);
+    header.write(entry.name);
+    header.write('0000700\0', 100);
+    header.write(`${bytes.length.toString(8).padStart(11, '0')}\0`, 124);
+    header.fill(32, 148, 156);
+    header.write(entry.type ?? '0', 156);
+    if (entry.prefix) header.write(entry.prefix, 345);
+    const checksum = [...header].reduce((sum, byte) => sum + byte, 0);
+    header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+    return [header, bytes, Buffer.alloc(512 - bytes.length)];
+  });
+  return { bytes, archive: gzipSync(Buffer.concat([...records, Buffer.alloc(1024)])) };
 }
+
+test('release reader accepts nested regular documentation in pinned scanner archives', () => {
+  const fixture = tinyArchive('trufflehog', '0', [
+    { name: 'LICENSE' }, { name: 'README.md' }, { name: 'docs/man/trufflehog.1' },
+  ]);
+  assert.deepEqual(releaseExecutable(fixture.archive, 'trufflehog'), fixture.bytes);
+  const prefixed = tinyArchive('trufflehog', '0', [{ prefix: 'docs/man', name: 'trufflehog.1' }]);
+  assert.deepEqual(releaseExecutable(prefixed.archive, 'trufflehog'), prefixed.bytes);
+});
+
+test('release reader rejects unsafe companion paths, links, and duplicate members', () => {
+  for (const name of ['/manual', '../manual', 'docs/../manual', './manual', 'docs//manual',
+    'docs\\manual', 'C:/manual', '.', '..']) {
+    assert.throws(() => releaseExecutable(tinyArchive('trufflehog', '0', [{ name }]).archive, 'trufflehog'),
+      /Unreviewed release archive entry/);
+  }
+  for (const type of ['1', '2', '5']) {
+    const fixture = tinyArchive('trufflehog', '0', [{ name: 'docs/manual', type }]);
+    assert.throws(() => releaseExecutable(fixture.archive, 'trufflehog'), /Unreviewed release archive entry/);
+  }
+  const duplicate = tinyArchive('trufflehog', '0', [
+    { name: 'docs/man/trufflehog.1' }, { name: 'docs/man/trufflehog.1' },
+  ]);
+  assert.throws(() => releaseExecutable(duplicate.archive, 'trufflehog'), /Unreviewed release archive entry/);
+  assert.throws(() => releaseExecutable(tinyArchive('bin/trufflehog').archive, 'trufflehog'),
+    /Pinned release executable missing/);
+});
 
 test('release reader extracts exact fixed member; refuses links/traversal/wrong member/truncation', () => {
   const fixture = tinyArchive();
