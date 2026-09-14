@@ -10,9 +10,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { killBridge } from './helpers/kill-bridge.mjs';
+import { PoolingTraceFixture } from './helpers/pooling-trace-fixture.mjs';
+import './helpers/pooling-trace-checks.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const port = 8871;
+const port = Number(process.env.MCP_POOLING_API_TEST_PORT || 8871);
 const echo = { command: process.execPath, args: [join(root, 'test', 'fixtures', 'echo-mcp-server.mjs')] };
 
 class PoolingBridge {
@@ -21,9 +23,11 @@ class PoolingBridge {
     this.config = join(this.dir, 'servers.json');
     this.original = JSON.stringify({ alpha, beta: { ...echo, env: { PRIVATE_SENTINEL: 'must-not-leak' } }, remote: { type: 'http', url: 'http://127.0.0.1:1' } }, null, 2) + '\n';
     writeFileSync(this.config, this.original);
+    this.trace = new PoolingTraceFixture(t, this.dir, 'api');
     this.child = spawn(process.execPath, [join(root, 'bin', 'mcp-bridge.mjs'), '--port', String(port), '--config', this.config], {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env, MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0', MCP_IDLE_TIMEOUT_MS: '0', MCP_HEALTH_INTERVAL_MS: '0' },
+      env: { ...process.env, MCP_POOLING_TRACE_DIR: this.trace.directory ?? '',
+        MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0', MCP_IDLE_TIMEOUT_MS: '0', MCP_HEALTH_INTERVAL_MS: '0' },
     });
     this.stderr = '';
     this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
@@ -31,6 +35,7 @@ class PoolingBridge {
     t.after(async () => {
       killBridge(this.child);
       await this.exited;
+      this.trace.finish();
       rmSync(this.dir, { recursive: true, force: true });
     });
   }

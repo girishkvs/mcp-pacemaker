@@ -5,19 +5,20 @@ import { CompatibilityBridge, assertImmediate, assertPending } from './bridge.mj
 import { assertWritableDowngrade } from './downgrade.mjs';
 
 const fixtures = loadFixtures();
+const { legacyVersion, candidateVersion } = fixtures;
 
-test('actual 1.3.0 write capability survives a settled 2.0.0 roundtrip under unchanged authority',
+test(`actual ${legacyVersion} write capability survives a settled ${candidateVersion} roundtrip under unchanged authority`,
   { timeout: 120000 }, async (t) => {
     await assertWritableDowngrade(t, fixtures);
   });
 
-test('2.0.0 CLI and API -> real 1.3.0: immediate 200 enable and Undo', { timeout: 90000 }, async (t) => {
+test(`${candidateVersion} CLI and API -> real ${legacyVersion}: immediate 200 enable and Undo`, { timeout: 90000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.legacy, '1.3.0');
+    await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
     const enabled = JSON.parse((await bridge.cli(fixtures.candidate,
       ['--enable', 'alpha', '--count', '1', '--json'])).stdout);
-    assertImmediate(enabled, '1.3.0');
+    assertImmediate(enabled, legacyVersion);
     bridge.assertEnabled();
     const undone = await bridge.cli(fixtures.candidate, ['--server', 'alpha', '--undo', enabled.undoId]);
     assert.match(undone.stdout, /restored previous pooling settings/);
@@ -25,7 +26,7 @@ test('2.0.0 CLI and API -> real 1.3.0: immediate 200 enable and Undo', { timeout
 
     const apiEnabled = await bridge.mutation({ mode: 'pool', minWarm: 1 });
     assert.equal(apiEnabled.status, 200, apiEnabled.text);
-    assertImmediate(apiEnabled.body, '1.3.0');
+    assertImmediate(apiEnabled.body, legacyVersion);
     bridge.assertEnabled();
     const apiUndo = await bridge.mutation({ undoId: apiEnabled.body.undoId });
     assert.equal(apiUndo.status, 200, apiUndo.text);
@@ -34,9 +35,9 @@ test('2.0.0 CLI and API -> real 1.3.0: immediate 200 enable and Undo', { timeout
   });
 });
 
-test('1.3.0 CLI and API -> real 2.0.0: fresh nonce, protocol 409, no write', { timeout: 90000 }, async (t) => {
+test(`${legacyVersion} CLI and API -> real ${candidateVersion}: fresh nonce, protocol 409, no write`, { timeout: 90000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.candidate, '2.0.0');
+    await bridge.start(fixtures.candidate, candidateVersion);
     await bridge.seedAdvice();
     const rejected = await bridge.cli(fixtures.legacy, ['--enable', 'alpha', '--count', '1'], 1);
     assert.match(rejected.stdout + rejected.stderr, /Reload the dashboard or update the CLI/);
@@ -48,16 +49,16 @@ test('1.3.0 CLI and API -> real 2.0.0: fresh nonce, protocol 409, no write', { t
   });
 });
 
-test('packed 2.0.0 CLI -> real 2.0.0: queued save, Cancel, apply and whole-batch Undo', { timeout: 120000 }, async (t) => {
+test(`${candidateVersion} CLI -> real ${candidateVersion}: queued save, Cancel, apply and whole-batch Undo`, { timeout: 120000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.candidate, '2.0.0');
+    await bridge.start(fixtures.candidate, candidateVersion);
     await bridge.seedAdvice();
     const enable = async () => JSON.parse((await bridge.cli(fixtures.candidate,
       ['--enable', 'alpha', '--count', '1', '--json'])).stdout);
     const undo = async (receipt) => JSON.parse((await bridge.cli(fixtures.candidate,
       ['--server', 'alpha', '--undo', receipt.undoId, '--json'])).stdout);
     const first = await enable();
-    assertPending(first);
+    assertPending(first, candidateVersion);
     assert.equal(bridge.text(), bridge.original);
     const cancelled = await undo(first);
     assert.equal(cancelled.ok, true);
@@ -65,33 +66,33 @@ test('packed 2.0.0 CLI -> real 2.0.0: queued save, Cancel, apply and whole-batch
     await bridge.assertUnchanged();
 
     const second = await enable();
-    assertPending(second);
+    assertPending(second, candidateVersion);
     assert.equal(bridge.text(), bridge.original);
     await bridge.applied(second.batchId);
     bridge.assertEnabled();
     const restored = await undo(second);
-    assertPending(restored);
+    assertPending(restored, candidateVersion);
     bridge.assertEnabled();
     await bridge.applied(restored.batchId);
     await bridge.assertUnchanged();
   });
 });
 
-test('safe 1.3.0 -> packed 2.0.0 -> 1.3.0 restarts preserve active config bytes', { timeout: 120000 }, async (t) => {
+test(`safe ${legacyVersion} -> ${candidateVersion} -> ${legacyVersion} restarts preserve active config bytes`, { timeout: 120000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    const old = await bridge.start(fixtures.legacy, '1.3.0');
+    const old = await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
     const enabled = await bridge.mutation({ mode: 'pool', minWarm: 1 }, false);
     assert.equal(enabled.status, 200, enabled.text);
     const pooledBytes = bridge.text();
     await bridge.stop();
-    const current = await bridge.start(fixtures.candidate, '2.0.0');
+    const current = await bridge.start(fixtures.candidate, candidateVersion);
     assert.notEqual(current.instanceId, old.instanceId);
     assert.equal(bridge.text(), pooledBytes);
 
     const disabled = await bridge.mutation({ mode: 'isolated' });
     assert.equal(disabled.status, 202, disabled.text);
-    assertPending(disabled.body);
+    assertPending(disabled.body, candidateVersion);
     await bridge.applied(disabled.body.batchId);
     const restore = await bridge.mutation({ undoId: disabled.body.undoId });
     assert.equal(restore.status, 202, restore.text);
@@ -99,7 +100,7 @@ test('safe 1.3.0 -> packed 2.0.0 -> 1.3.0 restarts preserve active config bytes'
     assert.equal(bridge.text(), pooledBytes);
     // Downgrade only after every accepted transaction has settled.
     await bridge.stop();
-    const downgraded = await bridge.start(fixtures.legacy, '1.3.0');
+    const downgraded = await bridge.start(fixtures.legacy, legacyVersion);
     assert.notEqual(downgraded.instanceId, current.instanceId);
     assert.equal(bridge.text(), pooledBytes);
     bridge.assertEnabled();

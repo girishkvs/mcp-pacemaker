@@ -5,12 +5,21 @@
   "Invalid namespace" and schtasks.exe /Create needs elevation). Starts the supervisor at
   logon AND on workstation unlock (unlock covers sleep/wake, where logon never fires).
 .PARAMETER Port  Port to pass through to the supervisor (default 8791).
+.PARAMETER TaskName  Selected per-user task name (default McpPacemaker-<port>).
+.OUTPUTS
+  Registration result.
+.EXAMPLE
+  .\register-task.ps1 -Port 8791
 #>
 [CmdletBinding()]
-param([int]$Port = 8791, [string]$TaskName = "McpPacemaker-$Port")
+param([ValidateRange(1, 65535)][int]$Port = 8791, [string]$TaskName = "McpPacemaker-$Port")
 
 $ErrorActionPreference = 'Stop'
 try {
+  $installationRoot = (Resolve-Path -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath '..\..')).Path
+  if ($installationRoot -match '(^|[\\/])_npx([\\/]|$)') {
+    throw 'Cache-backed npx roots cannot host autostart. Install in a durable root first.'
+  }
   $vbs  = Join-Path $PSScriptRoot 'launcher.vbs'
   $user = "$env:USERDOMAIN\$env:USERNAME"
 

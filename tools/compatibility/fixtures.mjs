@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 export const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const LEGACY_REF = '2d525f4ced01b978a5aeb83aef69145e96cced05';
+export const CURRENT_REF = 'db4812a1cbfb8546c814a656397b9a48ccf0f32c';
 export const MANIFEST = join(ROOT, 'node_modules', '.cache', 'pacemaker-compat.json');
 export const REGISTRY = 'https://registry.npmjs.org/';
 const ownedFileSystem = {
@@ -26,10 +27,98 @@ export function readJson(file) {
   return JSON.parse(readFileSync(file, 'utf8'));
 }
 
-export function candidateInputs() {
+export function preparationOptions(args) {
+  const options = {
+    clean: false, historical: false, peerRoot: undefined,
+    candidateTarball: undefined, candidateSha256: undefined,
+  };
+  const seen = new Set();
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    assert.ok(['--clean', '--historical', '--peer-root', '--candidate-tarball', '--candidate-sha256'].includes(arg),
+      `Unknown preparation option: ${arg}`);
+    assert.equal(seen.has(arg), false, `Repeated preparation option: ${arg}`);
+    seen.add(arg);
+    if (arg === '--clean') options.clean = true;
+    if (arg === '--historical') options.historical = true;
+    if (['--peer-root', '--candidate-tarball', '--candidate-sha256'].includes(arg)) {
+      const value = args[++index];
+      assert.ok(value &&
+        !value.startsWith('--'), `${arg} requires a value`);
+      if (arg === '--peer-root') options.peerRoot = resolve(value);
+      if (arg === '--candidate-tarball') options.candidateTarball = resolve(value);
+      if (arg === '--candidate-sha256') {
+        assert.match(value, /^[a-f0-9]{64}$/, 'A candidate SHA-256 digest is required');
+        options.candidateSha256 = value;
+      }
+    }
+  }
+  assert.ok(!options.clean ||
+    seen.size === 1, '--clean cannot prepare another fixture');
+  assert.ok(!options.historical ||
+    (!options.peerRoot &&
+      !options.candidateTarball), '--historical cannot substitute a patch candidate');
+  assert.equal(Boolean(options.candidateTarball), Boolean(options.candidateSha256),
+    'Candidate tarball and SHA-256 must be supplied together');
+  return options;
+}
+
+export function fixturePlan(version, { historical = false, peerVersion } = {}) {
+  assert.ok(['1.3.1', '2.0.1'].includes(version), `Unsupported candidate version: ${version}`);
+  const plan = {
+    mode: historical ? 'historical' : peerVersion ? 'patch-pair' : 'candidate-vs-release',
+    legacy: { version: '1.3.0', source: 'release', ref: LEGACY_REF },
+    candidate: { version: '2.0.0', source: 'release', ref: CURRENT_REF },
+  };
+  if (historical) {
+    assert.equal(peerVersion, undefined, 'Historical fixtures cannot contain a patch candidate');
+    return plan;
+  }
+  const role = version === '1.3.1' ? 'legacy' : 'candidate';
+  const peerRole = role === 'legacy' ? 'candidate' : 'legacy';
+  plan[role] = { version, source: 'root' };
+  if (peerVersion !== undefined) {
+    const expected = version === '1.3.1' ? '2.0.1' : '1.3.1';
+    assert.equal(peerVersion, expected, 'The peer must be the explicitly supported opposite-major patch');
+    plan[peerRole] = { version: peerVersion, source: 'peer' };
+  }
+  return plan;
+}
+
+export function packedPackage(result, name, version) {
+  let packed;
+  if (Array.isArray(result)) {
+    assert.equal(result.length, 1, 'Expected one npm 11 packed package');
+    [packed] = result;
+  } else {
+    assert.ok(result &&
+      typeof result === 'object', 'Expected npm pack JSON');
+    assert.deepEqual(Object.keys(result), [name], 'Expected one npm 12 package-name key');
+    packed = result[name];
+  }
+  assert.equal(packed?.name, name, 'Packed package name differs');
+  assert.equal(packed.version, version, 'Packed package version differs');
+  assert.equal(packed.filename, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`);
+  assert.ok(Array.isArray(packed.files) &&
+    packed.files.length > 0, 'Packed file metadata is missing');
+  const paths = packed.files.map(({ path }) => {
+    assert.equal(typeof path, 'string');
+    assert.ok(path.length > 0 &&
+      !path.startsWith('/') &&
+      !path.includes('\\') &&
+      !path.includes(':') &&
+      !path.split('/').some((part) => part === '..' || part === '.' || part === ''),
+    'Unsafe packed file metadata');
+    return path;
+  });
+  assert.equal(new Set(paths).size, paths.length, 'Duplicate packed file metadata');
+  return packed;
+}
+
+export function candidateInputs(root = ROOT) {
   const hashes = {};
   const visit = (path) => {
-    const absolute = join(ROOT, path);
+    const absolute = join(root, path);
     const stat = lstatSync(absolute);
     assert.equal(stat.isSymbolicLink(), false, `Linked candidate input is not supported: ${path}`);
     if (stat.isDirectory()) {
@@ -38,13 +127,13 @@ export function candidateInputs() {
       hashes[path] = sha256(absolute);
     }
   };
-  for (const path of ['package.json', 'package-lock.json', ...readJson(join(ROOT, 'package.json')).files]) visit(path);
+  for (const path of ['package.json', 'package-lock.json', ...readJson(join(root, 'package.json')).files]) visit(path);
   return hashes;
 }
 
-export function assertCandidateInputs(expected) {
+export function assertCandidateInputs(expected, root = ROOT) {
   assert.ok(expected, 'Fixture format changed. Run compat:clean and compat:prepare again.');
-  const current = candidateInputs();
+  const current = candidateInputs(root);
   const paths = new Set([...Object.keys(current), ...Object.keys(expected)]);
   const changed = [...paths].filter((path) => current[path] !== expected[path]);
   assert.deepEqual(changed, [], 'Candidate inputs changed. Run compat:clean and compat:prepare again.');
@@ -161,13 +250,13 @@ export function removeFixtureManifest(fs = ownedFileSystem) {
   return manifest.dir;
 }
 
-export function isolatedEnvironment(dir) {
+export function isolatedEnvironment(dir, sourceEnvironment = process.env) {
   const home = join(dir, 'home');
   const temp = join(dir, 'tmp');
   for (const path of [home, temp, join(home, 'AppData', 'Roaming'), join(home, 'AppData', 'Local')]) {
     mkdirSync(path, { recursive: true });
   }
-  const env = { ...process.env };
+  const env = { ...sourceEnvironment };
   for (const name of Object.keys(env)) {
     if (/^MCP_/i.test(name)) delete env[name];
   }
@@ -192,7 +281,9 @@ export async function run(command, args, options = {}) {
     child.once('close', (code, signal) => resolveResult({ code, signal, stdout, stderr }));
   });
   if (result.code !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed (${result.code}, ${result.signal})\n${stdout}\n${stderr}`);
+    throw Object.assign(
+      new Error(`${command} ${args.join(' ')} failed (${result.code}, ${result.signal})\n${stdout}\n${stderr}`),
+      { exitCode: result.code, signal: result.signal });
   }
   return stdout;
 }
@@ -220,24 +311,31 @@ export function checkLockfile(file) {
 export function loadFixtures() {
   assert.ok(existsSync(MANIFEST), 'Missing compatibility fixtures. Run "npm run compat:prepare" first.');
   const manifest = readJson(MANIFEST);
-  assert.equal(manifest.legacyRef, LEGACY_REF,
+  assert.equal(manifest.schemaVersion, 2,
     'Incomplete or incompatible fixtures. Run compat:clean and compat:prepare again.');
   verifyOwnership(manifest);
   verifyDirectory(manifest.dir, manifest.identity);
   assert.equal(manifest.runtimeMajor, process.versions.node.split('.')[0],
     'Node major changed. Run compat:clean and compat:prepare with the test runtime.');
-  assert.equal(sha256(manifest.tarball), manifest.tarballSha256, 'Packed candidate changed');
-  assert.equal(sha256(join(ROOT, 'package-lock.json')), manifest.candidateLockSha256,
-    'Candidate lock changed. Run compat:clean and compat:prepare again.');
+  const peerVersion = manifest.peerRoot && readJson(join(manifest.peerRoot, 'package.json')).version;
+  const plan = fixturePlan(readJson(join(ROOT, 'package.json')).version, {
+    historical: manifest.plan.mode === 'historical', peerVersion,
+  });
+  assert.deepEqual(manifest.plan, plan, 'The selected version/source pair changed');
   assertCandidateInputs(manifest.candidateInputs);
-  for (const [path, hash] of Object.entries(manifest.candidateFiles)) {
-    assert.equal(sha256(join(ROOT, path)), hash, `Candidate source changed: ${path}. Reprepare fixtures.`);
-    assert.equal(sha256(join(manifest.candidate, path)), hash, `Packed candidate changed: ${path}`);
+  for (const role of ['legacy', 'candidate']) {
+    const record = manifest.sources[role];
+    assert.equal(manifest[role], join(manifest.dir, role), 'Unexpected prepared fixture path');
+    assert.equal(sha256(record.archive), record.archiveSha256, `${role} archive changed`);
+    assert.equal(readJson(join(manifest[role], 'package.json')).version, plan[role].version);
+    if (plan[role].source !== 'release') {
+      const source = plan[role].source === 'root' ? ROOT : manifest.peerRoot;
+      assertCandidateInputs(record.inputs, source);
+      assert.equal(sha256(join(source, 'package-lock.json')), record.lockSha256, `${role} source lock changed`);
+    }
+    for (const [path, hash] of Object.entries(record.files)) {
+      assert.equal(sha256(join(manifest[role], path)), hash, `${role} fixture changed: ${path}`);
+    }
   }
-  for (const [path, hash] of Object.entries(manifest.legacyFiles)) {
-    assert.equal(sha256(join(manifest.legacy, path)), hash, `Pinned legacy fixture changed: ${path}`);
-  }
-  assert.equal(readJson(join(manifest.legacy, 'package.json')).version, '1.3.0');
-  assert.equal(readJson(join(manifest.candidate, 'package.json')).version, '2.0.0');
-  return manifest;
+  return { ...manifest, legacyVersion: plan.legacy.version, candidateVersion: plan.candidate.version };
 }
