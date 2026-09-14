@@ -5,10 +5,90 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { CleanupFileSystem } from './cleanup-filesystem.mjs';
 import {
-  ROOT, MANIFEST, assertCandidateInputs, candidateInputs, checkLockfile, isolatedEnvironment,
-  npmRestoreArguments, ownedDirectory, ownedFixtureManifest, readJson, removeFixtureManifest,
+  ROOT, MANIFEST, LEGACY_REF, CURRENT_REF, assertCandidateInputs, candidateInputs, checkLockfile,
+  fixturePlan, isolatedEnvironment, npmRestoreArguments, ownedDirectory, ownedFixtureManifest,
+  packedPackage, preparationOptions, readJson, removeFixtureManifest,
   removeOwnedDirectory, writeFixtureManifest,
 } from '../../tools/compatibility/fixtures.mjs';
+
+test('npm 11 array and npm 12 keyed pack output retain exact package identity', () => {
+  const packed = {
+    name: 'mcp-pacemaker', version: '2.0.1', filename: 'mcp-pacemaker-2.0.1.tgz',
+    files: [{ path: 'package.json' }, { path: 'bin/cli.mjs' }],
+  };
+  assert.equal(packedPackage([packed], packed.name, packed.version), packed);
+  assert.equal(packedPackage({ [packed.name]: packed }, packed.name, packed.version), packed);
+  for (const result of [null, [], [packed, packed], { unexpected: packed }]) {
+    assert.throws(() => packedPackage(result, packed.name, packed.version));
+  }
+  for (const path of ['../outside', '/absolute', 'C:/absolute', 'bin\\cli.mjs', 'bin//cli.mjs', '']) {
+    assert.throws(() => packedPackage([{ ...packed, files: [{ path }] }], packed.name, packed.version));
+  }
+  assert.throws(() => packedPackage([{ ...packed, filename: '../escape.tgz' }], packed.name, packed.version));
+  assert.throws(() => packedPackage([packed], packed.name, '1.3.1'));
+});
+
+test('each patch keeps an exact opposite-major immutable release as its default peer', () => {
+  assert.deepEqual(fixturePlan('2.0.1'), {
+    mode: 'candidate-vs-release',
+    legacy: { version: '1.3.0', source: 'release', ref: LEGACY_REF },
+    candidate: { version: '2.0.1', source: 'root' },
+  });
+  assert.deepEqual(fixturePlan('1.3.1'), {
+    mode: 'candidate-vs-release',
+    legacy: { version: '1.3.1', source: 'root' },
+    candidate: { version: '2.0.0', source: 'release', ref: CURRENT_REF },
+  });
+});
+
+test('historical preparation preserves both original release identities instead of relabeling patches', () => {
+  for (const version of ['1.3.1', '2.0.1']) {
+    assert.deepEqual(fixturePlan(version, { historical: true }), {
+      mode: 'historical',
+      legacy: { version: '1.3.0', source: 'release', ref: LEGACY_REF },
+      candidate: { version: '2.0.0', source: 'release', ref: CURRENT_REF },
+    });
+  }
+});
+
+test('explicit peer preparation covers only the approved patch pair in either direction', () => {
+  const current = fixturePlan('2.0.1', { peerVersion: '1.3.1' });
+  const legacy = fixturePlan('1.3.1', { peerVersion: '2.0.1' });
+  assert.equal(current.mode, 'patch-pair');
+  assert.equal(legacy.mode, 'patch-pair');
+  assert.deepEqual(current.legacy, { version: '1.3.1', source: 'peer' });
+  assert.deepEqual(legacy.candidate, { version: '2.0.1', source: 'peer' });
+});
+
+test('unapproved candidate or peer versions fail instead of weakening version assertions', () => {
+  for (const version of ['1.3.0', '2.0.0', '1.3.2', '2.0.2', '2.0.1-preview', '3.0.0']) {
+    assert.throws(() => fixturePlan(version), /Unsupported candidate version/);
+  }
+  for (const peerVersion of ['1.3.0', '1.3.2', '2.0.1', '1.3.1-preview', '']) {
+    assert.throws(() => fixturePlan('2.0.1', { peerVersion }), /opposite-major patch/);
+  }
+  assert.throws(() => fixturePlan('2.0.1', { historical: true, peerVersion: '1.3.1' }),
+    /Historical fixtures cannot contain a patch/);
+});
+
+test('preparation options reject ambiguous, missing, duplicate and mixed cleanup inputs', () => {
+  for (const args of [
+    ['--unknown'], ['--peer-root'], ['--peer-root', '--clean'], ['--clean', '--historical'],
+    ['--clean', '--peer-root', '.'], ['--historical', '--peer-root', '.'],
+    ['--historical', '--historical'], ['--peer-root', '.', '--peer-root', '.'],
+    ['--candidate-tarball', 'candidate.tgz'], ['--candidate-sha256', 'a'.repeat(64)],
+    ['--candidate-tarball', 'candidate.tgz', '--candidate-sha256', 'bad'],
+    ['--historical', '--candidate-tarball', 'candidate.tgz', '--candidate-sha256', 'a'.repeat(64)],
+  ]) {
+    assert.throws(() => preparationOptions(args));
+  }
+  assert.equal(preparationOptions(['--clean']).clean, true);
+  assert.equal(preparationOptions(['--historical']).historical, true);
+  assert.ok(preparationOptions(['--peer-root', '.']).peerRoot);
+  const supplied = preparationOptions(['--candidate-tarball', 'candidate.tgz', '--candidate-sha256', 'a'.repeat(64)]);
+  assert.equal(supplied.candidateSha256, 'a'.repeat(64));
+  assert.ok(supplied.candidateTarball);
+});
 
 test('every compatibility test is registered and both gates are explicit CI steps', () => {
   const scripts = readJson(join(ROOT, 'package.json')).scripts;
@@ -18,7 +98,7 @@ test('every compatibility test is registered and both gates are explicit CI step
   }
   const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
   assert.match(workflow, /os: \[ubuntu-latest, windows-latest, macos-latest\]/);
-  assert.match(workflow, /node: \[20, 22\]/);
+  assert.match(workflow, /node: \[20, 22, 24\]/);
   for (const name of ['test:compat', 'test:compat:browser']) {
     assert.match(workflow, new RegExp(`- name: [^\\n]+\\n +run: npm run ${name}\\r?\\n`));
   }

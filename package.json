@@ -1,6 +1,6 @@
 {
   "name": "mcp-pacemaker",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Keeps your MCP servers alive across editor restarts, reboots, and token expiry — pluggable auth, cross-platform auto-start, one-command setup. Zero-dependency bridge; a small CLI for setup.",
   "type": "module",
   "bin": {
@@ -18,7 +18,9 @@
     "CHANGELOG.md",
     "SECURITY.md",
     "docs/shared-sessions.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.txt",
+    "CONTRIBUTING.md"
   ],
   "engines": {
     "node": ">=20"
@@ -48,11 +50,18 @@
   "scripts": {
     "bridge": "node bin/mcp-bridge.mjs",
     "cli": "node bin/cli.mjs",
+    "consumer:check": "node tools/npm-consumer/check.mjs",
     "compat:prepare": "node tools/compatibility/prepare.mjs",
+    "compat:prepare:baseline": "node tools/compatibility/prepare.mjs --historical",
     "compat:clean": "node tools/compatibility/prepare.mjs --clean",
     "test:compat": "node --test --test-concurrency=1 test/compat/gates.test.mjs test/compat/cli-api.test.mjs",
     "test:compat:browser": "node --test --test-concurrency=1 test/compat/browser.test.mjs",
-    "test": "node --test test/bridge.test.mjs test/bridge-controls.test.mjs test/kill-tree.test.mjs test/keepalive.test.mjs test/auth-token.test.mjs test/cold-start.test.mjs test/crash-report.test.mjs test/resume.test.mjs test/config-checks.test.mjs test/config-reload.test.mjs test/health.test.mjs test/cli.test.mjs test/logs.test.mjs test/prewarm.test.mjs test/pooling-batch-scheduler.test.mjs test/pooling-batch-api.test.mjs test/pooling-batch-store.test.mjs test/pooling-batches.test.mjs test/pooling-stage-publication.test.mjs test/pooling-batch-startup.test.mjs test/pooling-postcommit-recovery.test.mjs test/pooling-config.test.mjs test/pooling-writer.test.mjs test/pooling-api.test.mjs test/pooling-deadlines.test.mjs test/pooling-queue-budget.test.mjs test/windows-security-helper.test.mjs test/windows-batch-security.test.mjs test/tui.test.mjs test/warm-pool.test.mjs test/server-metrics.test.mjs test/admission.test.mjs test/shared-sessions.test.mjs test/shared-http.test.mjs test/cross-host.test.mjs test/suite-integrity.test.mjs"
+    "test": "node --test test/bridge.test.mjs test/bridge-controls.test.mjs test/kill-tree.test.mjs test/keepalive.test.mjs test/auth-token.test.mjs test/cold-start.test.mjs test/crash-report.test.mjs test/resume.test.mjs test/config-checks.test.mjs test/config-reload.test.mjs test/health.test.mjs test/cli.test.mjs test/logs.test.mjs test/prewarm.test.mjs test/pooling-batch-scheduler.test.mjs test/pooling-batch-api.test.mjs test/pooling-batch-store.test.mjs test/pooling-batches.test.mjs test/pooling-stage-publication.test.mjs test/pooling-batch-startup.test.mjs test/pooling-postcommit-recovery.test.mjs test/pooling-config.test.mjs test/pooling-writer.test.mjs test/pooling-api.test.mjs test/pooling-deadlines.test.mjs test/pooling-queue-budget.test.mjs test/windows-security-helper.test.mjs test/windows-batch-security.test.mjs test/tui.test.mjs test/warm-pool.test.mjs test/server-metrics.test.mjs test/admission.test.mjs test/shared-sessions.test.mjs test/shared-http.test.mjs test/cross-host.test.mjs test/suite-integrity.test.mjs test/consumer-package.test.mjs test/notices.test.mjs test/notices-runtime.test.mjs test/npm-publication.test.mjs test/npm-publication-proof.test.mjs test/update-check.test.mjs test/service-lifecycle.test.mjs test/service-supervisor.test.mjs test/npm-publication-gates.test.mjs test/npm-publication-matrix.test.mjs test/publication-scanners-advisories.test.mjs test/publication-scanners.test.mjs test/service-replacement.test.mjs test/consumer-environment.test.mjs test/npm-publication-external.test.mjs test/npm-publication-peer.test.mjs test/publication-scanners-diagnostics.test.mjs test/publication-scanners-publication.test.mjs",
+    "notices:check": "node tools/third-party-notices/check.mjs",
+    "publication:source-gates": "node tools/npm-publication/source-gates.mjs",
+    "publication:artifact-gates": "node tools/npm-publication/artifact-gates.mjs",
+    "service:replacement:check": "node tools/service-replacement/check.mjs",
+    "publication:external-gates": "node tools/npm-publication/external-gates.mjs"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
@@ -60,6 +69,7 @@
     "ink": "^7.1.1",
     "picocolors": "^1.1.1",
     "react": "^19.2.7",
+    "semver": "^7.7.3",
     "smol-toml": "^1.8.0"
   }
 }

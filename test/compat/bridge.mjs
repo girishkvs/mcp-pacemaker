@@ -35,8 +35,9 @@ export function assertImmediate(body, version) {
   assertSnapshot(body.snapshot, version);
 }
 
-export function assertPending(body) {
-  assertImmediate({ ...body, pending: false }, '2.0.0');
+export function assertPending(body, version) {
+  assert.ok(['2.0.0', '2.0.1'].includes(version), 'An explicit supported batch version is required');
+  assertImmediate({ ...body, pending: false }, version);
   assert.equal(body.pending, true);
   assert.ok(body.batchId);
   assert.ok(Number.isSafeInteger(body.snapshot.snapshotVersion));
@@ -50,10 +51,10 @@ export function assertPending(body) {
 }
 
 export class CompatibilityBridge {
-  constructor() {
+  constructor({ env = process.env } = {}) {
     this.owned = ownedDirectory();
     this.dir = this.owned.dir;
-    this.env = isolatedEnvironment(this.dir);
+    this.env = isolatedEnvironment(this.dir, env);
     this.config = join(this.dir, 'servers.json');
     const definition = {
       command: process.execPath,

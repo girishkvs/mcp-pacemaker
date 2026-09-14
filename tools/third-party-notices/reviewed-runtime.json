@@ -1,0 +1,23 @@
+[
+  {
+    "name": "yoga-layout",
+    "resolution": {
+      "version": "3.2.1",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/yoga-layout/-/yoga-layout-3.2.1.tgz",
+      "integrity": "sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ=="
+    },
+    "upstreamCommit": "042f5013152eb81c1552dec945b88f7b95ca350f",
+    "upstreamPackagePath": "javascript",
+    "upstreamPackageJsonSha256": "c7d9a452135020d9bd6906e5952f5731b8b3d4ad3de15532004fe2aa66da1c7c",
+    "upstreamSourceSha256": {
+      "src/index.ts": "08c9f17b043f37b3816d516e2d88d6650d15d29a81d9dd3b1675648a4a45c7a1",
+      "src/load.ts": "c5656438fc842e10cfdb12bf314ed89da3e5f8366479900190ba292b8eaae3bd",
+      "src/wrapAssembly.ts": "e063db4e80e7cc381a17c5c12306fdb753ba96d6f9dbf95bb07a98241cf81fe5",
+      "src/generated/YGEnums.ts": "bc7ef97509d5572e0a2db12e14a830c5da5d916c17d09977c7d257f6144b650b"
+    },
+    "licenseFile": "upstream/yoga-LICENSE.txt",
+    "licenseSha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+    "licenseSourceUrl": "https://raw.githubusercontent.com/facebook/yoga/042f5013152eb81c1552dec945b88f7b95ca350f/LICENSE"
+  }
+]

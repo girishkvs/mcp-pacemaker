@@ -7,6 +7,7 @@ import { CompatibilityBridge, assertImmediate, assertPending, assertSnapshot } f
 import { CompatibilityPage } from './browser.mjs';
 
 const fixtures = loadFixtures();
+const { legacyVersion, candidateVersion } = fixtures;
 const require = createRequire(join(ROOT, 'ui', 'package.json'));
 const { chromium } = require('playwright');
 let browser;
@@ -41,28 +42,28 @@ async function withPage(t, bridge, assetsRoot, action) {
   }
 }
 
-test('2.0.0 built dashboard -> real 1.3.0: legacy 200 enable and Undo', { timeout: 90000 }, async (t) => {
+test(`${candidateVersion} built dashboard -> real ${legacyVersion}: legacy 200 enable and Undo`, { timeout: 90000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.legacy, '1.3.0');
+    await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
     await withPage(t, bridge, fixtures.candidate, async (ui) => {
       const enabled = await ui.mutation(ui.enable(), 200);
       assert.equal(enabled.response.request().headers()['x-mcp-pooling-batch'], '1');
-      assertImmediate(enabled.body, '1.3.0');
+      assertImmediate(enabled.body, legacyVersion);
       await ui.row.getByRole('status').filter({ hasText: /^Enabled \d+ warm slot/ }).waitFor();
       assert.equal(JSON.parse(bridge.text()).alpha.sharing, 'pool');
       const undo = await ui.mutation(ui.row.getByRole('button', { name: 'Undo', exact: true }), 200);
       assert.equal(undo.body.ok, true);
-      assertSnapshot(undo.body.snapshot, '1.3.0');
+      assertSnapshot(undo.body.snapshot, legacyVersion);
       await ui.row.getByRole('status').filter({ hasText: 'Previous pooling settings restored.' }).waitFor();
       await bridge.assertUnchanged();
     });
   });
 });
 
-test('1.3.0 built dashboard -> real 2.0.0: current nonce, protocol 409, no write', { timeout: 90000 }, async (t) => {
+test(`${legacyVersion} built dashboard -> real ${candidateVersion}: current nonce, protocol 409, no write`, { timeout: 90000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.candidate, '2.0.0');
+    await bridge.start(fixtures.candidate, candidateVersion);
     await bridge.seedAdvice();
     await withPage(t, bridge, fixtures.legacy, async (ui) => {
       const rejected = await ui.mutation(ui.enable(), 409);
@@ -76,9 +77,9 @@ test('1.3.0 built dashboard -> real 2.0.0: current nonce, protocol 409, no write
   });
 });
 
-test('real old tab survives actual 1.3.0 -> 2.0.0 restart: 401 then refresh and accepted save', { timeout: 120000 }, async (t) => {
+test(`real old tab survives actual ${legacyVersion} -> ${candidateVersion} restart: 401 then refresh and accepted save`, { timeout: 120000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    const old = await bridge.start(fixtures.legacy, '1.3.0');
+    const old = await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
     // No UI interception in this test: the old tab and refreshed assets are
     // served by their respective real backend processes on the same port.
@@ -86,11 +87,11 @@ test('real old tab survives actual 1.3.0 -> 2.0.0 restart: 401 then refresh and 
       const oldNonce = bridge.nonce;
       await ui.enable().waitFor();
       await bridge.stop();
-      const current = await bridge.start(fixtures.candidate, '2.0.0');
+      const current = await bridge.start(fixtures.candidate, candidateVersion);
       assert.notEqual(current.instanceId, old.instanceId);
       assert.notEqual(bridge.nonce, oldNonce);
       await bridge.seedAdvice();
-      await ui.page.getByText(/v2\.0\.0/).waitFor();
+      await ui.page.getByText(new RegExp(`\\bv${candidateVersion.replaceAll('.', '\\.')}\\b`)).waitFor();
       const expired = await ui.mutation(ui.enable(), 401);
       assert.equal(expired.response.request().headers()['x-mcp-nonce'], oldNonce);
       assert.equal(expired.text, 'bad nonce');
@@ -103,7 +104,7 @@ test('real old tab survives actual 1.3.0 -> 2.0.0 restart: 401 then refresh and 
       const staged = await ui.mutation(ui.enable(), 202);
       assert.equal(staged.response.request().headers()['x-mcp-nonce'], bridge.nonce);
       assert.equal(staged.response.request().headers()['x-mcp-pooling-batch'], '1');
-      assertPending(staged.body);
+      assertPending(staged.body, candidateVersion);
       const cancel = await ui.batchMutation(ui.batches.getByRole('button', { name: /^Cancel batch/ }), 200, 'Cancel');
       assert.equal(cancel.body.cancelled, true);
       await bridge.assertUnchanged();
@@ -111,13 +112,13 @@ test('real old tab survives actual 1.3.0 -> 2.0.0 restart: 401 then refresh and 
   });
 });
 
-test('packed 2.0.0 dashboard -> real 2.0.0: queued save, Cancel, apply and whole-batch Undo', { timeout: 120000 }, async (t) => {
+test(`${candidateVersion} dashboard -> real ${candidateVersion}: queued save, Cancel, apply and whole-batch Undo`, { timeout: 120000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
-    await bridge.start(fixtures.candidate, '2.0.0');
+    await bridge.start(fixtures.candidate, candidateVersion);
     await bridge.seedAdvice();
     await withPage(t, bridge, undefined, async (ui) => {
       const first = await ui.mutation(ui.enable(), 202);
-      assertPending(first.body);
+      assertPending(first.body, candidateVersion);
       assert.equal(bridge.text(), bridge.original);
       await ui.row.getByRole('status').filter({ hasText: /^Pending/ }).waitFor();
       const cancel = await ui.batchMutation(ui.batches.getByRole('button', { name: /^Cancel batch/ }), 200, 'Cancel');
@@ -127,14 +128,14 @@ test('packed 2.0.0 dashboard -> real 2.0.0: queued save, Cancel, apply and whole
       await bridge.assertUnchanged();
 
       const second = await ui.mutation(ui.enable(), 202);
-      assertPending(second.body);
+      assertPending(second.body, candidateVersion);
       assert.equal(bridge.text(), bridge.original);
       await bridge.applied(second.body.batchId);
       await ui.batches.getByRole('status').filter({ hasText: /^Batch applied$/ }).waitFor();
       assert.equal(JSON.parse(bridge.text()).alpha.sharing, 'pool');
       const pooledBytes = bridge.text();
       const undo = await ui.batchMutation(ui.batches.getByRole('button', { name: /^Undo batch/ }), 202, 'Undo');
-      assertPending(undo.body);
+      assertPending(undo.body, candidateVersion);
       assert.equal(bridge.text(), pooledBytes);
       await bridge.applied(undo.body.batchId);
       await ui.row.getByRole('status').filter({ hasText: /^Batch applied/ }).waitFor();

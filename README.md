@@ -19,14 +19,18 @@ is separate planned work.
 
 ## Quick start
 
-Pooling compatibility coverage is scoped to **1.3.0 and 2.0.0**. A 2.0.0 client still handles
-1.3.0's immediate saves. A 1.3.0 client cannot write pooling settings to a 2.0.0 bridge:
-update the CLI and refresh old dashboard tabs. Before downgrading, settle any pending or
-interrupted transaction with 2.0.0. See the [real-version CI gates](CONTRIBUTING.md#real-version-compatibility-gates)
-for exact cases and local commands; other minor versions are not covered.
+This README describes **2.0.x**. The current line is 2.x; the explicit maintenance line is
+1.3.x. See the [legacy documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v1.3.1/README.md)
+for its immediate-save behavior and [support policy](SECURITY.md#supported-versions).
+
+Compatibility gates distinguish immutable **1.3.0 / 2.0.0** from the **1.3.1 / 2.0.1** candidates.
+A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
+2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending
+or interrupted transactions with 2.x. See the [real-version gates](CONTRIBUTING.md#real-version-compatibility-gates)
+for exact pairs; other minor versions are not covered.
 
 ```bash
-npm i -g github:girishkvs/mcp-pacemaker
+npm i -g github:girishkvs/mcp-pacemaker#v2.0.1
 mcp-pacemaker init
 ```
 
@@ -117,14 +121,42 @@ loopback.
 
 ## Install
 
-Requires **Node.js ≥ 20**. The bridge is dependency-free; the CLI uses `commander` +
-`@clack/prompts` + `picocolors`. **No npm-registry publish needed** — it installs straight from GitHub:
+Use a maintained **Node.js 22 or 24** release. Node 20 remains a compatibility target but is
+end-of-life, not a recommended secure runtime. The bridge has no npm runtime dependencies;
+the setup CLI and dashboard have their own dependencies.
+
+GitHub and npm publication are separate. Until the npm release is announced from
+[this repository](https://github.com/girishkvs/mcp-pacemaker/releases), use the pinned GitHub
+release. Do not assume that an npm package with a matching name is this project.
 
 ```bash
-npm i -g github:girishkvs/mcp-pacemaker # global install -> `mcp-pacemaker` on PATH
-# or run without installing:   npx github:girishkvs/mcp-pacemaker <command>
-# or clone + run:              git clone https://github.com/girishkvs/mcp-pacemaker && node mcp-pacemaker/bin/cli.mjs <command>
+npm i -g github:girishkvs/mcp-pacemaker#v2.0.1
+# Deliberate legacy installation instead:
+npm i -g github:girishkvs/mcp-pacemaker#v1.3.1
 ```
+
+After npm publication, `mcp-pacemaker@latest` selects the current 2.x line and
+`mcp-pacemaker@legacy` selects maintained 1.3.x. Verify the official listing's repository and
+maintainer before installing. For a repeatable installation, choose an exact released version:
+
+```bash
+npm i -g mcp-pacemaker@2.0.1
+# Or, deliberately:
+npm i -g mcp-pacemaker@1.3.1
+```
+
+`@1` and `@2` are version ranges, not the maintained channels. They can select a version
+withdrawn from a channel. `upgrade --self` resolves the installed major's channel and prints
+an exact-version command; it never installs or downgrades anything.
+
+Use a durable installation directory for a long-running service. Do not register autostart
+from an `npx` cache: that cache may be removed later. Bare CLI invocation can enter the setup
+wizard; use `--version` for a read-only installation check.
+
+Windows setup also needs PowerShell 7 (`pwsh`) and Windows Script Host for its launcher.
+Automatic configuration edits need .NET Framework 4.6.2 or newer. The bundled helper is
+unsigned; npm provenance is not Authenticode signing or an application-control allowlist.
+Windows ARM64 is not validated.
 
 ### Command reference
 
@@ -143,19 +175,51 @@ npm i -g github:girishkvs/mcp-pacemaker # global install -> `mcp-pacemaker` on P
 | `install --client <host> [--port N]` | Wire one host (its own `--port` gives it its own bridge) |
 | `emit --client <host>` | Print the config entries without writing anything |
 | `start` / `stop` | Start or stop bridges (`--port` for one, else all) |
-| `upgrade [--self]` | Re-wire hosts from `servers.json`; `--self` updates the CLI |
-| `update-check [--json]` | Check npm for a newer version |
+| `upgrade [--self]` | Re-wire hosts; `--self` only prints same-major, exact-version installation guidance |
+| `update-check [--json]` | Compare the installed version with its maintained npm channel |
 | `uninstall` | Stop the bridge, remove auto-start, restore configs from `.bak` |
 
-> Publishing to npm later is **optional** — it only shortens `npx github:girishkvs/mcp-pacemaker` to
-> `npx mcp-pacemaker` and lists the package on npmjs.com.
+> Package installation does not upgrade a running backend. `upgrade` rewires host configuration;
+> it does not replace package files, restart an adopted backend, or update its autostart path.
 
 > On start, pacemaker **probes the port**: it *adopts* an existing pacemaker bridge and *refuses to collide* with a foreign service (the wizard offers another port).
+
+For a supervisor created by these patch releases, `stop --port N` verifies the matching
+installation/configuration identity, waits for shutdown, and holds managed autostart until an
+explicit `start --port N`. Normal OS shutdown does not create that hold. Use the matching
+installation's CLI. Older or directly launched bridges have no managed stop record and are
+refused rather than reported as stopped; disable their OS autostart and verify shutdown first.
+
+On Linux/macOS the control socket lives beside the configuration, independent of `TMPDIR`.
+Its complete path must fit within 103 UTF-8 bytes. `install` and `init` check this before
+changing configuration or autostart; use a shorter configuration location rather than
+relying on an implicit socket-location fallback.
 
 Isolated and pooled stdio servers support HTTP+SSE (`/<name>/sse`) and Streamable HTTP
 (`/<name>/mcp`). Shared mode requires Streamable HTTP.
 
 `install` writes a `.bak` of your client config before touching it, and `uninstall` restores it.
+
+### Replacing or rolling back a running installation
+
+Do not overwrite a package directory while its supervisor or bridge is running. Workers and
+native helpers can load later, and dashboard assets are read from disk: replacement can mix
+old and new code even when the original process still reports its old version.
+
+Identify the selected port, installation directory, configuration directory and OS autostart
+entry first. Settle or cancel 2.x batches, recover interrupted transactions with 2.x, and keep
+a protected configuration backup. Disable the selected autostart entry and stop its supervisor
+and bridge before replacing files; prove they cannot restart during replacement. Keep the
+known-good installation until the new backend's version and instance identity are confirmed.
+Re-register the intended autostart path, refresh dashboard tabs, and confirm host wiring.
+
+One global npm prefix holds one package version and its shared command names. Installing the
+other major there replaces it. Separate ports do not isolate credentials, nonces, logs or
+session files: manual side-by-side operation needs separate durable code roots and separate
+configuration directories, plus separate host/HOME state for CLI-managed setup.
+`init/import --config` selects a source host configuration, not an isolated runtime profile.
+There is no package `--profile` or `MCP_HOME` switch. Do not use an unscoped stop/uninstall
+operation when another instance must remain running.
 
 ## Dashboards
 
