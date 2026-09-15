@@ -230,6 +230,7 @@ export function githubReaders(env, { fetcher = fetch } = {}) {
     throw new Error('Unexpected GitHub result count');
   };
   return {
+    readJson: get,
     readArtifactMetadata: artifactId => get(`actions/artifacts/${id(artifactId)}`),
     readArtifacts: runId => pages(`actions/runs/${id(runId)}/artifacts`, 'artifacts'),
     readJobs: (runId, attempt) => pages(`actions/runs/${id(runId)}/attempts/${id(attempt)}/jobs`, 'jobs'),
@@ -323,12 +324,16 @@ function requireJob(jobs, lane, env) {
   const matches = jobs.filter(job => job.name === lane.jobName);
   assert.equal(matches.length, 1, `Missing/duplicate current-run job: ${lane.jobName}`);
   const job = matches[0];
+  return validateConsumerJob(job, lane, { runId: env.GITHUB_RUN_ID, commit: env.GITHUB_SHA });
+}
+
+export function validateConsumerJob(job, lane, expected) {
   id(job.id);
   id(job.runner_id);
   assert.ok(job.runner_name);
-  assert.equal(id(job.run_id), id(env.GITHUB_RUN_ID));
+  assert.equal(id(job.run_id), id(expected.runId));
   assert.equal(job.run_attempt, 1);
-  assert.equal(job.head_sha, env.GITHUB_SHA);
+  assert.equal(job.head_sha, expected.commit);
   assert.equal(job.status, 'completed');
   assert.equal(job.conclusion, 'success', `Consumer job did not succeed: ${lane.jobName}`);
   assert.ok(job.labels?.includes(lane.image), 'Consumer ran on a different image');
@@ -513,6 +518,61 @@ export async function runMatrix({
   return report;
 }
 
+export function validateConsumerReport(report, {
+  approval, prepared, sourceArtifact, workflow, lane, job, inspection, artifactId,
+}) {
+  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.phase, 'consumer-matrix');
+  assert.equal(report.name, POLICY.name);
+  assert.equal(report.version, approval.version);
+  assert.deepEqual(report.source, sourceTuple(approval));
+  assert.deepEqual(report.sourceArtifact, sourceArtifact);
+  sameDigests(report.artifact, prepared.artifact);
+  assert.deepEqual(report.workflow, workflow);
+  assert.deepEqual(report.job, { key: 'consumers', name: lane.jobName });
+  assert.equal(report.platform, lane.platform);
+  assert.deepEqual(report.toolchain, { node: lane.node, npm: lane.npm });
+  assert.equal(report.runner.environment, 'github-hosted');
+  assert.equal(report.runner.os, lane.os);
+  assert.ok(['X64', 'ARM64'].includes(report.runner.arch));
+  assert.equal(report.runner.name, job.runner_name);
+  const paths = report.paths;
+  assert.equal(paths.sha256, prepared.artifact.sha256);
+  for (const key of ['node', 'cli', 'root', 'tarball']) {
+    assert.equal(typeof paths[key], 'string');
+    assert.ok(/^(?:[A-Za-z]:[\\/]|\/)/.test(paths[key]), 'Evidence path must be absolute');
+  }
+  const command = args => ({ file: paths.node, args, cwd: paths.root });
+  checkEvidence(report.rootCi, command([paths.cli, 'ci', '--ignore-scripts']));
+  assert.deepEqual(report.consumers.map(item => item.mode), MODES, 'Both consumer modes are required');
+  const consumerLanes = [];
+  for (const consumer of report.consumers) {
+    assert.deepEqual(JSON.parse(consumer.stdout), consumer.result);
+    checkConsumer(consumer.result, lane, approval, prepared.artifact.sha256, consumer.mode);
+    checkEvidence(consumer.evidence, command(consumerArgs(paths, approval, consumer.mode)), consumer.stdout);
+    consumerLanes.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
+      mode: consumer.mode, result: consumer.result, evidence: consumer.evidence,
+      artifactId: id(artifactId), jobId: id(job.id) });
+  }
+  const nativeWindowsEvidence = [];
+  if (lane.platform === 'win32') {
+    const native = report.nativeWindows;
+    assert.equal(native.status, 'actual-windows-execution');
+    assert.deepEqual(native.files, helperFiles(inspection));
+    assert.equal(native.rebuild, 'not-performed');
+    assert.equal(native.ordinaryDesktopToken, 'not-proven');
+    assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
+    assert.deepEqual(native.counts, nativeTap(native.stdout));
+    checkEvidence(native.evidence,
+      command(['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs']), native.stdout);
+    nativeWindowsEvidence.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
+      ...native, artifactId: id(artifactId), jobId: id(job.id) });
+  } else {
+    assert.deepEqual(report.nativeWindows, { status: 'not-applicable', reason: 'Not a Windows runner' });
+  }
+  return { consumerLanes, nativeWindowsEvidence };
+}
+
 export async function verifyMatrixReports({ directory, approval, prepared, env, ...injected }) {
   validateMatrixContext(env, approval);
   const readers = { ...githubReaders(env), ...injected };
@@ -530,53 +590,12 @@ export async function verifyMatrixReports({ directory, approval, prepared, env, 
     const files = await verifiedArchive(metadata, readers, join(directory, metadata.name));
     assert.deepEqual([...files.keys()], ['report.json'], 'Each matrix artifact must contain exactly one report');
     const report = JSON.parse(files.get('report.json').toString('utf8'));
-    assert.equal(report.schemaVersion, 1);
-    assert.equal(report.phase, 'consumer-matrix');
-    assert.equal(report.name, POLICY.name);
-    assert.equal(report.version, approval.version);
-    assert.deepEqual(report.source, sourceTuple(approval));
-    assert.deepEqual(report.sourceArtifact, bundle.sourceArtifact);
-    sameDigests(report.artifact, prepared.artifact);
-    assert.deepEqual(report.workflow, workflowBinding(env));
-    assert.deepEqual(report.job, { key: 'consumers', name: lane.jobName });
-    assert.equal(report.platform, lane.platform);
-    assert.deepEqual(report.toolchain, { node: lane.node, npm: lane.npm });
-    assert.equal(report.runner.environment, 'github-hosted');
-    assert.equal(report.runner.os, lane.os);
-    assert.ok(['X64', 'ARM64'].includes(report.runner.arch));
-    assert.equal(report.runner.name, job.runner_name);
-    const paths = report.paths;
-    assert.equal(paths.sha256, prepared.artifact.sha256);
-    for (const key of ['node', 'cli', 'root', 'tarball']) {
-      assert.equal(typeof paths[key], 'string');
-      assert.ok(/^(?:[A-Za-z]:[\\/]|\/)/.test(paths[key]), 'Evidence path must be absolute');
-    }
-    const command = args => ({ file: paths.node, args, cwd: paths.root });
-    checkEvidence(report.rootCi, command([paths.cli, 'ci', '--ignore-scripts']));
-    assert.deepEqual(report.consumers.map(item => item.mode), MODES, 'Both consumer modes are required');
-    for (const consumer of report.consumers) {
-      assert.deepEqual(JSON.parse(consumer.stdout), consumer.result);
-      checkConsumer(consumer.result, lane, approval, prepared.artifact.sha256, consumer.mode);
-      checkEvidence(consumer.evidence, command(consumerArgs(paths, approval, consumer.mode)), consumer.stdout);
-      consumerLanes.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
-        mode: consumer.mode, result: consumer.result, evidence: consumer.evidence,
-        artifactId: id(metadata.id), jobId: id(job.id) });
-    }
-    if (lane.platform === 'win32') {
-      const native = report.nativeWindows;
-      assert.equal(native.status, 'actual-windows-execution');
-      assert.deepEqual(native.files, helperFiles(bundle.inspection));
-      assert.equal(native.rebuild, 'not-performed');
-      assert.equal(native.ordinaryDesktopToken, 'not-proven');
-      assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
-      assert.deepEqual(native.counts, nativeTap(native.stdout));
-      checkEvidence(native.evidence,
-        command(['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs']), native.stdout);
-      nativeWindowsEvidence.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
-        ...native, artifactId: id(metadata.id), jobId: id(job.id) });
-    } else {
-      assert.deepEqual(report.nativeWindows, { status: 'not-applicable', reason: 'Not a Windows runner' });
-    }
+    const validated = validateConsumerReport(report, {
+      approval, prepared, sourceArtifact: bundle.sourceArtifact, workflow: workflowBinding(env),
+      lane, job, inspection: bundle.inspection, artifactId: metadata.id,
+    });
+    consumerLanes.push(...validated.consumerLanes);
+    nativeWindowsEvidence.push(...validated.nativeWindowsEvidence);
     artifactEvidence.push({ id: id(metadata.id), name: metadata.name, digest: metadata.digest,
       reportSha256: sha256(files.get('report.json')), runId: env.GITHUB_RUN_ID, attempt: 1,
       jobId: id(job.id), jobName: job.name });

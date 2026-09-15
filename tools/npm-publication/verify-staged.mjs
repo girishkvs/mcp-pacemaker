@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POLICY, digest, sameDigests, channelFor } from './policy.mjs';
+import { verifyProvenance } from './provenance.mjs';
 
 export async function verifyStaged({ record, view, bytes, bundle, currentTags, verifyBundle }) {
   assert.ok(['submitted-awaiting-owner-verification', 'owner-reconciled-existing-stage'].includes(record.status));
@@ -15,33 +16,7 @@ export async function verifyStaged({ record, view, bytes, bundle, currentTags, v
   assert.equal(view.shasum, createHash('sha1').update(bytes).digest('hex'));
   sameDigests(digest(bytes), record.artifact);
   assert.deepEqual(currentTags, record.ownerPreflight.expectedDistTags, 'Channel race: new owner approval required');
-  assert.equal(bundle?.dsseEnvelope?.payloadType, 'application/vnd.in-toto+json');
-  const payload = JSON.parse(Buffer.from(bundle.dsseEnvelope.payload, 'base64').toString('utf8'));
-  assert.equal(payload._type, 'https://in-toto.io/Statement/v1');
-  assert.equal(payload.predicateType, 'https://slsa.dev/provenance/v1');
-  assert.deepEqual(payload.subject, [{
-    name: `pkg:npm/${POLICY.name}@${record.version}`, digest: { sha512: record.artifact.sha512 },
-  }]);
-  const build = payload.predicate.buildDefinition;
-  assert.equal(build.buildType, 'https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1');
-  assert.deepEqual(build.externalParameters.workflow, {
-    ref: record.source.ref, repository: `https://github.com/${POLICY.repository}`, path: POLICY.workflow,
-  });
-  assert.deepEqual(build.resolvedDependencies, [{
-    uri: `git+https://github.com/${POLICY.repository}@${record.source.ref}`,
-    digest: { gitCommit: record.source.commit },
-  }]);
-  assert.equal(build.internalParameters.github.event_name, 'workflow_dispatch');
-  assert.equal(payload.predicate.runDetails.builder.id, 'https://github.com/actions/runner/github-hosted');
-  assert.equal(payload.predicate.runDetails.metadata.invocationId,
-    `https://github.com/${POLICY.repository}/actions/runs/${record.workflow.runId}/attempts/${record.workflow.attempt}`);
-  const identity = `https://github.com/${POLICY.repository}/${POLICY.workflow}@${record.source.ref}`;
-  const escaped = identity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Hash comparison above does not authenticate anything. The verifier must verify the actual bundle.
-  await verifyBundle(bundle, {
-    certificateIssuer: 'https://token.actions.githubusercontent.com',
-    certificateIdentityURI: `^${escaped}$`, ctLogThreshold: 1, tlogThreshold: 1,
-  });
+  await verifyProvenance({ record, bundle, verifyBundle });
   return {
     stageId: record.stageId, artifact: digest(bytes), stagedProvenance: 'verified',
     verifier: 'sigstore@5.0.0 (npm@12.0.2)', ownerPublicationApproval: 'not-performed',

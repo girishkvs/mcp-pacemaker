@@ -67,7 +67,8 @@ export function fresh(value, now = Date.now()) {
 }
 
 export function validateApproval(approval, action, now = Date.now()) {
-  assert.ok(['prepare', 'stage'].includes(action), 'Only prepare and stage are supported');
+  assert.ok(['prepare', 'stage', 'sign-bootstrap', 'verify-bootstrap', 'publish-bootstrap'].includes(action),
+    'Unsupported publication scope');
   assert.equal(approval.schemaVersion, 1);
   assert.equal(approval.name, POLICY.name);
   const channel = channelFor(approval.version);
@@ -89,7 +90,7 @@ export function validateApproval(approval, action, now = Date.now()) {
       assert.match(name, /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/);
     }
   }
-  if (action === 'stage') {
+  if (action !== 'prepare') {
     const artifact = approval.artifact;
     assert.match(artifact?.sha256 ?? '', /^[a-f0-9]{64}$/);
     assert.match(artifact.sha512 ?? '', /^[a-f0-9]{128}$/);
@@ -100,7 +101,8 @@ export function validateApproval(approval, action, now = Date.now()) {
       assert.match(String(artifact[key] ?? ''), /^[1-9][0-9]*$/);
     }
     assert.equal(artifact.runAttempt, 1, 'Prepare reruns need a fresh dispatch, not reused artifacts');
-    validateOwnerPreflight(approval, now);
+    if (action === 'stage') validateOwnerPreflight(approval, now);
+    else validateBootstrapApproval(approval, action, now);
   }
   return channel;
 }
@@ -110,15 +112,7 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
   assert.equal(owner?.owner, POLICY.owner, 'Owner-authenticated preflight is required; OIDC cannot list stages');
   fresh(owner.checkedAt, now);
   assert.equal(owner.packageName, POLICY.name);
-  const review = owner.privateContentReview;
-  assert.equal(review?.reviewer, POLICY.owner, 'Separate owner private-content review is required');
-  assert.equal(review.scope, 'source-and-tarball', 'A pattern scan is not owner content review');
-  assert.equal(review.disposition, 'approved');
-  assert.equal(review.historyAndAuthorsReviewed, true, 'Owner must review reachable history and identities');
-  assert.equal(review.historicalEvidenceAccepted, true, 'Fresh gates do not settle historical uncertainty');
-  assert.equal(review.commit, approval.commit, 'Owner content review covers different source');
-  sameDigests(review.artifact, approval.artifact);
-  fresh(review.reviewedAt, now);
+  validateOwnerContentReview(approval, now);
   assert.equal(owner.unresolvedSubmission, false, 'Unknown previous outcome: owner reconciliation required');
   assert.deepEqual(owner.trust, {
     repository: POLICY.repository, workflow: 'npm-publish.yml', environment: POLICY.environment,
@@ -143,6 +137,82 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
     assert.equal(pending.workflow.commit, approval.commit);
     assert.match(String(pending.workflow.runId ?? ''), /^[1-9][0-9]*$/);
     assert.equal(pending.workflow.attempt, 1);
+  }
+}
+
+export function validateOwnerContentReview(approval, now = Date.now()) {
+  const review = approval.ownerPreflight?.privateContentReview;
+  assert.equal(review?.reviewer, POLICY.owner, 'Separate owner private-content review is required');
+  assert.equal(review.scope, 'source-and-tarball', 'A pattern scan is not owner content review');
+  assert.equal(review.disposition, 'approved');
+  assert.equal(review.historyAndAuthorsReviewed, true, 'Owner must review reachable history and identities');
+  assert.equal(review.historicalEvidenceAccepted, true, 'Fresh gates do not settle historical uncertainty');
+  assert.equal(review.commit, approval.commit, 'Owner content review covers different source');
+  sameDigests(review.artifact, approval.artifact);
+  fresh(review.reviewedAt, now);
+}
+
+export function exactKeys(value, keys, description) {
+  assert.ok(value &&
+    typeof value === 'object' &&
+    !Array.isArray(value), `Missing ${description}`);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `Unexpected ${description} fields`);
+}
+
+function validateBootstrapApproval(approval, action, now) {
+  assert.equal(approval.version, '2.0.1', 'Only the first 2.0.1 latest publication may bootstrap');
+  exactKeys(approval, ['schemaVersion', 'name', 'version', 'ref', 'tagObject', 'commit', 'tree',
+    'ciRunId', 'ciAttempt', 'approver', 'approvedAt', 'scope', 'artifact', 'ownerPreflight',
+    ...(['verify-bootstrap', 'publish-bootstrap'].includes(action) ? ['signedArtifact'] : []),
+    ...(action === 'publish-bootstrap' ? ['ownerAuth'] : [])], 'bootstrap approval');
+  if (action === 'publish-bootstrap') {
+    exactKeys(approval.ownerAuth, ['spki', 'sha256', 'transaction'], 'owner auth envelope');
+    assert.match(approval.ownerAuth.spki, /^[A-Za-z0-9+/]+={0,2}$/);
+    assert.ok(approval.ownerAuth.spki.length <= 1368);
+    assert.match(approval.ownerAuth.sha256, /^[a-f0-9]{64}$/);
+    assert.match(approval.ownerAuth.transaction, /^[a-f0-9]{32}$/);
+    assert.equal(approval.ownerAuth.sha256.length, 64);
+    assert.equal(approval.ownerAuth.transaction.length, 32);
+  }
+  exactKeys(approval.artifact, ['sha256', 'sha512', 'integrity', 'manifestSha256', 'artifactId',
+    'artifactDigest', 'runId', 'runAttempt'], 'prepare artifact approval');
+  const owner = approval.ownerPreflight;
+  exactKeys(owner, ['owner', 'checkedAt', 'packageName', 'privateContentReview', 'unresolvedSubmission',
+    'unresolvedSigning', 'registry', 'packageStatus', 'nameApproved', 'publicProvenanceApproved',
+    'priorSigning'], 'bootstrap owner preflight');
+  assert.equal(owner.owner, POLICY.owner);
+  assert.equal(owner.packageName, POLICY.name);
+  fresh(owner.checkedAt, now);
+  assert.equal(owner.registry, POLICY.registry);
+  assert.equal(owner.packageStatus, 'absent', 'Bootstrap requires an absent package, not just an absent version');
+  assert.equal(owner.nameApproved, true, 'Fresh owner name-availability approval is required');
+  assert.equal(owner.publicProvenanceApproved, true, 'Signing publicly discloses metadata');
+  assert.equal(owner.unresolvedSubmission, false, 'Unknown publication outcome requires owner reconciliation');
+  assert.equal(owner.unresolvedSigning, false, 'Unknown signing outcome requires owner reconciliation');
+  const prior = owner.priorSigning;
+  assert.ok(['none', 'reconciled'].includes(prior?.status), 'Owner signing ledger reconciliation is required');
+  exactKeys(prior, prior.status === 'none' ? ['status'] : ['status', 'runIds'], 'prior signing disposition');
+  if (prior.status === 'reconciled') {
+    assert.ok(Array.isArray(prior.runIds) &&
+      prior.runIds.length > 0);
+    assert.equal(new Set(prior.runIds.map(String)).size, prior.runIds.length);
+    for (const id of prior.runIds) assert.match(String(id), /^[1-9][0-9]*$/);
+  }
+  exactKeys(owner.privateContentReview, ['reviewer', 'scope', 'disposition', 'historyAndAuthorsReviewed',
+    'historicalEvidenceAccepted', 'commit', 'artifact', 'reviewedAt'], 'owner content attestation');
+  exactKeys(owner.privateContentReview.artifact, ['sha256', 'sha512', 'integrity'], 'reviewed tarball');
+  validateOwnerContentReview(approval, now);
+  if (['verify-bootstrap', 'publish-bootstrap'].includes(action)) {
+    const signed = approval.signedArtifact;
+    exactKeys(signed, ['artifactId', 'artifactDigest', 'runId', 'runAttempt', 'receiptSha256', 'bundleSha256'],
+      'signed artifact approval');
+    for (const key of ['artifactId', 'runId']) assert.match(String(signed[key]), /^[1-9][0-9]*$/);
+    for (const key of ['receiptSha256', 'bundleSha256']) assert.match(signed[key], /^[a-f0-9]{64}$/);
+    assert.match(signed.artifactDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(signed.runAttempt, 1, 'Signing reruns are not accepted');
+    assert.notEqual(String(signed.runId), String(approval.artifact.runId));
+    assert.equal(prior.status, 'reconciled', 'Owner must reconcile the actual completed signing run');
+    assert.ok(prior.runIds.map(String).includes(String(signed.runId)));
   }
 }
 
@@ -324,7 +394,7 @@ export function validateTransfer(runInfo, jobs, metadata, approval) {
     assert.equal(matches[0].conclusion, 'success');
     assert.equal(matches[0].head_sha, approval.commit);
   }
-  assert.ok(!jobs.some(job => job.name === 'stage' &&
+  assert.ok(!jobs.some(job => ['stage', 'sign-bootstrap', 'publish-bootstrap'].includes(job.name) &&
     job.conclusion !== 'skipped'), 'Artifacts must come from a prepare-only run');
   assert.equal(String(metadata.id), String(artifact.artifactId));
   assert.equal(metadata.expired, false);

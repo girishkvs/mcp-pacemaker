@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { digest, POLICY } from '../tools/npm-publication/policy.mjs';
+import { digest, POLICY, REQUIRED_GATES } from '../tools/npm-publication/policy.mjs';
+import { readCandidateEvidence, readSigningRun, readOwnerRun } from '../tools/npm-publication/bootstrap-readers.mjs';
+import { exactArchive } from '../tools/npm-publication/bootstrap.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import {
   MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, validateMatrixContext,
@@ -67,9 +69,9 @@ function zip(entries) {
   return Buffer.concat([...local, directory, end]);
 }
 
-function packageFixture() {
+function packageFixture(version = approval.version) {
   const pkg = {
-    name: POLICY.name, version: approval.version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
+    name: POLICY.name, version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
     dependencies: { 'smol-toml': '^1.8.0' }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
     files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt'],
   };
@@ -152,6 +154,121 @@ class Fixture {
       readArtifacts: async () => structuredClone(this.metadata),
       readJobs: async () => structuredClone(this.jobs),
     };
+  }
+
+  async checkBootstrapReaders() {
+    const f = this;
+    const workflow = { ref: f.env.GITHUB_WORKFLOW_REF, commit: approval.commit, runId: '200', attempt: 1 };
+    const locks = { root: 'd'.repeat(64), ui: 'e'.repeat(64) };
+    Object.assign(f.prepared, {
+      major: 2, channel: 'latest', workflow, producerLocks: locks,
+      ci: { runId: '199', attempt: 1, headSha: approval.commit, conclusion: 'success' },
+      stage: { status: 'not-submitted', stageId: null }, publicationApproval: { status: 'not-authorized' },
+      registrySignatures: { status: 'pending-publication' },
+      privateContentReview: { status: 'pending-owner-review', commit: approval.commit,
+        artifact: digest(f.package.tarball) },
+    });
+    delete f.sourceFiles['baseline.json'];
+    rmSync(join(f.env.RUNNER_TEMP, 'npm-prepared/baseline.json'));
+    f.sourceFiles['prepared.json'] = JSON.stringify(f.prepared);
+    f.archives.set('300', zip(f.sourceFiles));
+    f.metadata[0].digest = `sha256:${hash(f.archives.get('300'))}`;
+    f.env.PREPARED_ARTIFACT_DIGEST = f.metadata[0].digest;
+    f.env.PREPARED_MANIFEST_SHA256 = hash(f.sourceFiles['prepared.json']);
+    f.writeSource(f.env.RUNNER_TEMP);
+    await f.complete();
+    const matrix = await f.verify();
+    const actor = { login: POLICY.owner, id: 101 };
+    const repository = { id: 100, full_name: POLICY.repository, fork: false, private: false, owner: actor };
+    const run = { id: 200, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+      run_attempt: 1, status: 'completed', conclusion: 'success',
+      repository, head_repository: repository, actor, triggering_actor: actor };
+    const peerSource = { ref: 'refs/tags/npm/v1.3.1', tagObject: hex('d'), commit: hex('e'), tree: hex('f') };
+    const peerPackage = packageFixture('1.3.1');
+    const peerPrepared = { schemaVersion: 1, name: POLICY.name, version: '1.3.1',
+      status: 'prepared-awaiting-platform-gates', source: peerSource,
+      toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash('{}'),
+      artifact: { filename: 'candidate.tgz', ...digest(peerPackage.tarball),
+        files: inspectTarball(peerPackage.tarball, { version: '1.3.1' }).files } };
+    const peerMetadata = f.addArtifact(700, 'npm-prepared-198-1', {
+      'candidate.tgz': peerPackage.tarball, 'prepared.json': JSON.stringify(peerPrepared), 'source-gates.json': '{}',
+    });
+    Object.assign(peerMetadata.workflow_run, { id: 198, head_sha: peerSource.commit });
+    const peerJobs = f.jobs.map(job => ({ ...structuredClone(job), id: job.id + 1000,
+      run_id: 198, head_sha: peerSource.commit }));
+    peerJobs.push({ id: 1600, name: 'source', run_id: 198, run_attempt: 1, head_sha: peerSource.commit,
+      status: 'completed', conclusion: 'success', runner_id: 600, runner_name: 'unit-source', labels: ['ubuntu-24.04'],
+      steps: ['Validate source, run required gates, and pack exactly once',
+        'Retain canonical source bundle without repacking'].map(name => ({ name, status: 'completed', conclusion: 'success' })) });
+    const peerArtifact = { schemaVersion: 1, purpose: 'service-comparison-only', name: POLICY.name,
+      version: '1.3.1', source: peerSource, repository: POLICY.repository, repositoryId: '100',
+      artifactId: '700', artifactDigest: peerMetadata.digest, runId: '198', runAttempt: 1,
+      manifestSha256: hash(JSON.stringify(peerPrepared)), sourceReportSha256: hash('{}'),
+      ...digest(peerPackage.tarball), stageEligible: false, privateScans: 'pending', humanApproval: 'pending',
+      sourceJob: { id: '1600', name: 'source' },
+      consumerJobs: peerJobs.slice(0, 6).map(job => ({ id: String(job.id), name: job.name })),
+      sourcePassed: true, matrixPassed: true, finalizerNotRequired: true };
+    const gates = { schemaVersion: 1, commit: approval.commit, artifact: digest(f.package.tarball),
+      sourceReportSha256: f.prepared.sourceReportSha256, gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, {
+        status: 'passed', evidence: [{ description: 'unit-only injected gate evidence', sha256: hash(name) }],
+      }])) };
+    const { status, ...prepared } = f.prepared;
+    const manifest = { ...prepared, phase: 'prepared-not-staged', gateReportSha256: hash(JSON.stringify(gates)),
+      sourceArtifact: { id: '300', digest: f.metadata[0].digest,
+        preparedSha256: hash(f.sourceFiles['prepared.json']), sourceReportSha256: f.prepared.sourceReportSha256 },
+      matrixArtifacts: matrix.artifactEvidence, peerArtifact };
+    const metadata = f.addArtifact(800, 'npm-candidate-200-1', {
+      'candidate.tgz': f.package.tarball, 'manifest.json': JSON.stringify(manifest), 'gates.json': JSON.stringify(gates),
+    });
+    const a = { ...approval, ciRunId: '199', ciAttempt: 1,
+      artifact: { ...digest(f.package.tarball), manifestSha256: hash(JSON.stringify(manifest)),
+        artifactId: '800', artifactDigest: metadata.digest, runId: '200', runAttempt: 1 } };
+    f.jobs.push(...['source', 'prepare'].map(name => ({ name, head_sha: approval.commit, status: 'completed', conclusion: 'success' })));
+    const readers = { ...f.readers, readJobs: async runId => runId === '198' ? peerJobs : f.jobs,
+      readJson: async path => {
+        if (path === 'actions/runs/200') return run;
+        if (path === 'actions/runs/198') return { ...run, id: 198, head_sha: peerSource.commit, conclusion: 'failure' };
+        if (path === 'git/ref/tags/npm/v1.3.1') return { ref: peerSource.ref, object: { type: 'tag', sha: peerSource.tagObject } };
+        if (path === `git/tags/${peerSource.tagObject}`) return { object: { type: 'commit', sha: peerSource.commit } };
+        if (path === `git/commits/${peerSource.commit}`) return { tree: { sha: peerSource.tree } };
+        throw new Error(`Unexpected unit-only read ${path}`);
+      } };
+    const evidence = await readCandidateEvidence(a, locks, readers);
+    assert.equal(evidence.evidence.consumerInstalls, 12);
+    assert.equal(evidence.evidence.consumerArtifacts, 6);
+    assert.equal(evidence.evidence.peerArtifactId, '700');
+    const original = f.archives.get('400');
+    f.archives.set('400', Buffer.from('substituted API archive'));
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers), /ZIP digest/);
+    f.archives.set('400', original);
+    f.jobs[0].conclusion = 'skipped';
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers));
+    f.jobs[0].conclusion = 'success';
+    peerJobs[0].steps[0].conclusion = 'skipped';
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers), /Peer step/);
+    assert.throws(() => exactArchive(zip({ 'candidate.tgz': 'x', 'extra/': '' }), ['candidate.tgz']), /directory/);
+  }
+
+  async checkBootstrapSigningRun() {
+    const actor = { login: POLICY.owner, id: 101 };
+    const repository = { id: 100, full_name: POLICY.repository, fork: false, private: false, owner: actor };
+    const run = { id: 42, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+      run_attempt: 1, status: 'completed', conclusion: 'success',
+      repository, head_repository: repository, actor, triggering_actor: actor };
+    const job = { id: 55, name: 'sign-bootstrap', run_id: 42, run_attempt: 1, head_sha: approval.commit,
+      status: 'completed', conclusion: 'success', labels: ['ubuntu-24.04'], runner_name: 'unit-only',
+      steps: ['Sign and verify exact bootstrap bytes once', 'Export verified bootstrap bundle']
+        .map(name => ({ name, status: 'completed', conclusion: 'success' })) };
+    const readers = { readJson: async () => run, readJobs: async () => [job] };
+    assert.equal((await readSigningRun(approval, '42', readers, true)).repositoryId, '100');
+    job.steps[1].conclusion = 'failure';
+    await assert.rejects(() => readSigningRun(approval, '42', readers, true));
+    job.steps[1].conclusion = 'success';
+    await assert.rejects(() => readSigningRun(approval, '42', { ...readers, readJobs: async () => [
+      job, { name: 'stage', status: 'completed', conclusion: 'success' },
+    ] }, true));
+    run.run_attempt = 2;
+    await assert.rejects(() => readSigningRun(approval, '42', readers, true));
   }
 
   writeSource(temp) {
@@ -252,6 +369,47 @@ class Fixture {
     metadata.digest = `sha256:${hash(archive)}`;
   }
 }
+
+test('bootstrap unit: reader chain rechecks nine ZIPs, twelve reports and opposite T32 bytes', async t => {
+  await new Fixture(t).checkBootstrapReaders();
+});
+
+test('bootstrap unit: signing-run API requires original signing job and successful export', async t => {
+  await new Fixture(t).checkBootstrapSigningRun();
+});
+
+test('owner unit: actual current API run/job must be owner-only hosted original source, not signing or preparation', async () => {
+  const approval = { commit: 'a'.repeat(40) };
+  const owner = { login: POLICY.owner, id: 100 };
+  const repository = { full_name: POLICY.repository, id: 101, owner, private: false, fork: false };
+  const run = { id: 70, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+    run_attempt: 1, status: 'in_progress', conclusion: null, repository, head_repository: repository,
+    actor: owner, triggering_actor: owner };
+  const job = { id: 71, name: 'publish-bootstrap', run_id: 70, run_attempt: 1, head_sha: approval.commit,
+    status: 'in_progress', conclusion: null, labels: ['ubuntu-24.04'], runner_name: 'unit-only-hosted' };
+  const readers = { readJson: async () => run, readJobs: async () => [job] };
+  assert.deepEqual(await readOwnerRun(approval, '70', readers), {
+    runId: '70', jobId: '71', attempt: 1, repositoryId: '101', ownerId: '100',
+  });
+  for (const mutate of [
+    () => { job.head_sha = 'b'.repeat(40); },
+    () => { job.run_attempt = 2; },
+    () => { job.name = 'sign-bootstrap'; },
+    () => { run.actor = { login: 'another-owner', id: 100 }; },
+    () => { run.event = 'push'; },
+  ]) {
+    const savedJob = structuredClone(job);
+    const savedRun = structuredClone(run);
+    mutate();
+    await assert.rejects(() => readOwnerRun(approval, '70', readers));
+    Object.assign(job, savedJob);
+    Object.assign(run, savedRun);
+  }
+  await assert.rejects(() => readOwnerRun(approval, '70', { ...readers,
+    readJobs: async () => [job, { ...job, id: 72, name: 'stage' }] }));
+  await assert.rejects(() => readOwnerRun(approval, '70', { ...readers,
+    readJobs: async () => [job, { ...job, id: 72 }] }));
+});
 
 test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
   const f = new Fixture(t);
@@ -495,7 +653,7 @@ test('consumer npm installer uses Node plus known CLI, exact pins, empty config 
   }
 });
 
-test('workflow is manual, pins six lanes, transfers exact IDs and keeps OIDC in protected stage only', () => {
+test('workflow is manual, pins six lanes, transfers exact IDs and protects both OIDC jobs', () => {
   const yaml = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
   assert.match(yaml, /workflow_dispatch:/);
   assert.doesNotMatch(yaml, /^\s+(?:push|pull_request|release|schedule):/m);
@@ -503,8 +661,8 @@ test('workflow is manual, pins six lanes, transfers exact IDs and keeps OIDC in 
   for (const lane of MATRIX) {
     assert.ok(yaml.includes(`platform: ${lane.platform}, image: ${lane.image}, node: '${lane.node}', npm: '${lane.npm}'`));
   }
-  assert.equal((yaml.match(/id-token: write/g) ?? []).length, 1);
-  assert.ok(yaml.indexOf('id-token: write') > yaml.indexOf('\n  stage:'));
+  assert.equal((yaml.match(/id-token: write/g) ?? []).length, 2);
+  assert.ok(yaml.indexOf('id-token: write') > yaml.indexOf('\n  sign-bootstrap:'));
   assert.match(yaml, /environment: npm-publish/);
   assert.match(yaml, /needs: \[source, consumers\]/);
   assert.match(yaml, /artifact-ids: \$\{\{ steps.matrix.outputs.matrix-artifact-ids \}\}/);

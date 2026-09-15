@@ -539,14 +539,37 @@ test('T04/T06: transfer is bound to approved artifact ID/archive digest/source/p
   }
 });
 
-test('T18: workflow is manual-only, package-wide serialized, stage-only OIDC and pinned actions', () => {
+test('T18: workflow is manual-only, serialized, with OIDC only in protected sign/stage jobs', () => {
   const workflow = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s+(?:push|release|pull_request|schedule|workflow_run):/m);
   assert.match(workflow, /default: prepare/);
   assert.match(workflow, /group: npm-publication-mcp-pacemaker\n\s+cancel-in-progress: false/);
-  assert.equal((workflow.match(/id-token: write/g) ?? []).length, 1);
-  assert.doesNotMatch(workflow.split('\n  stage:')[0], /id-token/);
+  assert.equal((workflow.match(/id-token: write/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow.split('\n  sign-bootstrap:')[0], /id-token/);
+  for (const key of ['sign-bootstrap', 'stage']) {
+    const job = workflow.split(`\n  ${key}:`)[1].split(/\n  [a-z][\w-]*:/)[0];
+    assert.match(job, /environment: npm-publish/);
+    assert.match(job, /id-token: write/);
+  }
+  assert.match(workflow, /options: \[prepare, sign-bootstrap, publish-bootstrap, stage\]/);
+  const ownerJob = workflow.split('\n  publish-bootstrap:')[1].split('\n  stage:')[0];
+  assert.match(ownerJob, /environment: npm-publish/);
+  assert.doesNotMatch(ownerJob, /id-token: write/);
+  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs start') < ownerJob.indexOf('publish-bootstrap.mjs wait login'));
+  assert.ok(ownerJob.indexOf('wait login') < ownerJob.indexOf('Export encrypted owner login challenge'));
+  assert.ok(ownerJob.indexOf('Export encrypted owner login challenge') < ownerJob.indexOf('wait publication'));
+  assert.match(ownerJob, /if: always\(\)[\s\S]+publish-bootstrap\.mjs cleanup/);
+  assert.match(ownerJob, /npm-owner-bootstrap-ledger/);
+  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs wait completion') < ownerJob.indexOf('publish-bootstrap.mjs cleanup'));
+  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs cleanup') < ownerJob.indexOf('post-publication.mjs prepare'));
+  assert.ok(ownerJob.indexOf('post-publication.mjs prepare') < ownerJob.indexOf('post-publication.mjs verify'));
+  const anonymousStep = ownerJob.split('- name: Anonymously verify published signatures provenance and fresh registry consumer')[1]
+    .split('- name: Export post-publication acceptance or failure receipt')[0];
+  assert.match(anonymousStep, /post-publication\.mjs verify/);
+  assert.doesNotMatch(anonymousStep, /GITHUB_TOKEN|id-token|secrets\./);
+  assert.match(ownerJob, /name: npm-post-publication-\$\{\{ github\.run_id }}-1/);
+  assert.match(ownerJob, /npm-owner-bootstrap\/ledger\/post-publication\.json/);
   assert.match(workflow, /environment: npm-publish/);
   assert.match(workflow, /ACTUAL_RUNNER_ENVIRONMENT: \$\{\{ runner.environment }}/);
   assert.doesNotMatch(workflow, /^ {6}\S[^\n]*\$\{\{\s*runner\./m,
