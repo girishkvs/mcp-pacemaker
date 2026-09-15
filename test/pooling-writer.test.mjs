@@ -33,9 +33,11 @@ test('pooling writes leave the caller event loop responsive and retain Undo in t
   const applied = await fixture.apply();
   assert.equal(timerRan, true, 'blocking config operations must not run on the caller thread');
   assert.equal(applied.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(applied)), applied, 'private file stats must not enter worker receipts');
   assert.equal(JSON.parse(readFileSync(fixture.path, 'utf8')).alpha.sharing, 'pool');
   const undone = await fixture.writer.undo({ name: 'alpha', undoId: applied.undoId, revision: applied.revision });
   assert.equal(undone.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(undone)), undone, 'Undo must retain its JSON-safe receipt');
   assert.equal(readFileSync(fixture.path, 'utf8'), fixture.original);
 });
 

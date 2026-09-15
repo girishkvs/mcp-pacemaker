@@ -20,10 +20,12 @@ a version, approve a stage, change a dist-tag, or configure an account or trust.
    Node 24.11.0 does **not** satisfy npm 12.0.2's engines. Node 20 is legacy
    application coverage, not a supported npm 12 publishing runtime.
 4. Before staging, a real 2.x package must already exist under the authorized npm
-   owner. Bootstrap is a separate, explicitly approved owner operation using the
-   real reviewed tarball and interactive 2FA. There is no dummy release. Manual
-   bootstrap needs an explicit **absent CI provenance** exception; hashes and CI
-   logs must not be presented as cryptographic provenance.
+   owner. The current-line workflow provides the separately approved, one-time
+   GitHub-hosted owner bootstrap for the real signed **2.0.1** tarball with
+   browser 2FA. There is no dummy release, local registry publication, stored npm
+   secret or 2FA bypass. This legacy workflow does not implement owner bootstrap;
+   it remains preparation and OIDC-only staging. See the
+   [current-line contract](https://github.com/girishkvs/mcp-pacemaker/blob/main/docs/npm-publishing.md).
 5. Configure npm trust separately: repository `girishkvs/mcp-pacemaker`,
    workflow **filename** `npm-publish.yml`, environment `npm-publish`,
    `allow-stage-publish` enabled and direct publish disabled.
@@ -162,6 +164,10 @@ provenance subject. Supply this additional prepare approval field:
    tag/checkout/workflow identity.
 
 This breaks the first-finalizer dependency without dummy versions or staging.
+
+Current-line peer runs may include `sign-bootstrap` and `publish-bootstrap`
+jobs only when both are completed and skipped. Executed or active bootstrap
+jobs, and unknown job names, cannot supply a peer artifact.
 
 For a later separately authorized `stage` dispatch on the **same tag**, retain the
 source fields, update `scope`/`approvedAt`, and add:
@@ -398,7 +404,8 @@ channel-state check.
 
 OIDC supports stage submission, not stage list/view/download/approve/reject,
 dist-tag changes, deprecation, access changes or unpublish. Perform owner reads
-from an approved release environment with appropriate owner authentication:
+from an approved GitHub-hosted release environment with appropriate owner
+authentication, not from the local development machine:
 
 ```text
 npm stage list mcp-pacemaker --json
@@ -451,9 +458,9 @@ Use the supported pinned verifier and inspect coverage for the intended candidat
 including missing/invalid registry signatures and provenance. Exit zero alone is
 not acceptance. Check source/workflow/issuer/subject and real consumer smoke
 results; append this separate acceptance evidence to the release ledger.
-The manual-bootstrap exception permits **absent CI provenance only**, never an
-invalid registry signature or invalid supplied provenance. Block acceptance on
-failures; containment/rollback/deprecation needs separate owner authorization.
+The signed bootstrap does not waive provenance or registry signatures. Block
+acceptance on missing or invalid evidence; containment, rollback or deprecation
+needs separate owner authorization.
 Never overwrite an immutable name/version or roll a channel across majors.
 
 ## Local tests and official contracts

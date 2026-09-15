@@ -280,6 +280,33 @@ for (const [name, corrupt] of approvalFailures) {
   });
 }
 
+test('peer preparation accepts only skipped current-line bootstrap jobs', t => {
+  const f = new Fixture(t);
+  f.jobs.push(
+    { ...f.job('sign-bootstrap', 510), conclusion: 'skipped' },
+    { ...f.job('publish-bootstrap', 511), conclusion: 'skipped' },
+  );
+  assert.equal(validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }).matrixPassed, true);
+});
+
+for (const name of ['sign-bootstrap', 'publish-bootstrap']) {
+  for (const outcome of ['success', 'failure', 'cancelled', 'running']) {
+    test(`peer preparation rejects ${name} ${outcome}`, t => {
+      const f = new Fixture(t);
+      f.jobs.push({ ...f.job(name, 510),
+        status: outcome === 'running' ? 'in_progress' : 'completed',
+        conclusion: outcome === 'running' ? 'skipped' : outcome });
+      assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }));
+    });
+  }
+}
+
+test('peer preparation still rejects an unknown skipped job', t => {
+  const f = new Fixture(t);
+  f.jobs.push({ ...f.job('unknown-bootstrap', 510), conclusion: 'skipped' });
+  assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }));
+});
+
 const bindingFailures = [
   ['run id', f => { f.run.id++; }],
   ['active run', f => { f.run.status = 'in_progress'; }],
