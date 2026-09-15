@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readFileSync, readSync, realpathSync, writeFileSync,
+} from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +31,83 @@ export const CONSUMER_TOOLCHAINS = Object.freeze([
 
 export function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function fileIdentity(stat) {
+  return { dev: String(stat.dev), ino: String(stat.ino), birthtimeNs: String(stat.birthtimeNs) };
+}
+
+function boundedJson(path, limit) {
+  const before = lstatSync(path, { bigint: true });
+  assert.ok(before.isFile() &&
+    !before.isSymbolicLink() &&
+    before.nlink === 1n &&
+    before.size > 0n &&
+    before.size <= BigInt(limit));
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    assert.deepEqual(fileIdentity(opened), fileIdentity(before));
+    assert.equal(opened.size, before.size);
+    assert.equal(opened.nlink, 1n);
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, length);
+      if (count === 0) break;
+      length += count;
+    }
+    assert.ok(length <= limit);
+    const after = fstatSync(fd, { bigint: true });
+    for (const key of ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs', 'nlink']) assert.equal(after[key], opened[key]);
+    const current = lstatSync(path, { bigint: true });
+    assert.equal(current.isSymbolicLink(), false);
+    assert.deepEqual(fileIdentity(current), fileIdentity(before));
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length)));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function checkExternalOwner(owned) {
+  assert.equal(owned.marker, `${owned.dir}.compat-owner`);
+  const directory = lstatSync(owned.dir, { bigint: true });
+  assert.ok(directory.isDirectory() &&
+    !directory.isSymbolicLink());
+  assert.deepEqual(fileIdentity(directory), owned.identity);
+  const canonicalDirectory = realpathSync.native(owned.dir);
+  assert.deepEqual(fileIdentity(lstatSync(canonicalDirectory, { bigint: true })), owned.identity);
+  const marker = lstatSync(owned.marker, { bigint: true });
+  assert.ok(marker.isFile() &&
+    !marker.isSymbolicLink() &&
+    marker.nlink === 1n);
+  assert.deepEqual(fileIdentity(marker), owned.markerIdentity);
+  const canonicalMarker = realpathSync.native(owned.marker);
+  assert.equal(canonicalMarker, `${canonicalDirectory}.compat-owner`);
+  assert.deepEqual(fileIdentity(lstatSync(canonicalMarker, { bigint: true })), owned.markerIdentity);
+  assert.deepEqual(boundedJson(canonicalMarker, 16 * 1024), owned);
+  return canonicalDirectory;
+}
+
+export function externalFailureSummary(owned, phase, binding) {
+  const unavailable = { gate: 'report-unavailable', code: 'external-report-unavailable' };
+  try {
+    assert.ok(['source', 'artifact'].includes(phase));
+    const directory = checkExternalOwner(owned);
+    const report = boundedJson(join(directory, `${phase}-external.json`), 1024 * 1024);
+    assert.equal(checkExternalOwner(owned), directory);
+    assert.equal(report.schemaVersion, 1);
+    assert.equal(report.phase, phase);
+    assert.equal(report.commit, binding.commit);
+    if (phase === 'artifact') sameDigests(report.artifact, binding.artifact);
+    assert.equal(report.status, 'failed');
+    const names = phase === 'source' ? SOURCE_EXTERNAL : ARTIFACT_EXTERNAL;
+    assert.ok([...names, 'request-validation', 'scanner-adapter'].includes(report.error?.gate));
+    assert.equal(report.error.code, 'external-gate-rejected');
+    return { gate: report.error.gate, code: 'external-gate-rejected' };
+  } catch {
+    return unavailable;
+  }
 }
 
 export function gateOptions(args, required) {
@@ -267,8 +347,10 @@ export class GateRunner {
   }
 
   external(phase, binding, additional = {}) {
+    assert.ok(['source', 'artifact'].includes(phase));
     const request = join(this.owned.dir, `${phase}-request.json`);
     const output = join(this.owned.dir, `${phase}-external.json`);
+    assert.equal(existsSync(output), false, 'External report already exists; no retry');
     writeFileSync(request, JSON.stringify({
       schemaVersion: 1, phase, sourceRoot: this.root, root: additional.extractedRoot ?? this.root,
       commit: binding.commit, version: binding.version, name: POLICY.name,
@@ -277,12 +359,20 @@ export class GateRunner {
       ...(binding.artifact ? { artifact: binding.artifact, tarball: binding.tarball } : {}),
       ...additional,
     }), { flag: 'wx', mode: 0o600 });
-    const execution = this.node('tools/npm-publication/external-gates.mjs',
-      ['--request', request, '--output', output], 'Execute real external gate aggregator');
-    const report = readJson(output);
-    const gates = externalGates(report, phase, binding);
-    for (const gate of Object.values(gates)) gate.evidence.push(execution.evidence);
-    return { ...report, gates };
+    try {
+      const execution = this.node('tools/npm-publication/external-gates.mjs',
+        ['--request', request, '--output', output], 'Execute real external gate aggregator');
+      const report = readJson(output);
+      const gates = externalGates(report, phase, binding);
+      for (const gate of Object.values(gates)) gate.evidence.push(execution.evidence);
+      return { ...report, gates };
+    } catch (error) {
+      try {
+        const summary = externalFailureSummary(this.owned, phase, binding);
+        console.error(`External gate failure: gate=${summary.gate}; code=${summary.code}`);
+      } catch { /* Reporting must not replace the original failure. */ }
+      throw error;
+    }
   }
 
   writeReport(path, report) {
