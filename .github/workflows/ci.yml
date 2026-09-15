@@ -93,6 +93,8 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+      - name: Verify rebuilt dashboard matches committed bytes
+        run: git diff --exit-code HEAD -- ui/dist THIRD_PARTY_NOTICES.txt
       - name: Install bundled Chromium for compatibility
         working-directory: ui
         run: npx --no-install playwright install --with-deps chromium
