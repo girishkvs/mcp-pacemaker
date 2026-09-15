@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -112,7 +112,7 @@ class Fixture {
   constructor(t, version = approval.version, nativeFiles) {
     this.approval = { ...approval, version, ref: `refs/tags/v${version}` };
     const approved = this.approval;
-    this.dir = mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-'));
+    this.dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-')));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
     this.env = {
       ACTUAL_RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_ENVIRONMENT: 'github-hosted',

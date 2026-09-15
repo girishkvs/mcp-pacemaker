@@ -71,23 +71,31 @@ function boundedJson(path, limit) {
 
 function checkExternalOwner(owned) {
   assert.equal(owned.marker, `${owned.dir}.compat-owner`);
-  assert.equal(realpathSync.native(owned.dir), resolve(owned.dir));
   const directory = lstatSync(owned.dir, { bigint: true });
   assert.ok(directory.isDirectory() &&
     !directory.isSymbolicLink());
   assert.deepEqual(fileIdentity(directory), owned.identity);
+  const canonicalDirectory = realpathSync.native(owned.dir);
+  assert.deepEqual(fileIdentity(lstatSync(canonicalDirectory, { bigint: true })), owned.identity);
   const marker = lstatSync(owned.marker, { bigint: true });
+  assert.ok(marker.isFile() &&
+    !marker.isSymbolicLink() &&
+    marker.nlink === 1n);
   assert.deepEqual(fileIdentity(marker), owned.markerIdentity);
-  assert.deepEqual(boundedJson(owned.marker, 16 * 1024), owned);
+  const canonicalMarker = realpathSync.native(owned.marker);
+  assert.equal(canonicalMarker, `${canonicalDirectory}.compat-owner`);
+  assert.deepEqual(fileIdentity(lstatSync(canonicalMarker, { bigint: true })), owned.markerIdentity);
+  assert.deepEqual(boundedJson(canonicalMarker, 16 * 1024), owned);
+  return canonicalDirectory;
 }
 
 export function externalFailureSummary(owned, phase, binding) {
   const unavailable = { gate: 'report-unavailable', code: 'external-report-unavailable' };
   try {
     assert.ok(['source', 'artifact'].includes(phase));
-    checkExternalOwner(owned);
-    const report = boundedJson(join(owned.dir, `${phase}-external.json`), 1024 * 1024);
-    checkExternalOwner(owned);
+    const directory = checkExternalOwner(owned);
+    const report = boundedJson(join(directory, `${phase}-external.json`), 1024 * 1024);
+    assert.equal(checkExternalOwner(owned), directory);
     assert.equal(report.schemaVersion, 1);
     assert.equal(report.phase, phase);
     assert.equal(report.commit, binding.commit);

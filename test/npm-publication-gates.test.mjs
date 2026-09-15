@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
@@ -550,6 +550,58 @@ class ExternalFailureFixture {
 }
 
 const unavailable = { gate: 'report-unavailable', code: 'external-report-unavailable' };
+
+test('Safe external failures pin an owned root through a temporary-directory alias', () => {
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), 'external-owner-alias-')));
+  const target = join(sandbox, 'target');
+  const other = join(sandbox, 'other');
+  const alias = join(sandbox, 'alias');
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  const previous = Object.fromEntries(['TMPDIR', 'TMP', 'TEMP'].map(name => [name, process.env[name]]));
+  let owned;
+  try {
+    mkdirSync(target);
+    mkdirSync(other);
+    symlinkSync(target, alias, linkType);
+    for (const name of Object.keys(previous)) process.env[name] = alias;
+    owned = ownedDirectory();
+    const marker = readFileSync(owned.marker);
+    writeFileSync(join(owned.dir, 'source-external.json'), JSON.stringify({
+      schemaVersion: 1, phase: 'source', commit: binding.commit, status: 'failed',
+      error: { gate: 'native-release-identity', code: 'external-gate-rejected' },
+    }));
+    const expected = { gate: 'native-release-identity', code: 'external-gate-rejected' };
+    assert.deepEqual(externalFailureSummary(owned, 'source', binding), expected);
+    const canonical = realpathSync.native(owned.dir);
+    assert.deepEqual(externalFailureSummary({
+      ...owned, dir: canonical, marker: `${canonical}.compat-owner`,
+    }, 'source', binding), unavailable, 'Ownership records cannot be relabeled.');
+    const replacement = join(other, basename(owned.dir));
+    mkdirSync(replacement);
+    writeFileSync(`${replacement}.compat-owner`, marker);
+    writeFileSync(join(replacement, 'source-external.json'), readFileSync(join(owned.dir, 'source-external.json')));
+    unlinkSync(alias);
+    symlinkSync(other, alias, linkType);
+    try {
+      assert.deepEqual(externalFailureSummary(owned, 'source', binding), unavailable);
+    } finally {
+      unlinkSync(alias);
+      symlinkSync(target, alias, linkType);
+    }
+    assert.deepEqual(externalFailureSummary(owned, 'source', binding), expected);
+    assert.deepEqual(readFileSync(owned.marker), marker);
+  } finally {
+    try {
+      if (owned) removeOwnedDirectory(owned);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  }
+});
 
 for (const phase of ['source', 'artifact']) {
   test(`Safe external failures allow only phase-bound gate/code fields: ${phase}`, t => {
