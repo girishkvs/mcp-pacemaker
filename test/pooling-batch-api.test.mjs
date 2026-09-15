@@ -38,6 +38,7 @@ class BatchBridge {
     this.child.stderr.on('data', (bytes) => { this.stderr = (this.stderr + bytes).slice(-4000); });
     this.exited = once(this.child, 'exit');
     t.after(async () => {
+      await this.trace.settle(this.child);
       killBridge(this.child);
       await this.exited;
       this.trace.finish();

@@ -33,6 +33,7 @@ class PoolingBridge {
     this.child.stderr.on('data', (chunk) => { this.stderr += chunk; });
     this.exited = once(this.child, 'exit');
     t.after(async () => {
+      await this.trace.settle(this.child);
       killBridge(this.child);
       await this.exited;
       this.trace.finish();

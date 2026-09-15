@@ -6,7 +6,8 @@ import { TRACE_MAX_BYTES, TRACE_MAX_EVENTS, TRACE_MAX_LINE_BYTES, validateTraceR
 export const TRACE_MAX_FILES = 4;
 export const TRACE_ARTIFACT_BYTES = TRACE_MAX_FILES * TRACE_MAX_BYTES + 8192;
 const issueNames = ['missing-source', 'invalid-source', 'source-limit', 'truncated',
-  'write-failed', 'invalid-record', 'metadata-unavailable'];
+  'write-failed', 'invalid-record', 'metadata-unavailable',
+  'settlement-timeout', 'settlement-failed', 'settlement-process-exited'];
 const slots = ['active', 'pending', 'next', 'old', 'previous', 'transaction'];
 const integer = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 const exact = (value, keys) => value !== null && typeof value === 'object' &&
@@ -112,7 +113,7 @@ export class PoolingTraceArtifact {
     }));
   }
 
-  collect(traceDirectory, configDirectory) {
+  readRecords(traceDirectory) {
     const issues = new Set();
     const records = [];
     let names = [];
@@ -152,6 +153,12 @@ export class PoolingTraceArtifact {
         issues.add('invalid-source');
       }
     }
+    return { issues: [...issues], records };
+  }
+
+  collect(traceDirectory, configDirectory) {
+    const trace = this.readRecords(traceDirectory);
+    const issues = new Set(trace.issues);
     let files = null;
     try {
       files = this.fileState(configDirectory);
@@ -169,7 +176,7 @@ export class PoolingTraceArtifact {
     // A killed process cannot seal its output. Valid records are a snapshot,
     // not a promise that the writer's final events reached disk.
     return validateTraceArtifact({
-      version: 1, capture: 'unsealed', issues: [...issues], environment, files, records,
+      version: 1, capture: 'unsealed', issues: [...issues], environment, files, records: trace.records,
     });
   }
 

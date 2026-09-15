@@ -11,6 +11,7 @@ import {
 } from '../bin/pooling-config.mjs';
 import { PoolingFiles, MAX_TRANSACTION_BYTES } from '../bin/pooling-files.mjs';
 import { PoolingExecution } from '../bin/pooling-execution.mjs';
+import { FileReplacement } from './helpers/pooling-identity-fixture.mjs';
 
 const BEFORE = '{\r\n  "alpha": {"command":"node","env":{"TOKEN":"private-canary"}},\r\n  "beta": {"command":"node"},\r\n  "other": {"command":"node"}\r\n}\r\n';
 const CHILD = fileURLToPath(new URL('./fixtures/pooling-batch-crash.mjs', import.meta.url));
@@ -124,6 +125,31 @@ test('complete pending copies merge server edits with a stable batch/token and n
   assert.deepEqual(f.inspect(f.files.paths.previous), before);
   assert.equal(f.store.pendingSummary(), null);
 });
+
+for (const phase of ['before-prepared', 'after-prepared']) {
+  test(`a same-content replacement conflicts at the ${phase} commit preflight`, (t) => {
+    const f = new Fixture(t);
+    const receipt = f.stage();
+    const replacement = new FileReplacement(f.path);
+    const originalSave = PoolingFiles.prototype.save;
+    let prepared = false;
+    t.mock.method(PoolingFiles.prototype, 'save', function (record) {
+      const result = originalSave.call(this, record);
+      if (record.phase === 'prepared') {
+        prepared = true;
+        if (phase === 'after-prepared') replacement.replace();
+      }
+      return result;
+    });
+    if (phase === 'before-prepared') {
+      replacement.replace();
+    }
+    f.rejects(() => f.commit(receipt), 'REVISION_CONFLICT', 'not-committed');
+    assert.equal(prepared, phase === 'after-prepared', 'the selected preflight must reject before later phases');
+    replacement.verify();
+    assert.equal(fs.existsSync(f.files.paths.previous), false);
+  });
+}
 
 test('invalid and no-op updates leave the accepted draft, receipt generation and active file unchanged', (t) => {
   const f = new Fixture(t);
