@@ -112,7 +112,8 @@ export function validatePeerRun({ approval, env, run, jobs }) {
   ownerBinding(run.actor, env);
   ownerBinding(run.triggering_actor, env);
   assert.ok(Array.isArray(jobs), 'Actual peer jobs required');
-  const names = new Set(['source', 'prepare', 'stage', ...MATRIX.map(lane => lane.jobName)]);
+  const names = new Set(['source', 'prepare', 'stage', 'sign-bootstrap', 'publish-bootstrap',
+    ...MATRIX.map(lane => lane.jobName)]);
   const seenIds = new Set();
   const seenNames = new Set();
   for (const job of jobs) {
@@ -126,7 +127,9 @@ export function validatePeerRun({ approval, env, run, jobs }) {
     assert.equal(job.run_attempt, 1);
     assert.equal(job.head_sha, peer.commit);
     assert.equal(job.status, 'completed', 'Peer job is still active');
-    if (job.name === 'stage') assert.equal(job.conclusion, 'skipped', 'A stage-action run cannot supply a peer');
+    if (['stage', 'sign-bootstrap', 'publish-bootstrap'].includes(job.name)) {
+      assert.equal(job.conclusion, 'skipped', 'A stage/signing run cannot supply a peer');
+    }
   }
   const sourceJob = successfulJob(jobs, 'source', 'ubuntu-24.04', SOURCE_STEPS);
   const consumerJobs = MATRIX.map(lane => successfulJob(jobs, lane.jobName, lane.image, CONSUMER_STEPS));
