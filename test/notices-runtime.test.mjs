@@ -18,6 +18,10 @@ test('dashboard CI restores the root runtime before building its license supplem
   assert.ok(restore >= 0, 'The UI job must restore root runtime dependencies');
   assert.ok(build >= 0, 'The UI build step must remain explicit');
   assert.ok(restore < build, 'Runtime notice inputs must exist before the dashboard build');
+  const verifyBytes = uiJob.indexOf('git diff --exit-code HEAD -- ui/dist THIRD_PARTY_NOTICES.txt');
+  const compatibility = uiJob.indexOf('npm run compat:prepare');
+  assert.ok(verifyBytes > uiJob.indexOf('npm run build'), 'CI must reject changed bundled bytes after building');
+  assert.ok(compatibility > verifyBytes, 'CI must verify committed bytes before testing compatibility');
 });
 
 class RuntimeFixture {

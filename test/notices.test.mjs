@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -28,6 +29,16 @@ class NoticeFixture {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, value);
     return target;
+  }
+
+  git(args, autocrlf = 'false', eol = 'lf') {
+    const result = spawnSync('git', ['-c', `core.autocrlf=${autocrlf}`, '-c', `core.eol=${eol}`,
+      '-c', 'core.attributesFile=', '-c', 'core.hooksPath=', '-C', this.root, ...args], {
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+        HOME: this.root, USERPROFILE: this.root, GIT_CONFIG_NOSYSTEM: '1',
+        GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null' },
+    });
+    assert.equal(result.status, 0, 'Offline HTML checkout fixture Git command failed');
   }
 
   package(name, { version = '1.0.0', license = 'MIT', files = { LICENSE: MIT } } = {}) {
@@ -85,6 +96,24 @@ test('bundled notice fixture root uses native canonical spelling', (t) => {
   const fixture = new NoticeFixture(t);
   assert.equal(fixture.root, fs.realpathSync.native(fixture.root));
 });
+
+for (const [autocrlf, eol] of [['false', 'lf'], ['true', 'crlf']]) {
+  test(`source HTML checkout preserves bundled bytes with autocrlf=${autocrlf}, eol=${eol}`, (t) => {
+    const fixture = new NoticeFixture(t);
+    const source = normalizeText(fs.readFileSync(path.join(ROOT, 'ui/index.html'), 'utf8'));
+    const bundled = fs.readFileSync(path.join(ROOT, 'ui/dist/index.html'));
+    fixture.write('.gitattributes', fs.readFileSync(path.join(ROOT, '.gitattributes')));
+    const sourceFile = fixture.write('ui/index.html', source);
+    const bundledFile = fixture.write('ui/dist/index.html', bundled);
+    fixture.git(['init', '--quiet']);
+    fixture.git(['add', '--', '.gitattributes', 'ui/index.html', 'ui/dist/index.html']);
+    fs.unlinkSync(sourceFile);
+    fs.unlinkSync(bundledFile);
+    fixture.git(['checkout-index', '--all'], autocrlf, eol);
+    assert.equal(fs.readFileSync(sourceFile, 'utf8'), source.replaceAll('\n', '\r\n'));
+    assert.deepEqual(fs.readFileSync(bundledFile), bundled);
+  });
+}
 
 test('bundled notice fixtures canonicalize an aliased temporary parent', (t) => {
   const sandbox = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), 'mcp-notices-alias-')));
