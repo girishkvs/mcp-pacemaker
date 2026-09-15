@@ -346,17 +346,17 @@ export class PoolingConfigStore {
     this.#execution?.check();
     let fd;
     try {
-      const pathStat = fs.lstatSync(this.#configPath);
+      const pathStat = fs.lstatSync(this.#configPath, { bigint: true });
       if (!pathStat.isFile() ||
-          pathStat.nlink !== 1) {
+          pathStat.nlink !== 1n) {
         throw new PoolingConfigError(400, 'UNSUPPORTED_FILE', 'Config must be a regular file without links.');
       }
       const security = captureSecurity && process.platform === 'win32' ? this.#windowsSecurity() : undefined;
       fd = fs.openSync(this.#configPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-      const stat = fs.fstatSync(fd);
+      const stat = fs.fstatSync(fd, { bigint: true });
       if (!stat.isFile() ||
-          stat.nlink !== 1 ||
-          stat.size > MAX_CONFIG_BYTES) {
+          stat.nlink !== 1n ||
+          stat.size > BigInt(MAX_CONFIG_BYTES)) {
         throw new PoolingConfigError(400, 'UNSUPPORTED_FILE', 'Config must be a regular file of at most 1 MiB.');
       }
       if (pathStat.dev !== stat.dev ||
@@ -385,7 +385,7 @@ export class PoolingConfigStore {
     const current = this.#read();
     this.#checkRevision(current.revision, expected.revision);
     const fields = ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink'];
-    if (process.platform !== 'win32') fields.push('ctimeMs');
+    if (process.platform !== 'win32') fields.push('ctimeNs');
     const changedFields = fields
       .filter((key) => current.stat[key] !== expected.stat[key]);
     if (changedFields.length) {
@@ -394,7 +394,7 @@ export class PoolingConfigStore {
     }
     // NTFS metadata updates can change ctime without changing the config or its permissions.
     if (process.platform === 'win32' &&
-        current.stat.ctimeMs !== expected.stat.ctimeMs) {
+        current.stat.ctimeNs !== expected.stat.ctimeNs) {
       const security = this.#windowsSecurity();
       if (!expected.security.startsWith('F:') ||
           !security.startsWith('F:')) {
@@ -451,10 +451,10 @@ export class PoolingConfigStore {
     }
     const stat = current.stat;
     for (const file of files) {
-      const created = fs.fstatSync(file.fd);
+      const created = fs.fstatSync(file.fd, { bigint: true });
       if (created.uid !== stat.uid ||
           created.gid !== stat.gid) {
-        fs.fchownSync(file.fd, stat.uid, stat.gid);
+        fs.fchownSync(file.fd, Number(stat.uid), Number(stat.gid));
       }
     }
   }
@@ -479,7 +479,7 @@ export class PoolingConfigStore {
         this.#execution?.check();
         fs.writeFileSync(file.fd, index === 0 ? bytes : current.bytes);
         if (process.platform !== 'win32') {
-          fs.fchmodSync(file.fd, current.stat.mode & 0o7777);
+          fs.fchmodSync(file.fd, Number(current.stat.mode & 0o7777n));
         }
         fs.fsyncSync(file.fd);
         fs.closeSync(file.fd);
