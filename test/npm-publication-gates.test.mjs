@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
 import { servicePaths } from '../bin/service-control.mjs';
 import {
   ARTIFACT_EXTERNAL, SOURCE_EXTERNAL, CONSUMER_TOOLCHAINS, GateRunner,
-  consumerSummary, evidenceFor, externalGates, gateOptions, passed, validateConsumerMatrix,
+  consumerSummary, evidenceFor, externalFailureSummary, externalGates, gateOptions, passed, validateConsumerMatrix,
 } from '../tools/npm-publication/gates.mjs';
 import { main as sourceMain, runSourceChecks, validateAudit } from '../tools/npm-publication/source-gates.mjs';
 import { main as artifactMain, runArtifactChecks } from '../tools/npm-publication/artifact-gates.mjs';
@@ -500,6 +500,158 @@ test('External adapter calls the node entrypoint directly without an undefined p
   } finally {
     removeOwnedDirectory(owned);
   }
+});
+
+test('External adapter exposes only the safe subgate and preserves the original execution failure', t => {
+  const owned = ownedDirectory();
+  t.after(() => removeOwnedDirectory(owned));
+  const messages = [];
+  t.mock.method(console, 'error', (...values) => messages.push(values.join(' ')));
+  const failure = new Error('Private synthetic execution failure');
+  failure.exitCode = 17;
+  const runner = {
+    root: owned.dir, owned, context: { publicPackages: [POLICY.name] },
+    node(file, args) {
+      writeFileSync(args[3], JSON.stringify({
+        schemaVersion: 1, phase: 'source', commit: binding.commit, status: 'failed',
+        error: { gate: 'native-release-identity', code: 'external-gate-rejected',
+          message: 'Private synthetic message', reviewRequired: 'Private synthetic review',
+          diagnosticSha256: 'f'.repeat(64) },
+        stdout: 'Private synthetic stdout', policy: { private: 'Private synthetic policy' },
+      }));
+      throw failure;
+    },
+  };
+  assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === failure);
+  assert.deepEqual(messages, [
+    'External gate failure: gate=native-release-identity; code=external-gate-rejected',
+  ]);
+  assert.equal(failure.exitCode, 17);
+});
+
+class ExternalFailureFixture {
+  constructor(t, phase = 'source') {
+    this.owned = ownedDirectory();
+    t.after(() => removeOwnedDirectory(this.owned));
+    this.phase = phase;
+    this.path = join(this.owned.dir, `${phase}-external.json`);
+    this.report = { schemaVersion: 1, phase, commit: binding.commit, status: 'failed',
+      ...(phase === 'artifact' ? { artifact: binding.artifact } : {}),
+      error: { gate: 'scanner-adapter', code: 'external-gate-rejected' } };
+  }
+
+  write(value = this.report) {
+    writeFileSync(this.path, typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value));
+  }
+
+  summary(owned = this.owned) {
+    return externalFailureSummary(owned, this.phase, binding);
+  }
+}
+
+const unavailable = { gate: 'report-unavailable', code: 'external-report-unavailable' };
+
+for (const phase of ['source', 'artifact']) {
+  test(`Safe external failures allow only phase-bound gate/code fields: ${phase}`, t => {
+    const f = new ExternalFailureFixture(t, phase);
+    for (const gate of [...(phase === 'source' ? SOURCE_EXTERNAL : ARTIFACT_EXTERNAL),
+      'request-validation', 'scanner-adapter']) {
+      f.report.error.gate = gate;
+      f.report.error.private = 'Private synthetic exception and policy';
+      f.report.private = { stdout: 'Private synthetic stdout', stderr: 'Private synthetic stderr' };
+      f.write();
+      assert.deepEqual(f.summary(), { gate, code: 'external-gate-rejected' });
+    }
+  });
+}
+
+for (const [name, transform] of [
+  ['malformed JSON', () => '{"Private synthetic":'],
+  ['empty report', () => ''],
+  ['oversized report', () => ' '.repeat(1024 * 1024 + 1)],
+  ['invalid UTF-8', () => Buffer.from([0xff])],
+  ['BOM', r => `\ufeff${JSON.stringify(r)}`],
+  ['null', () => 'null'],
+  ['wrong schema', r => ({ ...r, schemaVersion: 2 })],
+  ['wrong commit', r => ({ ...r, commit: 'f'.repeat(40) })],
+  ['wrong phase', r => ({ ...r, phase: 'artifact' })],
+  ['success report after execution failure', r => ({ ...r, status: 'passed' })],
+  ['missing error', r => ({ ...r, error: undefined })],
+  ['other-phase gate', r => ({ ...r, error: { ...r.error, gate: 'payload-gitleaks' } })],
+  ['private gate', r => ({ ...r, error: { ...r.error, gate: 'Private synthetic\n::error::injected' } })],
+  ['private code', r => ({ ...r, error: { ...r.error, code: 'Private synthetic code' } })],
+  ['non-string gate', r => ({ ...r, error: { ...r.error, gate: ['scanner-adapter'] } })],
+]) {
+  test(`Safe external failure marks ${name} unavailable`, t => {
+    const f = new ExternalFailureFixture(t);
+    f.write(transform(f.report));
+    assert.deepEqual(f.summary(), unavailable);
+  });
+}
+
+test('Safe external failure rejects missing, unowned, linked and payload-substituted reports', t => {
+  const f = new ExternalFailureFixture(t, 'artifact');
+  assert.deepEqual(f.summary(), unavailable);
+  f.write({ ...f.report, artifact: digest(Buffer.from('different unit tarball')) });
+  assert.deepEqual(f.summary(), unavailable);
+  f.write();
+  assert.deepEqual(f.summary({ ...f.owned, identity: { ...f.owned.identity, ino: 'changed' } }), unavailable);
+  assert.deepEqual(f.summary({ ...f.owned, markerIdentity: { ...f.owned.markerIdentity, ino: 'changed' } }), unavailable);
+  const marker = readFileSync(f.owned.marker);
+  writeFileSync(f.owned.marker, '{"private":"synthetic changed marker"}');
+  assert.deepEqual(f.summary(), unavailable);
+  writeFileSync(f.owned.marker, marker);
+  linkSync(f.path, join(f.owned.dir, 'unit-hardlink.json'));
+  assert.deepEqual(f.summary(), unavailable);
+  rmSync(join(f.owned.dir, 'unit-hardlink.json'));
+  rmSync(f.path);
+  mkdirSync(f.path);
+  assert.deepEqual(f.summary(), unavailable);
+});
+
+test('Real controlled child exit and private transcript survive safe external reporting without replay', t => {
+  const owned = ownedDirectory();
+  t.after(() => removeOwnedDirectory(owned));
+  const messages = [];
+  t.mock.method(console, 'error', (...args) => messages.push(args.join(' ')));
+  let original;
+  let calls = 0;
+  const runner = {
+    root: owned.dir, owned, logs: [], env: {}, context: { publicPackages: [POLICY.name] },
+    node(file, args) {
+      calls++;
+      const script = `require('node:fs').writeFileSync(process.argv[1], JSON.stringify({
+        schemaVersion:1,phase:'source',commit:'${binding.commit}',status:'failed',
+        error:{gate:'producer-advisories',code:'external-gate-rejected'}
+      })); console.log('Private synthetic stdout'); console.error('Private synthetic stderr'); process.exit(23);`;
+      try { return GateRunner.prototype.run.call(this, 'Controlled failing child', process.execPath, ['-e', script, args[3]]); }
+      catch (error) { original = error; throw error; }
+    },
+  };
+  assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === original);
+  assert.equal(original.actual, 23);
+  assert.equal(calls, 1);
+  assert.match(readFileSync(runner.logs[0], 'utf8'), /Private synthetic stdout/);
+  assert.deepEqual(messages, ['External gate failure: gate=producer-advisories; code=external-gate-rejected']);
+});
+
+test('Unavailable reports and a failed diagnostic sink cannot replace or retry the original failure', t => {
+  const f = new ExternalFailureFixture(t);
+  t.mock.method(console, 'error', () => { throw new Error('Controlled diagnostic sink failure'); });
+  const failure = new Error('Controlled original failure');
+  let calls = 0;
+  const runner = { owned: f.owned, root: f.owned.dir, context: {},
+    node() { calls++; throw failure; } };
+  assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === failure);
+  assert.equal(calls, 1);
+});
+
+test('A preexisting external report cannot be replayed for a new execution', t => {
+  const f = new ExternalFailureFixture(t);
+  f.write();
+  const runner = { owned: f.owned, root: f.owned.dir, context: {},
+    node() { assert.fail('Must not execute with an existing report'); } };
+  assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), /already exists/);
 });
 
 test('All exact platform/npm/script-mode lanes are mandatory; wrong-byte and duplicate reports fail', () => {

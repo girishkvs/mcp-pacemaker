@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { digest, POLICY } from '../tools/npm-publication/policy.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
+import { verifyWindowsExecution } from '../tools/npm-publication/external-gates.mjs';
+import { CURRENT_REF, LEGACY_REF } from '../tools/compatibility/fixtures.mjs';
 import {
   MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, validateMatrixContext,
   verifyMatrixReports, verifyPreparedBundle, zipFiles,
@@ -67,9 +69,9 @@ function zip(entries) {
   return Buffer.concat([...local, directory, end]);
 }
 
-function packageFixture() {
+function packageFixture(version = approval.version, nativeFiles) {
   const pkg = {
-    name: POLICY.name, version: approval.version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
+    name: POLICY.name, version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
     dependencies: { 'smol-toml': '^1.8.0' }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
     files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt'],
   };
@@ -81,8 +83,13 @@ function packageFixture() {
     'bin/windows/PoolingSecurityHelper.exe': 'fake bytes; never executed',
     'bin/windows/PoolingSecurityHelper.build.json': '{}',
     ...Object.fromEntries(['AssemblyInfo', 'PoolingNativeFiles', 'PoolingSecurityHelper', 'PoolingSecurityReader']
+      .filter(name => version === '2.0.1' || name !== 'PoolingNativeFiles')
       .map(name => [`bin/windows/src/${name}.cs`, 'fixture source'])),
   };
+  if (nativeFiles) {
+    for (const path of Object.keys(files).filter(path => path.startsWith('bin/windows/'))) delete files[path];
+    Object.assign(files, nativeFiles);
+  }
   const chunks = [];
   for (const [name, value] of Object.entries(files)) {
     const data = Buffer.from(value);
@@ -100,7 +107,9 @@ function packageFixture() {
 }
 
 class Fixture {
-  constructor(t) {
+  constructor(t, version = approval.version, nativeFiles) {
+    this.approval = { ...approval, version, ref: `refs/tags/v${version}` };
+    const selectedApproval = this.approval;
     this.dir = mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-'));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
     this.env = {
@@ -110,22 +119,22 @@ class Fixture {
       GITHUB_API_URL: 'https://api.github.com', GITHUB_EVENT_NAME: 'workflow_dispatch',
       GITHUB_REPOSITORY: POLICY.repository, GITHUB_REPOSITORY_OWNER: POLICY.owner, GITHUB_REPOSITORY_ID: '100',
       GITHUB_ACTOR: POLICY.owner, GITHUB_TRIGGERING_ACTOR: POLICY.owner, GITHUB_RUN_ATTEMPT: '1',
-      GITHUB_RUN_ID: '200', GITHUB_REF: approval.ref, GITHUB_SHA: approval.commit,
-      GITHUB_WORKFLOW_SHA: approval.commit, GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${approval.ref}`,
+      GITHUB_RUN_ID: '200', GITHUB_REF: selectedApproval.ref, GITHUB_SHA: selectedApproval.commit,
+      GITHUB_WORKFLOW_SHA: selectedApproval.commit, GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${selectedApproval.ref}`,
       GITHUB_JOB: 'consumers', GITHUB_TOKEN: 'must-not-reach-child', NODE_AUTH_TOKEN: 'must-not-reach-child',
       NPM_TOKEN: 'must-not-reach-child', NODE_OPTIONS: '--bad-injection',
       npm_config_registry: 'https://unapproved.invalid/', npm_config_ignore_scripts: 'true',
     };
-    this.event = { inputs: { action: 'prepare', approval: JSON.stringify(approval) },
+    this.event = { inputs: { action: 'prepare', approval: JSON.stringify(selectedApproval) },
       repository: { full_name: POLICY.repository, fork: false, private: false }, sender: { login: POLICY.owner } };
-    this.package = packageFixture();
+    this.package = packageFixture(version, nativeFiles);
     const sourceReport = Buffer.from('{"schemaVersion":1}\n');
     this.prepared = {
-      schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version: approval.version,
-      source: { ref: approval.ref, tagObject: approval.tagObject, commit: approval.commit, tree: approval.tree },
+      schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version,
+      source: { ref: selectedApproval.ref, tagObject: selectedApproval.tagObject, commit: selectedApproval.commit, tree: selectedApproval.tree },
       toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash(sourceReport),
       artifact: { filename: 'candidate.tgz', ...digest(this.package.tarball),
-        files: inspectTarball(this.package.tarball, approval).files },
+        files: inspectTarball(this.package.tarball, selectedApproval).files },
     };
     this.sourceFiles = {
       'prepared.json': JSON.stringify(this.prepared), 'candidate.tgz': this.package.tarball,
@@ -168,6 +177,7 @@ class Fixture {
   }
 
   lane(index) {
+    const approval = this.approval;
     const lane = MATRIX[index];
     const temp = join(this.dir, `lane${index}`);
     this.writeSource(temp);
@@ -236,7 +246,7 @@ class Fixture {
   }
 
   verify(extra = {}) {
-    return verifyMatrixReports({ directory: this.reports, approval, prepared: this.prepared,
+    return verifyMatrixReports({ directory: this.reports, approval: this.approval, prepared: this.prepared,
       env: this.env, ...this.readers, ...extra });
   }
 
@@ -253,10 +263,56 @@ class Fixture {
   }
 }
 
+for (const version of ['1.3.1', '2.0.1']) {
+  test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, async t => {
+    const native = Object.fromEntries(Object.entries(packageFixture(version).files)
+      .filter(([path]) => path.startsWith('bin/windows/')));
+    const removed = 'bin/windows/src/PoolingSecurityReader.cs';
+    const missing = Object.fromEntries(Object.entries(native).filter(([path]) => path !== removed));
+    for (const files of [missing, { ...native, 'bin/windows/extra.cs': 'extra' },
+      { ...missing, 'bin/windows/src/UnapprovedReader.cs': native[removed] }]) {
+      const f = new Fixture(t, version, files);
+      await assert.rejects(runMatrix(f.lane(2)));
+      assert.equal(f.calls.filter(call => call.args.includes('--test')).length, 0);
+    }
+    const f = new Fixture(t, version);
+    const options = f.lane(2);
+    save(join(options.root, 'bin/windows/PoolingSecurityHelper.exe'), 'changed checkout binary');
+    await assert.rejects(runMatrix(options), /Checkout helper bytes differ from the tarball/);
+    assert.equal(f.calls.filter(call => call.args.includes('--test')).length, 0);
+  });
+
+  test(`Native inventory roundtrip carries exact ${version} paths through Windows producer and both finalizers`, async t => {
+    const f = new Fixture(t, version);
+    const expected = Object.entries(f.package.files).filter(([path]) => path.startsWith('bin/windows/'))
+      .map(([path, bytes]) => ({ path, sha256: hash(bytes) })).sort((a, b) => a.path.localeCompare(b.path));
+    assert.equal(expected.length, version === '1.3.1' ? 5 : 6);
+    assert.equal(expected.some(file => file.path.endsWith('/PoolingNativeFiles.cs')), version === '2.0.1');
+    await f.complete();
+    const matrix = await f.verify();
+    const identity = { baselineCommit: version === '1.3.1' ? LEGACY_REF : CURRENT_REF,
+      files: [...expected, { path: 'tools/windows-security-helper/build.ps1', sha256: hash('unit script') }],
+      reproducibilityBuild: 'not-executed-in-this-run' };
+    const request = { version, matrix, extractedRoot: join(f.dir, 'lane2/checkout') };
+    assert.equal(verifyWindowsExecution(request, identity).length, 2);
+    for (const report of matrix.nativeWindowsEvidence) assert.deepEqual(
+      report.files.toSorted((a, b) => a.path.localeCompare(b.path)), expected);
+    const original = structuredClone(JSON.parse(readFileSync(join(f.reports, f.metadata[3].name, 'report.json'))).nativeWindows.files);
+    for (const files of [original.slice(1), [...original, { path: 'bin/windows/unapproved.cs', sha256: hash('extra') }],
+      original.map((file, index) => index ? file : { ...file, sha256: hash('changed bytes') })]) {
+      f.rewriteReport(2, report => { report.nativeWindows.files = files; });
+      await assert.rejects(f.verify());
+      f.rewriteReport(2, report => { report.nativeWindows.files = original; });
+    }
+    await f.verify();
+  });
+}
+
 test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
   const f = new Fixture(t);
-  for (const version of ['1.3.1', '2.0.1']) {
-    const a = { ...approval, version, ref: `refs/tags/npm/v${version}` };
+  for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
+    ['npm/', 'npm-r2/'].map(namespace => ({ version, namespace })))) {
+    const a = { ...approval, version, ref: `refs/tags/${namespace}v${version}` };
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
     const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };
@@ -265,7 +321,8 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
     assert.throws(() => validateMatrixContext({ ...env,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
     }, a, event));
-    for (const ref of ['refs/heads/main', `refs/tags/npm/v${version}-other`, `refs/tags/other/v${version}`]) {
+    for (const ref of ['refs/heads/main', `refs/tags/${namespace}v${version}-other`,
+      `refs/tags/other/v${version}`, `refs/tags/npm-r3/v${version}`]) {
       const invalid = { ...a, ref };
       const invalidEnv = { ...env, GITHUB_REF: ref,
         GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };

@@ -37,6 +37,10 @@ const baseline = version => {
   assert.ok(['1.3.1', '2.0.1'].includes(version), 'Unsupported native baseline version');
   return version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
 };
+const BUILD_SCRIPT = 'tools/windows-security-helper/build.ps1';
+const BUILD_ATTRIBUTES = Object.freeze({
+  text: 'set', eol: 'crlf', filter: 'unspecified', 'working-tree-encoding': 'unspecified', ident: 'unspecified',
+});
 
 function inside(root, path) {
   const name = relative(resolve(root), resolve(path));
@@ -77,10 +81,10 @@ async function gitRead(root, args, run, { allowFailure = false, home = tmpdir(),
     PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
     HOME: home, USERPROFILE: home, TMPDIR: home, TEMP: home, TMP: home,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-    GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_ATTR_NOSYSTEM: '1',
   };
   const result = await run('git', ['-c', 'core.hooksPath=', '-c', 'credential.helper=',
-    '-c', 'core.fsmonitor=false', '-c', 'safe.bareRepository=explicit', '-C', root,
+    '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=', '-c', 'safe.bareRepository=explicit', '-C', root,
     ...(gitDirectory ? [`--git-dir=${gitDirectory}`] : []), ...args], { cwd: root, env });
   if (!allowFailure) assert.equal(result.code, 0, 'Git evidence command failed');
   return { ...result, stdout: Buffer.from(result.stdout ?? '') };
@@ -143,18 +147,53 @@ export async function verifyNativeIdentity(request, { run = command } = {}) {
     const local = [...filesUnder(request.sourceRoot, 'bin/windows'),
       ...filesUnder(request.sourceRoot, 'tools/windows-security-helper/build.ps1')];
     equal(local.map(file => file.path).sort(), entries.map(file => file.path).sort());
-    assert.ok(entries.length >= 7);
+    equal(entries.length, request.version === '1.3.1' ? 6 : 7);
     for (const path of ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
       'tools/windows-security-helper/build.ps1']) assert.ok(entries.some(file => file.path === path));
+    let buildScript;
     for (const entry of entries) {
       const bytes = (await gitRead(repository, ['cat-file', 'blob', entry.object], run, repositoryOptions)).stdout;
-      equal(hash(bytes), local.find(file => file.path === entry.path).sha256);
+      const actual = local.find(file => file.path === entry.path);
+      if (entry.path === BUILD_SCRIPT) {
+        buildScript = await verifyBuildScriptCheckout(request, bytes, actual, run);
+      } else equal(hash(bytes), actual.sha256);
     }
     return { baselineCommit, files: local.sort((a, b) => a.path.localeCompare(b.path)),
-      reproducibilityBuild: 'not-executed-in-this-run' };
+      buildScript, reproducibilityBuild: 'not-executed-in-this-run' };
   } finally {
     if (owned) rmSync(owned, { recursive: true });
   }
+}
+
+async function verifyBuildScriptCheckout(request, baselineBytes, actual, run) {
+  const source = (await gitRead(request.sourceRoot,
+    ['cat-file', 'blob', `${request.commit}:${BUILD_SCRIPT}`], run)).stdout;
+  equal(source, baselineBytes);
+  const infoAttributes = (await gitRead(request.sourceRoot,
+    ['rev-parse', '--path-format=absolute', '--git-path', 'info/attributes'], run)).stdout.toString().trim();
+  assert.ok(isAbsolute(infoAttributes));
+  equal(lstatSync(infoAttributes, { throwIfNoEntry: false }), undefined);
+  const output = (await gitRead(request.sourceRoot,
+    ['check-attr', `--source=${request.commit}`, '-z', ...Object.keys(BUILD_ATTRIBUTES), '--', BUILD_SCRIPT], run)).stdout;
+  const fields = output.toString('utf8').split('\0');
+  equal(fields.pop(), '');
+  equal(fields, Object.entries(BUILD_ATTRIBUTES).flatMap(([key, value]) => [BUILD_SCRIPT, key, value]));
+  assert.ok(baselineBytes.length > 0 &&
+    baselineBytes.length <= 128 * 1024, 'Unexpected build script size');
+  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(baselineBytes);
+  assert.doesNotMatch(text, /[\u0000-\u0008\u000b-\u001f\u007f\ufeff]/u,
+    'Build script must be a BOM-free UTF-8 Git blob with LF endings');
+  equal(Buffer.from(text), baselineBytes);
+  const checkout = readFileSync(join(request.sourceRoot, BUILD_SCRIPT));
+  equal(hash(checkout), actual.sha256);
+  // Render only the committed, explicitly declared checkout form. Never normalize payload/native bytes.
+  equal(checkout, Buffer.from(text.replace(/\n/g, '\r\n')));
+  return {
+    path: BUILD_SCRIPT, comparison: 'exact-declared-crlf-checkout',
+    attributesSource: request.commit, attributes: { ...BUILD_ATTRIBUTES },
+    baselineSha256: hash(baselineBytes), baselineBytes: baselineBytes.length,
+    sourceBlobSha256: hash(source), checkoutSha256: hash(checkout), checkoutBytes: checkout.length,
+  };
 }
 
 function checkCommandEvidence(value, stdout) {
@@ -238,7 +277,11 @@ export function verifyWindowsExecution(request, nativeIdentity) {
   equal(nativeIdentity.reproducibilityBuild, 'not-executed-in-this-run');
   const expected = nativeIdentity.files.filter(file => file.path.startsWith('bin/windows/'))
     .sort((a, b) => a.path.localeCompare(b.path));
-  assert.ok(expected.length >= 6);
+  const paths = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
+    'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs',
+    'bin/windows/src/PoolingSecurityReader.cs'];
+  if (request.version === '2.0.1') paths.push('bin/windows/src/PoolingNativeFiles.cs');
+  equal(expected.map(file => file.path).sort(), paths.sort());
   equal(filesUnder(request.extractedRoot, 'bin/windows').sort((a, b) => a.path.localeCompare(b.path)), expected);
   const reports = request.matrix.nativeWindowsEvidence;
   equal(reports.length, 2);
@@ -493,7 +536,7 @@ export async function aggregateExternalGates(request, {
           { commit: request.commit, historySha256: report.authorIdentity.evidenceSha256 })] };
       active = 'native-release-identity';
       report.nativeIdentity = await verifyNativeIdentity(request, { run });
-      report.gates[active] = pass('All native helper files and build script byte-identical to immutable same-major release; no rebuild', report.nativeIdentity);
+      report.gates[active] = pass('Native helper bytes match immutable same-major release; build script matches its Git blob and declared CRLF checkout; no rebuild', report.nativeIdentity);
     } else {
       report.consumerLanes = consumers;
       for (const major of ['11', '12']) {

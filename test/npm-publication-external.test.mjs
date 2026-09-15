@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
@@ -66,6 +67,15 @@ function fixture(t, temporaryParent = tmpdir()) {
     { name: 'fixture-public', version: '1.0.0', license: 'MIT' });
   write(sourceRoot, 'node_modules/fixture-public/LICENSE', mit);
   const nativeIdentity = { baselineCommit: CURRENT_REF, reproducibilityBuild: 'not-executed-in-this-run',
+    buildScript: {
+      path: nativePaths.at(-1), comparison: 'exact-declared-crlf-checkout', attributesSource: commit,
+      attributes: { text: 'set', eol: 'crlf', filter: 'unspecified', 'working-tree-encoding': 'unspecified', ident: 'unspecified' },
+      baselineSha256: hash(`synthetic ${nativePaths.at(-1)}`),
+      baselineBytes: Buffer.byteLength(`synthetic ${nativePaths.at(-1)}`),
+      sourceBlobSha256: hash(`synthetic ${nativePaths.at(-1)}`),
+      checkoutSha256: hash(`synthetic ${nativePaths.at(-1)}`),
+      checkoutBytes: Buffer.byteLength(`synthetic ${nativePaths.at(-1)}`),
+    },
     files: nativePaths.map(path => ({ path, sha256: hash(readFileSync(join(sourceRoot, path))) }))
       .sort((a, b) => a.path.localeCompare(b.path)) };
   const request = { schemaVersion: 1, phase: 'source', sourceRoot, root: sourceRoot, commit,
@@ -74,6 +84,8 @@ function fixture(t, temporaryParent = tmpdir()) {
   return { root, sourceRoot, extractedRoot, request, nativeIdentity };
 }
 function gitRunner(f, { missing = false } = {}) {
+  const paths = nativePaths.filter(path => f.request.version === '2.0.1' ||
+    path !== 'bin/windows/src/PoolingNativeFiles.cs');
   return async (file, args) => {
     assert.equal(file, 'git');
     assert.ok(args.includes('safe.bareRepository=explicit'), 'Keep the explicit-bare safeguard');
@@ -86,14 +98,18 @@ function gitRunner(f, { missing = false } = {}) {
       assert.equal(gitDirectory, `--git-dir=${cwd}`, 'Owned bare repositories must be selected explicitly');
     }
     let stdout = '';
-    if (command[0] === 'rev-parse') stdout = command[1] === 'HEAD' ? `${commit}\n` : 'false\n';
+    if (command[0] === 'rev-parse') stdout = command.includes('--git-path')
+      ? join(f.sourceRoot, '.git/info/attributes') : command[1] === 'HEAD' ? `${commit}\n` : 'false\n';
     else if (command[0] === 'rev-list') stdout = '1\n';
     else if (command[0] === 'log') stdout = `${commit}\0Private Fixture\0private@example.invalid\0Private Committer\0committer@example.invalid\0\n`;
     else if (command[0] === 'cat-file' &&
         command[1] === '-e') return { code: missing ? 1 : 0, stdout: '' };
-    else if (command[0] === 'ls-tree') stdout = nativePaths.map((path, index) =>
+    else if (command[0] === 'ls-tree') stdout = paths.map((path, index) =>
       `100644 blob ${String(index + 1).padStart(40, '0')}\t${path}\0`).join('');
-    else if (command[0] === 'cat-file') stdout = Buffer.from(`synthetic ${nativePaths[Number(command[2]) - 1]}`);
+    else if (command[0] === 'check-attr') stdout = Object.entries(f.nativeIdentity.buildScript.attributes)
+      .flatMap(([key, value]) => [nativePaths.at(-1), key, value]).join('\0') + '\0';
+    else if (command[0] === 'cat-file') stdout = Buffer.from(`synthetic ${command[2].includes(':')
+      ? nativePaths.at(-1) : paths[Number(command[2]) - 1]}`);
     else if (command[0] === 'init') assert.notEqual(cwd, f.sourceRoot);
     else if (command[0] === 'fetch') {
       assert.notEqual(cwd, f.sourceRoot);
@@ -294,9 +310,162 @@ test('native changed bytes fail; missing baseline fetch is exact SHA in an owned
   await assert.rejects(verifyNativeIdentity(f.request, { run: gitRunner(f) }));
 });
 
+class NativeCheckoutFixture {
+  constructor(t, version = '2.0.1') {
+    this.fixture = fixture(t);
+    this.paths = nativePaths.filter(path => version === '2.0.1' ||
+      path !== 'bin/windows/src/PoolingNativeFiles.cs');
+    if (version === '1.3.1') rmSync(join(this.fixture.sourceRoot, 'bin/windows/src/PoolingNativeFiles.cs'));
+    this.script = nativePaths.at(-1);
+    this.blob = Buffer.from("# UTF-8 fixture: \u03bb\nparam()\nWrite-Output 'unit only'\n");
+    write(this.fixture.sourceRoot, this.script, this.blob);
+    write(this.fixture.sourceRoot, '.gitattributes', '* text=auto\n*.ps1 text eol=crlf\n');
+    this.git(['init', '--quiet']);
+    for (const path of ['.gitattributes', ...this.paths]) this.index(path);
+    this.tree = this.git(['write-tree']).toString().trim();
+    this.request = { ...this.fixture.request, version, commit: this.tree };
+    this.git(['checkout-index', '--all', '--force']);
+  }
+
+  git(args, input) {
+    const result = spawnSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+      '-c', 'core.attributesFile=', '-c', 'core.hooksPath=', '-C', this.fixture.sourceRoot, ...args], {
+      input, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+        HOME: this.fixture.root, USERPROFILE: this.fixture.root, GIT_CONFIG_NOSYSTEM: '1',
+        GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null' },
+    });
+    assert.equal(result.status, 0, 'Offline fixture Git command failed');
+    return result.stdout;
+  }
+
+  index(path) {
+    const object = this.git(['hash-object', '-w', '--stdin'],
+      readFileSync(join(this.fixture.sourceRoot, path))).toString().trim();
+    this.git(['update-index', '--add', '--cacheinfo', `100644,${object},${path}`]);
+  }
+
+  run(file, args, options) {
+    assert.equal(file, 'git');
+    assert.equal(args.includes('fetch'), false, 'This real-checkout unit fixture must remain offline');
+    const ref = this.request.version === '2.0.1' ? CURRENT_REF : LEGACY_REF;
+    // Only the immutable baseline lookup is injected; object reads, attributes and checkout are real Git.
+    const translated = args.map(arg => arg === ref ? this.tree :
+      arg === `${ref}^{commit}` ? `${this.tree}^{tree}` : arg);
+    const result = spawnSync(file, translated, options);
+    return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  verify() {
+    return verifyNativeIdentity(this.request, { run: this.run.bind(this) });
+  }
+}
+
+for (const version of ['2.0.1', '1.3.1']) {
+  test(`NativeIdentity real Git checkout accepts only the declared build-script representation: ${version}`, async t => {
+    const f = new NativeCheckoutFixture(t, version);
+    const checkout = readFileSync(join(f.fixture.sourceRoot, f.script));
+    assert.deepEqual(checkout, Buffer.from(f.blob.toString().replace(/\n/g, '\r\n')));
+    assert.notEqual(hash(checkout), hash(f.blob));
+    const identity = await f.verify();
+    assert.equal(identity.files.length, f.paths.length);
+    assert.equal(identity.files.find(file => file.path === f.script).sha256, hash(checkout));
+    assert.equal(identity.buildScript.baselineSha256, hash(f.blob));
+    assert.equal(identity.buildScript.checkoutSha256, hash(checkout));
+    assert.equal(identity.buildScript.comparison, 'exact-declared-crlf-checkout');
+    assert.equal(identity.reproducibilityBuild, 'not-executed-in-this-run');
+  });
+}
+
+test('NativeIdentity rejects script content, mixed endings and encoding changes without touching native bytes', async t => {
+  const f = new NativeCheckoutFixture(t);
+  const path = join(f.fixture.sourceRoot, f.script);
+  const original = readFileSync(path);
+  for (const [name, bytes] of [
+    ['content', Buffer.concat([original, Buffer.from('# changed\r\n')])],
+    ['whitespace', Buffer.from(original.toString().replace('param()', 'param( )'))],
+    ['LF instead of declared CRLF', f.blob],
+    ['mixed endings', Buffer.from(original.toString().replace('\r\n', '\n'))],
+    ['bare CR', Buffer.from(original.toString().replace('\r\n', '\r'))],
+    ['double CR', Buffer.from(original.toString().replace('\r\n', '\r\r\n'))],
+    ['missing final newline', original.subarray(0, -2)],
+    ['UTF-8 BOM', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), original])],
+    ['UTF-16', Buffer.from(original.toString(), 'utf16le')],
+    ['invalid UTF-8', Buffer.concat([original, Buffer.from([0xff])])],
+    ['NUL', Buffer.concat([original, Buffer.from([0])])],
+  ]) {
+    await t.test(name, async () => {
+      writeFileSync(path, bytes);
+      await assert.rejects(f.verify());
+      writeFileSync(path, original);
+    });
+  }
+  await f.verify();
+});
+
+test('NativeIdentity retains strict binary metadata and every C# byte and inventory guard', async t => {
+  const f = new NativeCheckoutFixture(t);
+  for (const path of f.paths.filter(path => path !== f.script)) {
+    await t.test(path, async () => {
+      const original = readFileSync(join(f.fixture.sourceRoot, path));
+      write(f.fixture.sourceRoot, path, Buffer.concat([original, Buffer.from('\r\n')]));
+      await assert.rejects(f.verify());
+      write(f.fixture.sourceRoot, path, original);
+    });
+  }
+  write(f.fixture.sourceRoot, 'bin/windows/unapproved.cs', 'unit only');
+  await assert.rejects(f.verify());
+  rmSync(join(f.fixture.sourceRoot, 'bin/windows/unapproved.cs'));
+  await f.verify();
+});
+
+test('NativeIdentity checks the committed script and committed attributes, not a replacement working file', async t => {
+  const f = new NativeCheckoutFixture(t);
+  const original = readFileSync(join(f.fixture.sourceRoot, f.script));
+  write(f.fixture.sourceRoot, f.script, Buffer.concat([f.blob, Buffer.from('# changed source\n')]));
+  f.index(f.script);
+  f.request.commit = f.git(['write-tree']).toString().trim();
+  write(f.fixture.sourceRoot, f.script, original);
+  await assert.rejects(f.verify());
+  write(f.fixture.sourceRoot, f.script, f.blob);
+  f.index(f.script);
+  write(f.fixture.sourceRoot, f.script, original);
+  for (const attributes of ['-text eol=crlf', 'text eol=lf', 'text eol=crlf filter=custom',
+    'text eol=crlf working-tree-encoding=UTF-16', 'text eol=crlf ident']) {
+    write(f.fixture.sourceRoot, '.gitattributes', `*.ps1 ${attributes}\n`);
+    f.index('.gitattributes');
+    f.request.commit = f.git(['write-tree']).toString().trim();
+    write(f.fixture.sourceRoot, '.gitattributes', '*.ps1 text eol=crlf\n');
+    await assert.rejects(f.verify());
+  }
+});
+
+test('NativeIdentity rejects noncanonical immutable script encodings even when checkout bytes agree', async t => {
+  const f = new NativeCheckoutFixture(t);
+  for (const bytes of [
+    Buffer.from([0xff]), Buffer.from([0xef, 0xbb, 0xbf, 0x61]),
+    Buffer.from('unit', 'utf16le'), Buffer.from('unit\r\n'), Buffer.from('unit\0'),
+  ]) {
+    write(f.fixture.sourceRoot, f.script, bytes);
+    f.index(f.script);
+    f.tree = f.git(['write-tree']).toString().trim();
+    f.request.commit = f.tree;
+    await assert.rejects(f.verify());
+  }
+});
+
+test('NativeIdentity refuses local attributes that mask changed committed attributes', async t => {
+  const f = new NativeCheckoutFixture(t);
+  write(f.fixture.sourceRoot, '.gitattributes', '*.ps1 text eol=lf\n');
+  f.index('.gitattributes');
+  f.request.commit = f.git(['write-tree']).toString().trim();
+  write(f.fixture.sourceRoot, '.git/info/attributes', '*.ps1 text eol=crlf\n');
+  await assert.rejects(f.verify());
+});
+
 test('legacy uses LEGACY_REF, not current baseline; incomplete reachable history fails', async t => {
   const f = fixture(t);
   f.request.version = '1.3.1';
+  rmSync(join(f.sourceRoot, 'bin/windows/src/PoolingNativeFiles.cs'));
   const identity = await verifyNativeIdentity(f.request, { run: gitRunner(f, { missing: true }) });
   assert.equal(identity.baselineCommit, LEGACY_REF);
   const base = gitRunner(f);
@@ -429,6 +598,27 @@ test('Windows execution requires baseline bytes, both lanes, real test names, an
   }
   write(f.extractedRoot, nativePaths[0], 'different tarball helper');
   assert.throws(() => verifyWindowsExecution(request, f.nativeIdentity));
+});
+
+test('Native inventory finalizer accepts the real five legacy paths and rejects baseline substitution', t => {
+  const f = fixture(t);
+  const currentOnly = 'bin/windows/src/PoolingNativeFiles.cs';
+  f.request.version = '1.3.1';
+  f.nativeIdentity.baselineCommit = LEGACY_REF;
+  f.nativeIdentity.files = f.nativeIdentity.files.filter(file => file.path !== currentOnly);
+  for (const root of [f.sourceRoot, f.extractedRoot]) rmSync(join(root, currentOnly));
+  const request = artifactRequest(f);
+  for (const lane of request.matrix.consumerLanes) lane.result.version = '1.3.1';
+  assert.equal(f.nativeIdentity.files.filter(file => file.path.startsWith('bin/windows/')).length, 5);
+  const verified = verifyWindowsExecution(request, f.nativeIdentity);
+  assert.equal(verified.length, 2);
+  assert.ok(verified.every(report => report.files.length === 5));
+  assert.throws(() => verifyWindowsExecution(request, { ...f.nativeIdentity, baselineCommit: CURRENT_REF }));
+  for (const files of [f.nativeIdentity.files.slice(1),
+    [...f.nativeIdentity.files, { path: 'bin/windows/unapproved.cs', sha256: hash('extra') }],
+    f.nativeIdentity.files.map((file, index) => index ? file : { ...file, sha256: hash('changed') })]) {
+    assert.throws(() => verifyWindowsExecution(request, { ...f.nativeIdentity, files }));
+  }
 });
 
 test('T32 requires supplied actual command result, four ordered replacements and both approved artifacts', t => {

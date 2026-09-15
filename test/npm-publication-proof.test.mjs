@@ -62,9 +62,10 @@ test('T12/T44: hashes alone never complete provenance verification or authorize 
   assert.equal(result.ownerPublicationApproval, 'not-performed');
 });
 
-for (const version of ['1.3.1', '2.0.1']) {
-  test(`staged proof retains the complete npm publication ref for ${version}`, async () => {
-    const f = fixture(version, 'npm/');
+for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
+  ['npm/', 'npm-r2/'].map(namespace => ({ version, namespace })))) {
+  test(`staged proof retains the complete ${namespace} publication ref for ${version}`, async () => {
+    const f = fixture(version, namespace);
     let calls = 0;
     const verifyBundle = async (_bundle, options) => {
       calls++;

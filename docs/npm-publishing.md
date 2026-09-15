@@ -9,7 +9,7 @@ a version, approve a stage, change a dist-tag, or configure an account or trust.
 1. Commit this workflow and its tools in each candidate. Put the workflow on the
    default branch too, so GitHub permits manual dispatch. Create an approved
    annotated publication tag on the exact green source commit. For each supported
-   version, only `v<version>` and `npm/v<version>` are accepted.
+   version, only `v<version>`, `npm/v<version>` and `npm-r2/v<version>` are accepted.
 2. Required source CI is `.github/workflows/ci.yml`, an exact successful **push**
    run/attempt, including lockfiles, all Windows/Linux/macOS Node 20/22/24 test
    jobs, UI, and every additional job. Skipped or missing required jobs fail.
@@ -44,16 +44,21 @@ older code from a newer workflow.
 
 ### Separate publication tags
 
-Use `npm/v1.3.1` and `npm/v2.0.1` when preparing the same unpublished package
-versions after publishing-tool repairs. Keep existing GitHub release tags and
-releases unchanged. Each new publication tag needs explicit approval and points
-to its own green commit containing the workflow and tools that actually run.
-Do not move a release tag or reuse an approval for a different tag object.
+Use `npm/v1.3.1` and `npm/v2.0.1` for the first separate publication sources.
+If those tags already exist when publishing-tool repairs are needed, use the
+new immutable `npm-r2/v1.3.1` and `npm-r2/v2.0.1` sources. Keep all existing
+tags and GitHub releases unchanged, even when preparation failed. Each new
+publication tag needs explicit approval and points to its own green commit
+containing the workflow and tools that actually run. Do not reuse an approval
+for a different tag object.
 
-The complete ref, including `npm/`, remains bound through source checkout, CI,
+The complete ref, including its namespace, remains bound through source checkout, CI,
 consumer artifacts, peer transfer, protected-environment tag policy and staged
 provenance. A source bundle from `v<version>` cannot be relabeled as one from
-`npm/v<version>`. Prepare fresh artifacts for the new source; package versions
+`npm/v<version>` or `npm-r2/v<version>`, nor can an `npm/` source bundle become
+an `npm-r2/` bundle. The protected environment must explicitly allow the exact
+new tags; approval for an older tag is not sufficient. Prepare fresh artifacts
+for the new source; package versions
 and the derived `latest`/`legacy` npm channels do not change. Existing registry
 versions remain immutable, including when only the publisher tools changed.
 
@@ -70,7 +75,7 @@ Preparation approval fields:
   "schemaVersion": 1,
   "name": "mcp-pacemaker",
   "version": "1.3.1",
-  "ref": "refs/tags/npm/v1.3.1",
+  "ref": "refs/tags/npm-r2/v1.3.1",
   "tagObject": "<approved 40-character annotated tag object>",
   "commit": "<approved 40-character commit>",
   "tree": "<approved 40-character tree>",
@@ -91,6 +96,15 @@ approved public coordinates; neither private names nor an ambient allowlist are
 silently accepted.
 
 ### Prepare workflow and exact artifacts
+
+Files under `bin/windows/` remain byte-identical to the immutable same-major
+baseline. The PowerShell build script separately verifies its committed bytes
+and its declared CRLF checkout form; code, encoding or attribute changes fail.
+Preparation does not rebuild the native helper.
+
+External gate failures expose only an allowlisted gate and fixed error code.
+Missing, malformed, oversized or unowned reports produce `report-unavailable`;
+raw transcripts and private review data are not printed or uploaded.
 
 Preparation has no OIDC permission and never stages. Its jobs run in this order:
 
@@ -135,7 +149,7 @@ provenance subject. Supply this additional prepare approval field:
     "runAttempt": 1,
     "manifestSha256": "<opposite prepared.json SHA256>",
     "version": "<opposite patch: 1.3.1 or 2.0.1>",
-    "ref": "<opposite approved refs/tags/npm/vVERSION or refs/tags/vVERSION>",
+    "ref": "<opposite exact approved publication tag ref>",
     "tagObject": "<opposite annotated tag object>",
     "commit": "<opposite source commit>",
     "tree": "<opposite source tree>",

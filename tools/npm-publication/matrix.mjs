@@ -432,11 +432,14 @@ function nativeTap(stdout) {
   return counts;
 }
 
-function helperFiles(inspection) {
+function helperFiles(inspection, version) {
+  assert.ok(['1.3.1', '2.0.1'].includes(version));
   const files = inspection.files.filter(file => file.path.startsWith('bin/windows/'));
-  assert.ok(files.some(file => file.path === 'bin/windows/PoolingSecurityHelper.exe'));
-  assert.ok(files.some(file => file.path === 'bin/windows/PoolingSecurityHelper.build.json'));
-  assert.ok(files.length >= 6);
+  const paths = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
+    'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs',
+    'bin/windows/src/PoolingSecurityReader.cs'];
+  if (version === '2.0.1') paths.push('bin/windows/src/PoolingNativeFiles.cs');
+  assert.deepEqual(files.map(file => file.path).sort(), paths.sort());
   return files.map(({ path, sha256: hash }) => ({ path, sha256: hash }));
 }
 
@@ -483,7 +486,7 @@ export async function runMatrix({
   });
   let nativeWindows = { status: 'not-applicable', reason: 'Not a Windows runner' };
   if (lane.platform === 'win32') {
-    const files = helperFiles(bundle.inspection);
+    const files = helperFiles(bundle.inspection, approval.version);
     for (const file of files) {
       assert.equal(sha256(readFileSync(join(root, file.path))), file.sha256,
         'Checkout helper bytes differ from the tarball');
@@ -565,7 +568,7 @@ export async function verifyMatrixReports({ directory, approval, prepared, env, 
     if (lane.platform === 'win32') {
       const native = report.nativeWindows;
       assert.equal(native.status, 'actual-windows-execution');
-      assert.deepEqual(native.files, helperFiles(bundle.inspection));
+      assert.deepEqual(native.files, helperFiles(bundle.inspection, approval.version));
       assert.equal(native.rebuild, 'not-performed');
       assert.equal(native.ordinaryDesktopToken, 'not-proven');
       assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
