@@ -221,9 +221,8 @@ for (const version of ['1.3.1', '2.0.1']) {
 }
 
 for (const version of ['1.3.1', '2.0.1']) {
-  for (const namespaces of [
-    { current: 'npm/', peer: 'npm/' }, { current: 'npm/', peer: '' }, { current: '', peer: 'npm/' },
-  ]) {
+  for (const namespaces of ['', 'npm/', 'npm-r2/'].flatMap(current =>
+    ['', 'npm/', 'npm-r2/'].map(peer => ({ current, peer })))) {
     test(`peer transfer preserves exact refs: ${version} ${JSON.stringify(namespaces)}`, async t => {
       const f = new Fixture(t, version, tmpdir(), namespaces);
       assert.deepEqual(validatePeerApproval(f.approval, f.env), f.peer);
@@ -238,13 +237,15 @@ for (const version of ['1.3.1', '2.0.1']) {
   }
 }
 
-test('peer approval cannot relabel an existing source artifact into the npm namespace', t => {
-  const f = new Fixture(t);
-  f.peer.ref = `refs/tags/npm/v${f.peer.version}`;
-  assert.throws(() => validatePeerBundle(f.bundle()));
-  f.tagRef.ref = f.peer.ref;
-  f.tag.tag = `npm/v${f.peer.version}`;
-  assert.throws(() => validatePeerBundle(f.bundle()));
+test('peer approval cannot relabel an existing source artifact into another publication namespace', t => {
+  for (const namespace of ['npm/', 'npm-r2/']) {
+    const f = new Fixture(t);
+    f.peer.ref = `refs/tags/${namespace}v${f.peer.version}`;
+    assert.throws(() => validatePeerBundle(f.bundle()));
+    f.tagRef.ref = f.peer.ref;
+    f.tag.tag = `${namespace}v${f.peer.version}`;
+    assert.throws(() => validatePeerBundle(f.bundle()));
+  }
 });
 
 test('missing peer explains the non-circular next prepare and writes nothing', async t => {

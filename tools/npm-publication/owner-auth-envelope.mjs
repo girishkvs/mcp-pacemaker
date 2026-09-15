@@ -1,6 +1,7 @@
 import {
   constants, createCipheriv, createHash, createPublicKey, publicEncrypt, randomBytes,
 } from 'node:crypto';
+import { publicationTagName } from './policy.mjs';
 
 /*
  * API: new OwnerAuthEnvelope({ spki, sha256 }).seal(context, url).
@@ -159,12 +160,11 @@ export class OwnerAuthEnvelope {
 
   #validateContext(context) {
     const value = this.#readFields(context, CONTEXT_FIELDS);
+    publicationTagName(value.ref, value.version);
     const hasExpectedPackage = value.repository === 'girishkvs/mcp-pacemaker' &&
       value.owner === 'girishkvs' &&
       value.name === 'mcp-pacemaker' &&
       value.version === '2.0.1';
-    const hasAllowedRef = value.ref === 'refs/tags/npm/v2.0.1' ||
-      value.ref === 'refs/tags/v2.0.1';
     const hasAllowedRun = typeof value.runId === 'string' &&
       value.runId.length > 0 &&
       value.runId.length <= 20 &&
@@ -181,7 +181,6 @@ export class OwnerAuthEnvelope {
     const isPublish = value.sequence === 2 &&
       value.kind === 'publish-2fa';
     const isAllowedContext = hasExpectedPackage &&
-      hasAllowedRef &&
       hasAllowedRun &&
       hasValidBinding &&
       (isLogin || isPublish);
