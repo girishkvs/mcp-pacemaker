@@ -20,7 +20,7 @@ import { ownerState, atomicJson, readJsonFile } from '../tools/npm-publication/o
 import { validateVerificationRequest } from '../tools/npm-publication/publish-bootstrap.mjs';
 import { verificationRequest } from '../tools/npm-publication/owner-process.mjs';
 import { EventEmitter } from 'node:events';
-import './npm-owner-auth-envelope.test.mjs';
+import './helpers/npm-owner-auth-envelope-checks.mjs';
 import { registryResource, anonymousBytes, verifyPublishedEvidence, auditCoverage } from '../tools/npm-publication/published-proof.mjs';
 import { registryInstallArguments, publishedConsumerGraph, exactInstalledFiles, withPublishedConsumer,
   requireAnonymousHosted, smokePublishedConsumer } from '../tools/npm-publication/published-consumer.mjs';
@@ -982,15 +982,20 @@ test('post-publication unit: fresh consumer runs audit before package code, neve
   let project;
   const outer = ownedDirectory();
   try {
+    const longTemp = join(outer.dir, 'long-published-consumer-'.repeat(6));
+    mkdirSync(longTemp);
     const result = await withPublishedConsumer({
       record: f.record, tarball: f.tarball, cli: 'unit-only-pinned-cli',
-      env: { PATH: process.env.PATH, RUNNER_TEMP: outer.dir, GITHUB_TOKEN: 'unit-only-reader',
+      env: { PATH: process.env.PATH, RUNNER_TEMP: longTemp, GITHUB_TOKEN: 'unit-only-reader',
         NODE_AUTH_TOKEN: 'unit-only-forbidden', NPM_TOKEN: 'unit-only-forbidden', NODE_OPTIONS: 'unit-only-forbidden' },
       executor: (_file, args, options) => {
         project = options.cwd;
         for (const key of ['GITHUB_TOKEN', 'NODE_AUTH_TOKEN', 'NPM_TOKEN', 'NODE_OPTIONS']) {
           assert.equal(options.env[key], undefined);
         }
+        assert.equal(options.env.TMPDIR, join(options.env.HOME, 'tmp'));
+        assert.equal(options.env.TMP, options.env.TMPDIR);
+        assert.equal(options.env.TEMP, options.env.TMPDIR);
         assert.equal(readFileSync(options.env.npm_config_userconfig, 'utf8'), '');
         assert.equal(readFileSync(options.env.npm_config_globalconfig, 'utf8'), '');
         if (args[1] === '--version') return { stdout: POLICY.npm };

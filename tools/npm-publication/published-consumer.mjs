@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { POLICY, digest, sameDigests } from './policy.mjs';
 import { execute, isolatedConsumerEnvironment } from './matrix.mjs';
-import { temporaryEnvironment } from './gate-environment.mjs';
 import { registryResource, JSON_LIMIT } from './published-proof.mjs';
 import { inspectTarball } from './tarball.mjs';
 import { ownedDirectory, removeOwnedDirectory } from '../compatibility/fixtures.mjs';
@@ -115,8 +114,7 @@ export async function withPublishedConsumer({
     fs.mkdirSync(project, { mode: 0o700 });
     fs.mkdirSync(home, { mode: 0o700 });
     assert.deepEqual(fs.readdirSync(project), []);
-    const child = { ...isolatedConsumerEnvironment(env, home),
-      ...temporaryEnvironment(fs.realpathSync.native(env.RUNNER_TEMP)) };
+    const child = isolatedConsumerEnvironment(env, home);
     if (env.RUNNER_TRACKING_ID) child.RUNNER_TRACKING_ID = env.RUNNER_TRACKING_ID;
     const options = { cwd: project, env: child, timeout: 6 * 60_000, maxBuffer: JSON_LIMIT };
     assert.equal(executor(process.execPath, [cli, '--version'], options).stdout.trim(), POLICY.npm);

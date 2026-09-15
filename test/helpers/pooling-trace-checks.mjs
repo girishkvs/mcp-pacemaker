@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 import { PoolingTrace, TRACE_MAX_BYTES, TRACE_MAX_EVENTS, TRACE_MAX_LINE_BYTES,
   traceErrorCode, validateTraceRecord } from '../../bin/pooling-trace.mjs';
@@ -87,6 +88,38 @@ class TraceFixture {
     capture.destination = join(this.directory, 'captured');
     return capture;
   }
+
+  settlementRecords() {
+    this.operation.record('request-start');
+    const base = this.records()[0];
+    const record = (event, thread, sequence, elapsedMs, extra = {}) =>
+      ({ ...base, event, thread, sequence, elapsedMs, remainingMs: 9000 - elapsedMs, ...extra });
+    return [
+      record('writer-send', 0, 1, 1, { method: 'stageApply', queued: 0, cold: true }),
+      record('worker-enter', 1, 1, 2, { method: 'stageApply', state: 0 }),
+      record('helper-start', 1, 2, 3, { action: 'inspect-access', call: 1, timeoutMs: 8997 }),
+      record('writer-expire', 0, 2, 9001, { expired: true, state: 4 }),
+      record('response', 0, 3, 9002, { status: 504 }),
+      record('helper-end', 1, 3, 9003, { action: 'inspect-access', call: 1,
+        helperPid: process.pid, exit: null, code: 'ETIMEDOUT' }),
+      record('worker-error', 1, 4, 9004, { code: 'WRITER_DEADLINE', state: 4 }),
+      record('writer-result', 0, 4, 9005, { code: 'WRITER_DEADLINE', state: 4 }),
+    ];
+  }
+
+  writeSettlement(records) {
+    const files = new Map();
+    for (const record of records) {
+      validateTraceRecord(record);
+      const name = `${record.pid}-${record.thread}.jsonl`;
+      files.set(name, (files.get(name) ?? '') + JSON.stringify(record) + '\n');
+    }
+    for (const [name, text] of files) fs.writeFileSync(join(this.source, name), text);
+  }
+
+  child() {
+    return Object.assign(new EventEmitter(), { pid: process.pid, exitCode: null, signalCode: null });
+  }
 }
 
 for (const event of ['writer-expire', 'writer-result']) {
@@ -120,6 +153,138 @@ test('deadline trace rejects cancellation and missing deadline evidence', (t) =>
   records[0].expired = false;
   assert.throws(() => fixture.deadlineResponse(records));
   assert.throws(() => fixture.deadlineResponse(records.slice(1)));
+});
+
+for (const [event, field, value] of [
+  ['helper-start', 'operation', '00000000-0000-4000-8000-000000000000'],
+  ['helper-start', 'thread', 2],
+  ['helper-end', 'operation', '00000000-0000-4000-8000-000000000000'],
+  ['helper-end', 'pid', 0],
+  ['helper-end', 'thread', 2],
+  ['helper-end', 'call', 2],
+  ['helper-end', 'action', 'stage'],
+  ['helper-end', 'sequence', 5],
+  ['helper-end', 'elapsedMs', 2],
+  ['worker-error', 'thread', 2],
+  ['worker-error', 'sequence', 1],
+  ['writer-result', 'pid', 0],
+  ['writer-result', 'thread', 2],
+  ['writer-result', 'sequence', 1],
+  ['writer-result', 'elapsedMs', 9003],
+  ['writer-send', 'pid', 0],
+  ['worker-enter', 'method', 'apply'],
+]) {
+  test(`settlement capture rejects mismatched ${event} ${field}`, (t) => {
+    const fixture = new TraceFixture(t);
+    const capture = fixture.capture();
+    const records = fixture.settlementRecords();
+    assert.equal(capture.settled(records, process.pid), true);
+    records.find((record) => record.event === event)[field] = value;
+    assert.equal(capture.settled(records, process.pid), false);
+  });
+}
+
+test('settlement capture requires every helper and both worker and parent completion records', (t) => {
+  const fixture = new TraceFixture(t);
+  const capture = fixture.capture();
+  const records = fixture.settlementRecords();
+  for (const event of ['helper-start', 'helper-end', 'worker-error', 'writer-result', 'writer-send']) {
+    assert.equal(capture.settled(records.filter((record) => record.event !== event), process.pid), false);
+  }
+  for (const event of ['helper-start', 'helper-end', 'worker-error', 'writer-result', 'writer-send']) {
+    assert.equal(capture.settled([...records, records.find((record) => record.event === event)], process.pid), false);
+  }
+  assert.equal(capture.settled(records, process.pid + 1), false);
+  assert.equal(capture.settled(records.filter((record) => !record.event.startsWith('helper-')), process.pid), true);
+});
+
+test('settlement capture observes late helper and worker records before teardown without changing the original failure', async (t) => {
+  const fixture = new TraceFixture(t);
+  const capture = fixture.capture();
+  const child = fixture.child();
+  const records = fixture.settlementRecords();
+  fixture.writeSettlement(records.slice(0, 5));
+  let completed = false;
+  const observed = capture.settle(child).then((value) => { completed = true; return value; });
+  await nextTurn();
+  assert.equal(completed, false, 'The 504 response alone cannot finish observation.');
+  fixture.writeSettlement(records.slice(0, 6));
+  await nextTurn();
+  assert.equal(completed, false, 'Helper completion alone cannot finish observation.');
+  fixture.writeSettlement(records);
+  const original = new Error('original 504 versus 202 assertion');
+  await assert.rejects(async () => {
+    try {
+      throw original;
+    } finally {
+      assert.equal(await observed, true);
+      capture.finish();
+    }
+  }, (error) => error === original);
+  assert.equal(child.listenerCount('exit'), 0);
+  const artifact = JSON.parse(fixture.diagnostics[0].slice('POOLING_TRACE '.length));
+  assert.deepEqual(artifact.issues, []);
+  assert.equal(capture.settled(artifact.records, process.pid), true);
+  assert.equal(artifact.capture, 'unsealed');
+});
+
+for (const reason of ['timeout', 'process-exited', 'failed']) {
+  test(`settlement capture reports ${reason} without losing partial evidence or the original failure`, async (t) => {
+    const fixture = new TraceFixture(t);
+    const capture = fixture.capture();
+    const child = fixture.child();
+    const records = fixture.settlementRecords().slice(0, 5);
+    fixture.writeSettlement(records);
+    if (reason === 'failed') {
+      t.mock.method(capture.artifacts, 'readRecords', () => { throw new Error('private-observer-error'); });
+    }
+    const observed = capture.settle(child, 50);
+    if (reason === 'process-exited') child.emit('exit', 1);
+    const original = new Error('original operation failure');
+    await assert.rejects(async () => {
+      try {
+        throw original;
+      } finally {
+        assert.equal(await observed, false);
+        t.mock.restoreAll();
+        capture.finish();
+      }
+    }, (error) => error === original);
+    assert.equal(child.listenerCount('exit'), 0);
+    const text = fixture.diagnostics[0];
+    assert.equal(text.includes('private-observer-error'), false);
+    const artifact = validateTraceArtifact(JSON.parse(text.slice('POOLING_TRACE '.length)));
+    assert.deepEqual(artifact.issues, [`settlement-${reason}`]);
+    assert.equal(artifact.records.length, records.length);
+    assert.equal(capture.settled(artifact.records, process.pid), false);
+  });
+}
+
+test('settlement capture rejects bounds outside its teardown budget', async (t) => {
+  const fixture = new TraceFixture(t);
+  const capture = fixture.capture();
+  for (const timeout of [0, -1, 5001, Infinity, NaN]) {
+    await assert.rejects(capture.settle(fixture.child(), timeout), /observation bound/);
+  }
+});
+
+test('settlement capture reads final state at its bound when a filesystem notification is lost', async (t) => {
+  const fixture = new TraceFixture(t);
+  const capture = fixture.capture();
+  const records = fixture.settlementRecords();
+  let available = records.slice(0, 5);
+  t.mock.method(capture.artifacts, 'readRecords', () => ({ issues: [], records: available }));
+  let closed = 0;
+  t.mock.method(capture, 'observe', () =>
+    Object.assign(new EventEmitter(), { close: () => { closed++; } }));
+  const child = fixture.child();
+  const observed = capture.settle(child, 50);
+  // Change the readable state without emitting a filesystem event.
+  available = records;
+  assert.equal(await observed, true);
+  assert.equal(capture.settlementIssue, undefined);
+  assert.equal(child.listenerCount('exit'), 0);
+  assert.equal(closed, 1);
 });
 
 test('disabled pooling tracing writes nothing and cannot initialize a writer', (t) => {
@@ -627,14 +792,21 @@ for (const { target, fault } of cases) {
       assert.deepEqual(artifact.issues, []);
       const records = artifact.records;
       const response = fixture.deadlineResponse(records);
-      const helpers = records.filter((record) => record.event === 'helper-start');
+      assert.equal(fixture.capture(target).settled(records, response.pid), true,
+        'The trace must contain correlated helper, worker and parent settlement before teardown.');
+      const operation = records.filter((record) =>
+        record.operation === response.operation && record.pid === response.pid);
+      const helpers = operation.filter((record) => record.event === 'helper-start');
       if (fault === 'worker-start') {
         assert.equal(helpers.length, 0);
         assert.equal(artifact.files.pending.exists, false);
       } else {
         const selected = fault === 'first-helper' ? 1 : 4;
         assert.equal(helpers.length, selected);
-        const result = records.find((record) => record.event === 'helper-end' && record.call === selected);
+        const start = helpers[selected - 1];
+        const result = operation.find((record) => record.event === 'helper-end' &&
+          record.call === selected && record.thread === start.thread && record.action === start.action);
+        assert.ok(result, 'The timed-out helper must record its completion before teardown.');
         assert.equal(result.code, 'ETIMEDOUT');
         assert.ok(result.helperPid > 0);
         assert.equal(artifact.files.pending.exists, fault === 'post-stage');

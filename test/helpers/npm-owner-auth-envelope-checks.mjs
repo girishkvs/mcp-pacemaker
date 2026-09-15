@@ -1,10 +1,11 @@
+// Imported by the explicitly registered npm-publication-proof.test.mjs suite.
 import assert from 'node:assert/strict';
 import {
   constants, createDecipheriv, createHash, createPublicKey, generateKeyPairSync,
   privateDecrypt, randomBytes,
 } from 'node:crypto';
 import { before, test } from 'node:test';
-import * as envelopeModule from '../tools/npm-publication/owner-auth-envelope.mjs';
+import * as envelopeModule from '../../tools/npm-publication/owner-auth-envelope.mjs';
 
 const { OwnerAuthEnvelope } = envelopeModule;
 const CONTEXT_FIELDS = [
