@@ -221,8 +221,8 @@ for (const version of ['1.3.1', '2.0.1']) {
 }
 
 for (const version of ['1.3.1', '2.0.1']) {
-  for (const namespaces of ['', 'npm/', 'npm-r2/', 'npm-r3/'].flatMap(current =>
-    ['', 'npm/', 'npm-r2/', 'npm-r3/'].map(peer => ({ current, peer })))) {
+  for (const namespaces of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/'].flatMap(current =>
+    ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/'].map(peer => ({ current, peer })))) {
     test(`peer transfer preserves exact refs: ${version} ${JSON.stringify(namespaces)}`, async t => {
       const f = new Fixture(t, version, tmpdir(), namespaces);
       assert.deepEqual(validatePeerApproval(f.approval, f.env), f.peer);
@@ -238,7 +238,7 @@ for (const version of ['1.3.1', '2.0.1']) {
 }
 
 test('peer approval cannot relabel an existing source artifact into another publication namespace', t => {
-  for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/']) {
+  for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/']) {
     const f = new Fixture(t);
     f.peer.ref = `refs/tags/${namespace}v${f.peer.version}`;
     assert.throws(() => validatePeerBundle(f.bundle()));
