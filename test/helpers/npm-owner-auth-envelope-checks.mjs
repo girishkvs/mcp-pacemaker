@@ -150,7 +150,7 @@ test('roundtrips exact URL and ordered context using literal AAD and empty OAEP 
 
 test('supports allowed refs and both exact sequence-kind pairs', () => {
   for (const ref of ['refs/tags/npm/v2.0.1', 'refs/tags/v2.0.1',
-    'refs/tags/npm-r2/v2.0.1', 'refs/tags/npm-r3/v2.0.1']) {
+    'refs/tags/npm-r2/v2.0.1', 'refs/tags/npm-r3/v2.0.1', 'refs/tags/npm-r4/v2.0.1']) {
     for (const [sequence, kind] of [[1, 'login'], [2, 'publish-2fa']]) {
       const context = fixture.context({ ref, sequence, kind });
       const result = fixture.decrypt(fixture.envelope.seal(context, fixture.url));
@@ -317,7 +317,8 @@ test('rejects wrong package, ref, version, run, sequence-kind, and key binding',
     ...['refs/heads/main', 'refs/tags/v2.0.0', 'refs/tags/npm/v2.0.1\n',
       'v2.0.1', 'refs/tags/npm/v2.0.10', 'refs/tags/npm-r2/v1.3.1',
       'refs/tags/npm-r2/v2.0.1-extra', 'refs/tags/npm-r3/v1.3.1',
-      'refs/tags/npm-r3/v2.0.1-extra', 'refs/tags/npm-r4/v2.0.1',
+      'refs/tags/npm-r3/v2.0.1-extra', 'refs/tags/npm-r4/v1.3.1',
+      'refs/tags/npm-r4/v2.0.1-extra', 'refs/tags/npm-r5/v2.0.1',
       'x'.repeat(10000)].map(ref => ({ ref })),
     ...['0', '01', '-1', '+1', '1.0', '1e3', '1\n', ' 1', '1 ', '１２',
       '1'.repeat(21), 1, 1n].map(runId => ({ runId })),

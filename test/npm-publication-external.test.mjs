@@ -361,6 +361,23 @@ class NativeCheckoutFixture {
 }
 
 for (const version of ['2.0.1', '1.3.1']) {
+  for (const [autocrlf, eol] of [['false', 'lf'], ['false', 'crlf'], ['true', 'crlf']]) {
+    test(`Native source checkout preserves exact LF bytes: ${version}, autocrlf=${autocrlf}, eol=${eol}`, t => {
+      const f = new NativeCheckoutFixture(t, version);
+      const sources = f.paths.filter(path => path.endsWith('.cs'));
+      const bytes = Buffer.from('namespace CheckoutFixture\n{\n    internal sealed class NativeSource { }\n}\n');
+      write(f.fixture.sourceRoot, '.gitattributes', readFileSync(new URL('../.gitattributes', import.meta.url)));
+      f.index('.gitattributes');
+      for (const path of sources) {
+        write(f.fixture.sourceRoot, path, bytes);
+        f.index(path);
+        rmSync(join(f.fixture.sourceRoot, path));
+      }
+      f.git(['-c', `core.autocrlf=${autocrlf}`, '-c', `core.eol=${eol}`, 'checkout-index', '--', ...sources]);
+      for (const path of sources) assert.deepEqual(readFileSync(join(f.fixture.sourceRoot, path)), bytes, path);
+    });
+  }
+
   test(`NativeIdentity real Git checkout accepts only the declared build-script representation: ${version}`, async t => {
     const f = new NativeCheckoutFixture(t, version);
     const checkout = readFileSync(join(f.fixture.sourceRoot, f.script));

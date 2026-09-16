@@ -472,7 +472,7 @@ test('owner unit: actual current API run/job must be owner-only hosted original 
 test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
-    ['npm/', 'npm-r2/', 'npm-r3/'].map(namespace => ({ version, namespace })))) {
+    ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/'].map(namespace => ({ version, namespace })))) {
     const a = { ...approval, version, ref: `refs/tags/${namespace}v${version}` };
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
@@ -483,7 +483,7 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
     }, a, event));
     for (const ref of ['refs/heads/main', `refs/tags/${namespace}v${version}-other`,
-      `refs/tags/other/v${version}`, `refs/tags/npm-r4/v${version}`]) {
+      `refs/tags/other/v${version}`, `refs/tags/npm-r5/v${version}`]) {
       const invalid = { ...a, ref };
       const invalidEnv = { ...env, GITHUB_REF: ref,
         GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };
