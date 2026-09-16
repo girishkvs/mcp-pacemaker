@@ -9,8 +9,8 @@ a version, approve a stage, change a dist-tag, or configure an account or trust.
 1. Commit this workflow and its tools in each candidate. Put the workflow on the
    default branch too, so GitHub permits manual dispatch. Create an approved
    annotated publication tag on the exact green source commit. For each supported
-   version, only `v<version>`, `npm/v<version>`, `npm-r2/v<version>` and
-   `npm-r3/v<version>` are accepted.
+   version, only `v<version>`, `npm/v<version>`, `npm-r2/v<version>`,
+   `npm-r3/v<version>` and `npm-r4/v<version>` are accepted.
 2. Required source CI is `.github/workflows/ci.yml`, an exact successful **push**
    run/attempt, including lockfiles, all Windows/Linux/macOS Node 20/22/24 test
    jobs, UI, and every additional job. Skipped or missing required jobs fail.
@@ -48,7 +48,8 @@ older code from a newer workflow.
 Use `npm/v1.3.1` and `npm/v2.0.1` for the first separate publication sources.
 If those tags already exist when publishing-tool repairs are needed, use the
 new immutable `npm-r2/v1.3.1` and `npm-r2/v2.0.1` sources. If those also exist,
-use `npm-r3/v1.3.1` and `npm-r3/v2.0.1`. Keep all existing
+use `npm-r3/v1.3.1` and `npm-r3/v2.0.1`. Further repairs use
+`npm-r4/v1.3.1` and `npm-r4/v2.0.1`. Keep all existing
 tags and GitHub releases unchanged, even when preparation failed. Each new
 publication tag needs explicit approval and points to its own green commit
 containing the workflow and tools that actually run. Do not reuse an approval
@@ -57,7 +58,7 @@ for a different tag object.
 The complete ref, including its namespace, remains bound through source checkout, CI,
 consumer artifacts, peer transfer, protected-environment tag policy and staged
 provenance. A source bundle from `v<version>` cannot be relabeled as one from
-`npm/v<version>`, `npm-r2/v<version>` or `npm-r3/v<version>`. Bundles cannot
+`npm/v<version>`, `npm-r2/v<version>`, `npm-r3/v<version>` or `npm-r4/v<version>`. Bundles cannot
 move between these namespaces. The protected environment must explicitly allow the exact
 new tags; approval for an older tag is not sufficient. Prepare fresh artifacts
 for the new source; package versions
@@ -68,6 +69,10 @@ The source HTML checkout uses CRLF to reproduce the committed dashboard bytes
 on every build platform. Generated `ui/dist` files remain byte-preserved. CI
 rejects rebuilt dashboard or notice changes before compatibility testing; the
 publication source gate still requires the entire checkout to remain clean.
+
+Native C# source checkout uses LF on every platform so its raw bytes match the
+canonical tarball. The executable is unchanged; Windows consumer checks still
+compare every native file byte-for-byte before running the helper.
 
 ## Manual inputs
 
@@ -82,7 +87,7 @@ Preparation approval fields:
   "schemaVersion": 1,
   "name": "mcp-pacemaker",
   "version": "1.3.1",
-  "ref": "refs/tags/npm-r3/v1.3.1",
+  "ref": "refs/tags/npm-r4/v1.3.1",
   "tagObject": "<approved 40-character annotated tag object>",
   "commit": "<approved 40-character commit>",
   "tree": "<approved 40-character tree>",

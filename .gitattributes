@@ -19,6 +19,7 @@ ui/index.html text eol=crlf
 # Built dashboard assets are shipped exactly as produced (no line-ending conversion).
 ui/dist/** -text
 bin/windows/*.exe binary
+bin/windows/src/*.cs text eol=lf
 
 # Images are binary — never line-ending converted.
 *.png   binary
