@@ -100,7 +100,7 @@ test('T01/T20: only approved stable candidate versions map to fixed channels', (
 });
 
 for (const version of ['1.3.1', '2.0.1']) {
-  for (const namespace of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/']) {
+  for (const namespace of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/']) {
     test(`publication tag ${namespace}v${version} preserves approval, workflow and environment binding`, () => {
       const a = approval(version);
       a.ref = `refs/tags/${namespace}v${version}`;
@@ -109,7 +109,7 @@ for (const version of ['1.3.1', '2.0.1']) {
       assert.equal(validateApproval({ ...a, scope: 'prepare' }, 'prepare'), channelFor(version));
       const { env, event } = context(a);
       validateContext(env, event, a);
-      const otherRefs = ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/'].filter(value => value !== namespace)
+      const otherRefs = ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].filter(value => value !== namespace)
         .map(value => `refs/tags/${value}v${version}`);
       for (const other of otherRefs) {
         assert.throws(() => validateContext({ ...env, GITHUB_REF: other }, event, a));
@@ -143,7 +143,9 @@ test('publication tag approval rejects alternate refs and mismatched versions', 
     'refs/tags/npm-r3/v1.3.1', 'refs/tags/npm-r3/v2.0.1-extra', 'refs/tags/npm-r3/v2.0.1/other',
     'refs/tags/npm-r3//v2.0.1', 'refs/tags/npm-r3/../v2.0.1',
     'refs/tags/npm-r4/v1.3.1', 'refs/tags/npm-r4/v2.0.1-extra', 'refs/tags/npm-r4/v2.0.1/other',
-    'refs/tags/npm-r4//v2.0.1', 'refs/tags/npm-r4/../v2.0.1', 'refs/tags/npm-r5/v2.0.1', null]) {
+    'refs/tags/npm-r4//v2.0.1', 'refs/tags/npm-r4/../v2.0.1',
+    'refs/tags/npm-r5/v1.3.1', 'refs/tags/npm-r5/v2.0.1-extra', 'refs/tags/npm-r5/v2.0.1/other',
+    'refs/tags/npm-r5//v2.0.1', 'refs/tags/npm-r5/../v2.0.1', 'refs/tags/npm-r6/v2.0.1', null]) {
     assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved/);
   }
   assert.throws(() => publicationTagName('refs/tags/npm/v3.0.1', '3.0.1'));
@@ -241,7 +243,7 @@ test('T10/T11/T20: exact tarball submitted once with explicit final tag and no a
 
 test('npm publication refs preserve fixed npm channels during stage submission', async () => {
   for (const version of ['1.3.1', '2.0.1']) {
-    for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/']) {
+    for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/']) {
       const a = approval(version);
       a.ref = `refs/tags/${namespace}v${version}`;
       const s = submission(a);

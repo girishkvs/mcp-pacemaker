@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 import { POLICY, digest, publicationTagName, sameDigests, validatePackage, validateSource } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
+import { consumerSummary } from './gates.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const LIMIT = 128 * 1024 * 1024;
@@ -388,29 +389,9 @@ function consumerArgs(paths, approval, mode) {
     ...(mode === 'disabled' ? ['--ignore-scripts'] : [])];
 }
 
-function checkConsumer(result, lane, approval, hash, mode) {
-  assert.equal(result.name, POLICY.name);
-  assert.equal(result.version, approval.version);
-  assert.equal(result.sha256, hash);
-  assert.equal(result.node, `v${lane.node}`);
-  assert.equal(result.npm, lane.npm);
-  assert.equal(result.platform, lane.platform);
-  assert.equal(result.installScripts, mode);
-  assert.equal(result.producerLockCopied, false);
-  assert.equal(result.installedBin, true);
-  assert.equal(result.bridgeAndUi, true);
-  assert.equal(result.registrySignature, 'pending-publication');
-  assert.equal(result.provenance, 'not-verified-by-consumer-smoke');
-  assert.ok(Array.isArray(result.dependencies) &&
-    result.dependencies.length > 0);
-  for (const dependency of result.dependencies) {
-    assert.match(dependency.name ?? '', /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/);
-    assert.match(dependency.version ?? '', /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
-    assert.ok(dependency.integrity === null ||
-      typeof dependency.integrity === 'string' &&
-      /^sha(?:1|256|384|512)-[A-Za-z0-9+/]+={0,2}$/.test(dependency.integrity),
-    'Integrity must be an actual SRI or explicit unavailable value');
-  }
+function checkConsumer(result, lane, approval, artifact, mode) {
+  consumerSummary(result, { version: approval.version, artifact },
+    { node: `v${lane.node}`, npm: lane.npm }, lane.platform, mode);
 }
 
 function nativeTap(stdout) {
@@ -481,7 +462,7 @@ export async function runMatrix({
     const args = consumerArgs(paths, approval, mode);
     const output = invoke(paths.node, args);
     const result = JSON.parse(output.stdout);
-    checkConsumer(result, lane, approval, paths.sha256, mode);
+    checkConsumer(result, lane, approval, bundle.prepared.artifact, mode);
     return { mode, result, stdout: output.stdout, evidence: commandEvidence(command(args), output) };
   });
   let nativeWindows = { status: 'not-applicable', reason: 'Not a Windows runner' };
@@ -502,7 +483,7 @@ export async function runMatrix({
   assert.equal(sha256(readFileSync(join(root, 'package-lock.json'))), lockHash, 'Producer lock changed');
   sameDigests(digest(readFileSync(paths.tarball)), bundle.prepared.artifact);
   const report = {
-    schemaVersion: 1, phase: 'consumer-matrix', name: POLICY.name, version: approval.version,
+    schemaVersion: 2, phase: 'consumer-matrix', name: POLICY.name, version: approval.version,
     source: sourceTuple(approval), sourceArtifact: bundle.sourceArtifact,
     artifact: digest(readFileSync(paths.tarball)), workflow: workflowBinding(env),
     job: { key: 'consumers', name: lane.jobName },
@@ -533,7 +514,7 @@ export async function verifyMatrixReports({ directory, approval, prepared, env, 
     const files = await verifiedArchive(metadata, readers, join(directory, metadata.name));
     assert.deepEqual([...files.keys()], ['report.json'], 'Each matrix artifact must contain exactly one report');
     const report = JSON.parse(files.get('report.json').toString('utf8'));
-    assert.equal(report.schemaVersion, 1);
+    assert.equal(report.schemaVersion, 2, 'Fresh consumer matrix schema 2 is required');
     assert.equal(report.phase, 'consumer-matrix');
     assert.equal(report.name, POLICY.name);
     assert.equal(report.version, approval.version);
@@ -559,7 +540,7 @@ export async function verifyMatrixReports({ directory, approval, prepared, env, 
     assert.deepEqual(report.consumers.map(item => item.mode), MODES, 'Both consumer modes are required');
     for (const consumer of report.consumers) {
       assert.deepEqual(JSON.parse(consumer.stdout), consumer.result);
-      checkConsumer(consumer.result, lane, approval, prepared.artifact.sha256, consumer.mode);
+      checkConsumer(consumer.result, lane, approval, prepared.artifact, consumer.mode);
       checkEvidence(consumer.evidence, command(consumerArgs(paths, approval, consumer.mode)), consumer.stdout);
       consumerLanes.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
         mode: consumer.mode, result: consumer.result, evidence: consumer.evidence,

@@ -9,6 +9,7 @@ import {
 import { CompatibilityBridge } from '../../test/compat/bridge.mjs';
 import { verifyArtifacts } from '../third-party-notices/inventory.mjs';
 import { configurationText, consumerEnvironment, readConsumerConfiguration } from './environment.mjs';
+import { captureConsumerLicenseEvidence } from './license-evidence.mjs';
 
 export function consumerOptions(args) {
   const values = {};
@@ -46,7 +47,7 @@ export function consumerGraph(lock, name, version) {
   return Object.entries(lock.packages)
     .filter(([path]) => path.startsWith('node_modules/'))
     .map(([path, entry]) => ({
-      name: path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length),
+      path, name: path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length),
       version: entry.version, integrity: entry.integrity ?? null,
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -98,6 +99,7 @@ export async function checkConsumer(options) {
     assert.equal(readJson(join(project, 'package.json')).private, true);
     const lock = readJson(join(project, 'package-lock.json'));
     const graph = consumerGraph(lock, options.name, options.version);
+    const licenseEvidence = captureConsumerLicenseEvidence(project, graph);
     const localRoot = join(project, 'node_modules', options.name);
     assert.equal(readJson(join(localRoot, 'package.json')).name, options.name);
     consumerNoticeVersions(graph, verifyArtifacts(localRoot));
@@ -141,10 +143,10 @@ export async function checkConsumer(options) {
     });
     assert.equal(sha256(options.tarball), options.sha256, 'Candidate bytes changed during consumer validation');
     return {
-      name: options.name, version: options.version, sha256: options.sha256,
+      schemaVersion: 2, name: options.name, version: options.version, sha256: options.sha256,
       node: process.version, npm: (await npm(['--version'], { env })).trim(), platform: process.platform,
       installScripts: options.ignoreScripts ? 'disabled' : 'npm-default',
-      producerLockCopied: false, installedBin: true, bridgeAndUi: true, dependencies: graph,
+      producerLockCopied: false, installedBin: true, bridgeAndUi: true, dependencies: graph, licenseEvidence,
       registrySignature: 'pending-publication', provenance: 'not-verified-by-consumer-smoke',
     };
   } catch (error) {
