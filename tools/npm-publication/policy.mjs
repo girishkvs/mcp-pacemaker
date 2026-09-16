@@ -55,7 +55,7 @@ export function publicationTagName(ref, version) {
   channelFor(version);
   const tag = `v${version}`;
   assert.ok([`refs/tags/${tag}`, `refs/tags/npm/${tag}`,
-    `refs/tags/npm-r2/${tag}`, `refs/tags/npm-r3/${tag}`].includes(ref),
+    `refs/tags/npm-r2/${tag}`, `refs/tags/npm-r3/${tag}`, `refs/tags/npm-r4/${tag}`].includes(ref),
     'Publication requires the exact approved release or npm tag');
   return ref.slice('refs/tags/'.length);
 }
