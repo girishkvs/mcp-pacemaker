@@ -17,7 +17,7 @@ verification of already fetched evidence are separate.
    default branch too, so GitHub permits manual dispatch. Create an approved
    annotated publication tag on the exact green source commit. For each supported
    version, only `v<version>`, `npm/v<version>`, `npm-r2/v<version>`,
-   `npm-r3/v<version>` and `npm-r4/v<version>` are accepted.
+   `npm-r3/v<version>`, `npm-r4/v<version>` and `npm-r5/v<version>` are accepted.
 2. Required source CI is `.github/workflows/ci.yml`, an exact successful **push**
    run/attempt, including lockfiles, all Windows/Linux/macOS Node 20/22/24 test
    jobs, UI, and every additional job. Skipped or missing required jobs fail.
@@ -55,7 +55,9 @@ Use `npm/v1.3.1` and `npm/v2.0.1` for the first separate publication sources.
 If those tags already exist when publishing-tool repairs are needed, use the
 new immutable `npm-r2/v1.3.1` and `npm-r2/v2.0.1` sources. If those also exist,
 use `npm-r3/v1.3.1` and `npm-r3/v2.0.1`. Further repairs use
-`npm-r4/v1.3.1` and `npm-r4/v2.0.1`. Keep all existing
+`npm-r4/v1.3.1` and `npm-r4/v2.0.1`. The consumer license-evidence repair uses
+exactly `npm-r5/v1.3.1` and `npm-r5/v2.0.1`; r6, other versions and malformed
+or substituted identities are not supported. Keep all existing
 tags and GitHub releases unchanged, even when preparation failed. Each new
 publication tag needs explicit approval and points to its own green commit
 containing the workflow and tools that actually run. Do not reuse an approval
@@ -64,7 +66,7 @@ for a different tag object.
 The complete ref, including its namespace, remains bound through source checkout, CI,
 consumer artifacts, peer transfer, protected-environment tag policy and staged
 provenance. A source bundle from `v<version>` cannot be relabeled as one from
-`npm/v<version>`, `npm-r2/v<version>`, `npm-r3/v<version>` or `npm-r4/v<version>`. Bundles cannot
+`npm/v<version>`, `npm-r2/v<version>`, `npm-r3/v<version>`, `npm-r4/v<version>` or `npm-r5/v<version>`. Bundles cannot
 move between these namespaces. The protected environment must explicitly allow the exact
 new tags; approval for an older tag is not sufficient. Prepare fresh artifacts
 for the new source; package versions
@@ -120,7 +122,8 @@ baseline. The PowerShell build script separately verifies its committed bytes
 and its declared CRLF checkout form; code, encoding or attribute changes fail.
 Preparation does not rebuild the native helper.
 
-External gate failures expose only an allowlisted gate and fixed error code.
+External gate failures expose only an allowlisted gate, fixed error code and,
+for consumer/license evidence failures, a bounded reviewed diagnostic.
 Missing, malformed, oversized or unowned reports produce `report-unavailable`;
 raw transcripts and private review data are not printed or uploaded.
 
@@ -740,11 +743,65 @@ context**. Neither native gate may use a human-pending status.
 `licenses-notices` verifies the actual extracted UI/runtime notice artifacts:
 `THIRD_PARTY_NOTICES.txt`, `ui/dist/THIRD_PARTY_NOTICES.txt`,
 `ui/dist/third-party-manifest.json`, and candidate `LICENSE`. It also requires
-actual installed producer license declarations, texts and reviewed supplements
-covering **every exact name/version in all 12 independent consumer graphs**.
-A fresh/platform-specific consumer version absent from that evidence fails the
-gate and needs reviewed exact-version license evidence. Producer locks do not
-pin consumer resolutions; packed notice presence alone is not license coverage.
+**consumer result and matrix report schema 2** with embedded license-evidence
+schema 1, captured before each fresh local consumer install is removed. Every
+dependency path/name/version/integrity is bound to its installed `package.json`
+bytes and standalone license texts with SHA-256 hashes. Both script modes on
+all three platforms and both pinned npm toolchains carry these bytes in the
+original `report.json`; command stdout hashes and the official immutable ZIP
+digest bind them through matrix validation. The finalizer rechecks metadata,
+hashes, coverage, declarations and text markers. Candidate license evidence must
+match the canonical tarball; the tarball `LICENSE` remains authoritative.
+
+Producer version drift is not a license failure when the exact fresh consumer
+evidence passes review. Missing, conflicting, linked, tampered or unknown
+evidence still stops preparation. Repeated installed coordinates must agree in
+integrity and text and are counted explicitly. The exact reviewed Yoga
+supplement additionally requires the consumer integrity and reviewed source-file
+hashes to match the packed and independently reviewed supplement. An unknown
+Yoga version cannot reuse older text. No producer-install or producer-lock
+fallback can waive missing consumer evidence.
+
+Old schema-1 matrix artifacts, including immutable r4 runs, are not eligible
+under this repair and must not be rewritten or repacked. New repair source
+refs need fresh hosted runs. Local synthetic tests are not upstream license
+approval; fresh hosted upstream license bytes still need actual verification.
+Consumer/license failures retain only an allowlisted public coordinate/reason
+or a fixed recovery hint, at most 512 characters, in `error.reviewRequired`.
+`consumer-platforms` instructs the operator to verify all six immutable schema 2
+reports, both modes and exact source/artifact bindings; missing or changed
+evidence requires fresh consumers. `licenses-notices` preserves exact allowed
+coordinate reasons, otherwise instructs review of exact versions, hashes,
+declarations and canonical notices, without producer substitution or reuse of
+changed evidence. Raw stderr, paths, stdout, commands and private exception
+text are not replayed. The owned failure reader rechecks the gate-specific
+allowlist; the external report remains schema 1.
+
+Finalizers must retain each original `consumers[].result` unchanged, including:
+
+```text
+result.schemaVersion = 2
+result.dependencies[] = { path, name, version, integrity }
+result.licenseEvidence = {
+  schemaVersion: 1,
+  packages: [{
+    path, name, version, integrity,
+    packageJson: { path: "package.json", sha256, text },
+    files: [{ path, sha256, text }],
+    reviewedSources: [{ path, sha256 }]
+  }]
+}
+```
+
+`packages` matches dependency count and order, including the candidate.
+`reviewedSources` is empty except for exact reviewed supplement coordinates.
+`verifyMatrixReports` in `tools/npm-publication/matrix.mjs` is the shared
+authenticated entry point in both release lines; pass its full return value
+through the existing `matrix` request field. It verifies immutable archives,
+source/job/command bindings and evidence. The lower-level
+`validateConsumerLicenseEvidence` only checks evidence structure and bindings,
+not archive authenticity or license approval. Do not use it alone as a gate.
+
 `runtime-closure` separately checks extracted runtime paths and actual consumer
 installed-bin/bridge/UI evidence.
 

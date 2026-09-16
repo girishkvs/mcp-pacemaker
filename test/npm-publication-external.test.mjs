@@ -15,7 +15,9 @@ import {
 } from '../tools/npm-publication/external-gates.mjs';
 import { CONSUMER_TOOLCHAINS } from '../tools/npm-publication/gates.mjs';
 import { CURRENT_REF, LEGACY_REF } from '../tools/compatibility/fixtures.mjs';
-import { inspectRuntimeLicenses } from '../tools/npm-publication/runtime-licenses.mjs';
+import { inspectRuntimeLicenses, LICENSE_FAILURE_HINTS } from '../tools/npm-publication/runtime-licenses.mjs';
+import { fixtureLicenseEvidence, fixtureIntegrity, fixtureFile } from './fixtures/consumer-license-evidence.mjs';
+import { captureConsumerLicenseEvidence } from '../tools/npm-consumer/license-evidence.mjs';
 import {
   assertHostedScannerContext, installScanners, releaseExecutable, SCANNER_RELEASES,
 } from '../tools/npm-publication/install-scanners.mjs';
@@ -148,11 +150,15 @@ function matrixFixture(nativeIdentity) {
       matrix.artifactEvidence.push({ id: artifactId, jobId, runId: '42', attempt: 1,
         digest: `sha256:${hash(artifactId)}`, reportSha256: hash(jobId) });
       for (const mode of ['npm-default', 'disabled']) {
-        const result = { name: 'mcp-pacemaker', version: '2.0.1', sha256: artifact.sha256,
+        const dependencies = [
+          { path: 'node_modules/fixture-public', name: 'fixture-public', version: '1.0.0', integrity: fixtureIntegrity },
+          { path: 'node_modules/mcp-pacemaker', name: 'mcp-pacemaker', version: '2.0.1', integrity: artifact.integrity },
+        ];
+        const result = { schemaVersion: 2, name: 'mcp-pacemaker', version: '2.0.1', sha256: artifact.sha256,
           node: toolchain.node, npm: toolchain.npm, platform, installScripts: mode, producerLockCopied: false,
           installedBin: true, bridgeAndUi: true, registrySignature: 'pending-publication',
           provenance: 'not-verified-by-consumer-smoke',
-          dependencies: [{ name: 'fixture-public', version: '1.0.0', integrity: null }] };
+          dependencies, licenseEvidence: fixtureLicenseEvidence(dependencies) };
         matrix.consumerLanes.push({ platform, node: toolchain.node.slice(1), npm: toolchain.npm,
           mode, result, evidence: commandEvidence(['consumer:check'], JSON.stringify(result)), artifactId, jobId });
       }
@@ -225,6 +231,22 @@ function artifactRequest(f) {
       gates: { 'native-release-identity': { status: 'passed' } } } };
 }
 const fakeNotices = () => ({ runtimeNotices: [] });
+
+test('consumer exact-version license evidence repairs producer 0.3.0 versus consumer 0.3.1 drift', async t => {
+  const f = fixture(t);
+  write(f.sourceRoot, 'node_modules/@alcalzone/ansi-tokenize/package.json',
+    { name: '@alcalzone/ansi-tokenize', version: '0.3.0', license: 'MIT' });
+  write(f.sourceRoot, 'node_modules/@alcalzone/ansi-tokenize/LICENSE', mit);
+  const dependencies = [{ path: 'node_modules/@alcalzone/ansi-tokenize',
+    name: '@alcalzone/ansi-tokenize', version: '0.3.1', integrity: fixtureIntegrity }];
+  const consumer = { schemaVersion: 2, producerLockCopied: false, dependencies,
+    licenseEvidence: fixtureLicenseEvidence(dependencies) };
+  const report = await inspectRuntimeLicenses({
+    sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers: [consumer],
+    name: 'mcp-pacemaker', version: '2.0.1',
+  }, { verifyNotices: fakeNotices });
+  assert.equal(report.packages.find(pkg => pkg.name === '@alcalzone/ansi-tokenize').version, '0.3.1');
+});
 
 test('source combines actual injected git/scanner evidence; humans and missing policy never pass', async t => {
   const f = fixture(t);
@@ -548,6 +570,38 @@ test('all12 matrix rejects missing, duplicate, substituted hash/toolchain, or --
   }
 });
 
+test('consumer and license failures emit fixed recovery hints, never raw command output', async t => {
+  const f = fixture(t);
+  const privateOutput = 'PRIVATE-STDOUT C:\\private\\command --secret=synthetic\n::error::injected';
+  const injected = {
+    scanPublication: scanner, advisories: async () => ({ status: 'passed' }),
+    licenses: async () => { throw new Error(privateOutput); },
+    artifactFiles: async () => [],
+  };
+  for (const change of [
+    value => { delete value.matrix.consumerLanes[0].result.licenseEvidence; },
+    value => { value.matrix.consumerLanes[0].result.licenseEvidence.packages[0].files[0].text += privateOutput; },
+  ]) {
+    const request = artifactRequest(f);
+    change(request);
+    const report = await aggregateExternalGates(request, injected);
+    assert.equal(report.status, 'failed');
+    assert.equal(report.error.gate, 'consumer-platforms');
+    assert.equal(report.error.reviewRequired, LICENSE_FAILURE_HINTS['consumer-platforms']);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE-STDOUT|--secret|::error::/);
+  }
+  const report = await aggregateExternalGates(artifactRequest(f), injected);
+  assert.equal(report.status, 'failed');
+  assert.equal(report.error.gate, 'licenses-notices');
+  assert.equal(report.error.reviewRequired, LICENSE_FAILURE_HINTS['licenses-notices']);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE-STDOUT|--secret|::error::/);
+  const reviewRequired = 'Exact-version license review required: fixture-public@1.0.0 (no standalone license text)';
+  const exact = await aggregateExternalGates(artifactRequest(f), { ...injected,
+    licenses: async () => { throw new Error(reviewRequired); },
+  });
+  assert.equal(exact.error.reviewRequired, reviewRequired);
+});
+
 test('runtime closure needs the actual lazy writer, not only a version result', t => {
   const f = fixture(t);
   const request = artifactRequest(f);
@@ -663,7 +717,7 @@ test('T32 requires supplied actual command result, four ordered replacements and
   }
 });
 
-test('real installed license text covers exact graphs only; uninstalled version never uses producer lock', async t => {
+test('captured license text covers exact graphs only; changed graph never uses producer lock', async t => {
   const f = fixture(t);
   const consumers = normalizeMatrix(artifactRequest(f));
   const input = { sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers,
@@ -675,41 +729,158 @@ test('real installed license text covers exact graphs only; uninstalled version 
   assert.doesNotMatch(JSON.stringify(report), /Copyright Synthetic|publication-external-unit/);
   consumers[0].dependencies[0].version = '1.0.1';
   await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: fakeNotices }),
-    /Exact-version license review required: fixture-public@1.0.1/);
+    /Consumer license coordinate\/integrity mismatch/);
+});
+
+test('every lane requires new evidence; consistent duplicates are counted and conflicting bytes stop', async t => {
+  const f = fixture(t);
+  const input = { sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot,
+    consumers: normalizeMatrix(artifactRequest(f)), name: 'mcp-pacemaker', version: '2.0.1' };
+  for (let index = 0; index < 12; index++) {
+    const copy = structuredClone(input);
+    delete copy.consumers[index].licenseEvidence;
+    await assert.rejects(inspectRuntimeLicenses(copy, { verifyNotices: fakeNotices }));
+    const altered = structuredClone(input);
+    altered.consumers[index].licenseEvidence.packages[0].files[0] = fixtureFile('LICENSE', `${mit}\nDifferent text`);
+    await assert.rejects(inspectRuntimeLicenses(altered, { verifyNotices: fakeNotices }), /conflicting consumer evidence/);
+  }
+  const duplicate = { ...input.consumers[0].dependencies[0], path: 'node_modules/unit/node_modules/fixture-public' };
+  input.consumers[0].dependencies.push(duplicate);
+  input.consumers[0].licenseEvidence.packages.push({ ...structuredClone(input.consumers[0].licenseEvidence.packages[0]), path: duplicate.path });
+  const report = await inspectRuntimeLicenses(input, { verifyNotices: fakeNotices });
+  assert.equal(report.packages.find(pkg => pkg.name === 'fixture-public').consumerInstances, 13);
+  input.consumers[0].licenseEvidence.packages.at(-1).files[0] = fixtureFile('LICENSE', `${mit}\nConflict`);
+  await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: fakeNotices }), /Conflicting consumer license coordinate/);
+});
+
+test('canonical candidate LICENSE cannot be replaced by rehashed consumer evidence', async t => {
+  const f = fixture(t);
+  const consumers = normalizeMatrix(artifactRequest(f));
+  for (const consumer of consumers) {
+    consumer.licenseEvidence.packages[1].files[0] = fixtureFile('LICENSE', `${mit}\nSubstituted`);
+  }
+  await assert.rejects(inspectRuntimeLicenses({
+    sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers, name: 'mcp-pacemaker', version: '2.0.1',
+  }, { verifyNotices: fakeNotices }), /canonical tarball/);
 });
 
 test('unknown declaration, absent text, wrong text, and packed notice failure all block', async t => {
   const f = fixture(t);
   const input = { sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot,
     consumers: normalizeMatrix(artifactRequest(f)), name: 'mcp-pacemaker', version: '2.0.1' };
-  const path = 'node_modules/fixture-public/package.json';
-  write(f.sourceRoot, path, { name: 'fixture-public', version: '1.0.0', license: 'UNREVIEWED' });
+  const change = transform => {
+    for (const consumer of input.consumers) transform(consumer.licenseEvidence.packages[0]);
+  };
+  change(item => { item.packageJson = fixtureFile('package.json',
+    JSON.stringify({ name: 'fixture-public', version: '1.0.0', license: 'UNREVIEWED' })); });
   await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: fakeNotices }), /unknown or missing/);
-  write(f.sourceRoot, path, { name: 'fixture-public', version: '1.0.0', license: 'MIT' });
-  write(f.sourceRoot, 'node_modules/fixture-public/LICENSE', 'unrelated '.repeat(30));
+  change(item => {
+    item.packageJson = fixtureFile('package.json', JSON.stringify({ name: 'fixture-public', version: '1.0.0', license: 'MIT' }));
+    item.files = [fixtureFile('LICENSE', 'unrelated '.repeat(30))];
+  });
   await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: fakeNotices }), /text does not support/);
-  rmSync(join(f.sourceRoot, 'node_modules/fixture-public/LICENSE'));
+  change(item => { item.files = []; });
   await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: fakeNotices }), /no standalone license/);
   await assert.rejects(inspectRuntimeLicenses(input, { verifyNotices: () => { throw new Error('packed notices changed'); } }),
     /packed notices changed/);
 });
 
+test('ordered license markers preserve case, adjacency, order and alternate CC0 text', async t => {
+  const f = fixture(t);
+  const dependencies = [{ path: 'node_modules/fixture-public',
+    name: 'fixture-public', version: '1.0.0', integrity: fixtureIntegrity }];
+  for (const [license, valid, invalid] of [
+    ['Apache-2.0', ['APACHE LICENSE\n\tVERSION 2.0', 'Apache LicenseVersion 2.0',
+      'Version 2.0 Apache License Version 2.0'], ['Version 2.0 Apache License', 'Apache License Version 2.1']],
+    ['CC0-1.0', ['CC0', 'CREATIVE COMMONS\nUNIVERSAL', 'Universal Creative Commons Universal'],
+      ['Universal Creative Commons', 'Creative Commons']],
+  ]) {
+    for (const text of [...valid, ...invalid]) {
+      const consumer = { schemaVersion: 2, producerLockCopied: false, dependencies,
+        licenseEvidence: fixtureLicenseEvidence(dependencies) };
+      const item = consumer.licenseEvidence.packages[0];
+      item.packageJson = fixtureFile('package.json', JSON.stringify({ name: item.name, version: item.version, license }));
+      item.files = [fixtureFile('LICENSE', `${text}\n${'Synthetic text only. '.repeat(10)}`)];
+      const result = inspectRuntimeLicenses({
+        sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers: [consumer],
+        name: 'mcp-pacemaker', version: '2.0.1',
+      }, { verifyNotices: fakeNotices });
+      if (valid.includes(text)) await assert.doesNotReject(result);
+      else await assert.rejects(result, /text does not support declaration/);
+    }
+  }
+});
+
+for (const [license, prefix] of [['Apache-2.0', 'Apache License\n'], ['CC0-1.0', 'Creative Commons\n']]) {
+  test(`large incomplete ${license} license text rejects within a bounded process`, t => {
+    const f = fixture(t);
+    const script = `
+      import assert from 'node:assert/strict';
+      import { inspectRuntimeLicenses } from ${JSON.stringify(new URL('../tools/npm-publication/runtime-licenses.mjs', import.meta.url).href)};
+      import { fixtureLicenseEvidence, fixtureIntegrity, fixtureFile } from ${JSON.stringify(new URL('./fixtures/consumer-license-evidence.mjs', import.meta.url).href)};
+      const dependencies = [{ path: 'node_modules/fixture-public',
+        name: 'fixture-public', version: '1.0.0', integrity: fixtureIntegrity }];
+      const consumer = { schemaVersion: 2, producerLockCopied: false, dependencies,
+        licenseEvidence: fixtureLicenseEvidence(dependencies) };
+      const item = consumer.licenseEvidence.packages[0];
+      item.packageJson = fixtureFile('package.json', JSON.stringify({
+        name: item.name, version: item.version, license: ${JSON.stringify(license)} }));
+      const prefix = ${JSON.stringify(prefix)};
+      const text = prefix.repeat(Math.ceil(1024 * 1024 / prefix.length)).slice(0, 1024 * 1024);
+      item.files = [fixtureFile('LICENSE', text)];
+      await assert.rejects(inspectRuntimeLicenses({
+        sourceRoot: ${JSON.stringify(f.sourceRoot)}, extractedRoot: ${JSON.stringify(f.extractedRoot)},
+        consumers: [consumer], name: 'mcp-pacemaker', version: '2.0.1',
+      }, { verifyNotices: () => ({ runtimeNotices: [] }) }), /text does not support declaration/);
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+      timeout: 10_000, encoding: 'utf8', maxBuffer: 64 * 1024,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+  });
+}
+
 test('Yoga missing LICENSE is covered only by exact reviewed installed/packed supplement', async t => {
   const f = fixture(t);
   write(f.sourceRoot, 'node_modules/yoga-layout/package.json', { name: 'yoga-layout', version: '3.2.1', license: 'MIT' });
   const consumers = normalizeMatrix(artifactRequest(f));
-  for (const consumer of consumers) consumer.dependencies = [{ name: 'yoga-layout', version: '3.2.1', integrity: null }];
+  for (const consumer of consumers) {
+    consumer.dependencies = [{ path: 'node_modules/yoga-layout', name: 'yoga-layout', version: '3.2.1', integrity: fixtureIntegrity }];
+    consumer.licenseEvidence = fixtureLicenseEvidence(consumer.dependencies);
+    consumer.licenseEvidence.packages[0].files = [];
+  }
   const input = { sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot,
     consumers, name: 'mcp-pacemaker', version: '2.0.1' };
   const supplement = { name: 'yoga-layout', version: '3.2.1', license: 'MIT', distribution: 'separately-installed',
+    resolution: { integrity: fixtureIntegrity },
+    upstreamSourceSha256: Object.fromEntries(consumers[0].licenseEvidence.packages[0].reviewedSources.map(file => [file.path, file.sha256])),
     licenses: [{ file: 'upstream/yoga-LICENSE.txt', text: mit, sha256: hash(mit) }] };
   const options = { verifyNotices: () => ({ runtimeNotices: [supplement] }), readSupplements: () => [structuredClone(supplement)] };
   const report = await inspectRuntimeLicenses(input, options);
   assert.equal(report.packages.find(pkg => pkg.name === 'yoga-layout').source,
-    'reviewed-exact-installed-version-and-packed-supplement');
+    'reviewed-exact-consumer-version-and-packed-supplement');
+  const badSource = structuredClone(input);
+  for (const consumer of badSource.consumers) {
+    consumer.licenseEvidence.packages[0].reviewedSources[0].sha256 = '0'.repeat(64);
+  }
+  await assert.rejects(inspectRuntimeLicenses(badSource, options), /changed reviewed packed supplement/);
+  const badIntegrity = structuredClone(input);
+  for (const consumer of badIntegrity.consumers) {
+    consumer.dependencies[0].integrity = artifact.integrity;
+    consumer.licenseEvidence.packages[0].integrity = artifact.integrity;
+  }
+  await assert.rejects(inspectRuntimeLicenses(badIntegrity, options), /changed reviewed packed supplement/);
   await assert.rejects(inspectRuntimeLicenses(input, { ...options,
     readSupplements: () => [{ ...supplement, version: '3.2.2' }] }), /changed reviewed packed supplement/);
-  consumers[0].dependencies[0].version = '3.2.2';
+  for (const consumer of consumers) {
+    consumer.dependencies[0].version = '3.2.2';
+    consumer.licenseEvidence = fixtureLicenseEvidence(consumer.dependencies);
+    consumer.licenseEvidence.packages[0].files = [];
+  }
+  await assert.rejects(inspectRuntimeLicenses(input, options), /Exact-version license review required: yoga-layout@3.2.2/);
+  for (const consumer of consumers) consumer.licenseEvidence.packages[0].files = [fixtureFile('LICENSE', mit)];
   await assert.rejects(inspectRuntimeLicenses(input, options), /Exact-version license review required: yoga-layout@3.2.2/);
 });
 
@@ -782,10 +953,9 @@ test('owned external fixtures canonicalize real aliased temp parents', async t =
     const retainedDependency = join(f.root, 'retained-dependency');
     renameSync(dependency, retainedDependency);
     symlinkSync(retainedDependency, dependency, linkType);
-    await assert.rejects(inspectRuntimeLicenses({
-      sourceRoot: f.sourceRoot, extractedRoot: f.extractedRoot, consumers: normalizeMatrix(request),
-      name: 'mcp-pacemaker', version: '2.0.1',
-    }, { verifyNotices: fakeNotices }), /Linked installed dependency/);
+    assert.throws(() => captureConsumerLicenseEvidence(f.sourceRoot, [
+      { path: 'node_modules/fixture-public', name: 'fixture-public', version: '1.0.0', integrity: fixtureIntegrity },
+    ]), /Linked consumer package path/);
     assert.equal(readFileSync(join(retainedDependency, 'LICENSE'), 'utf8'), mit);
   });
 });

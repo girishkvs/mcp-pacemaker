@@ -13,6 +13,8 @@ import {
 import { POLICY, digest, sameDigests, validatePackage, validateGateStatus } from './policy.mjs';
 import { lockedCoordinates } from '../publication-scanners/advisories.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
+import { validateConsumerLicenseEvidence } from '../npm-consumer/license-evidence.mjs';
+import { safeLicenseDiagnostic } from './runtime-licenses.mjs';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const SOURCE_EXTERNAL = Object.freeze([
@@ -104,7 +106,10 @@ export function externalFailureSummary(owned, phase, binding) {
     const names = phase === 'source' ? SOURCE_EXTERNAL : ARTIFACT_EXTERNAL;
     assert.ok([...names, 'request-validation', 'scanner-adapter'].includes(report.error?.gate));
     assert.equal(report.error.code, 'external-gate-rejected');
-    return { gate: report.error.gate, code: 'external-gate-rejected' };
+    const reviewRequired = phase === 'artifact' ?
+      safeLicenseDiagnostic(report.error.reviewRequired, report.error.gate) : undefined;
+    return { gate: report.error.gate, code: 'external-gate-rejected',
+      ...(reviewRequired ? { reviewRequired } : {}) };
   } catch {
     return unavailable;
   }
@@ -156,6 +161,7 @@ export function externalGates(report, phase, binding) {
 }
 
 export function consumerSummary(value, binding, toolchain, platform, mode) {
+  const licenseEvidence = validateConsumerLicenseEvidence(value);
   assert.equal(value?.name, POLICY.name);
   assert.equal(value.version, binding.version);
   assert.equal(value.sha256, binding.artifact.sha256);
@@ -175,12 +181,16 @@ export function consumerSummary(value, binding, toolchain, platform, mode) {
       typeof item.version === 'string', 'Incomplete consumer dependency graph');
     assert.ok(item.integrity === null ||
       typeof item.integrity === 'string', 'Invalid consumer dependency integrity');
-    return { name: item.name, version: item.version, integrity: item.integrity };
+    return { path: item.path, name: item.name, version: item.version, integrity: item.integrity };
   });
+  const candidate = dependencies.filter(item => item.name === POLICY.name);
+  assert.equal(candidate.length, 1, 'Expected one canonical consumer candidate');
+  assert.equal(candidate[0].version, binding.version);
+  assert.equal(candidate[0].integrity, binding.artifact.integrity, 'Consumer candidate integrity mismatch');
   return {
-    name: value.name, version: value.version, sha256: value.sha256,
+    schemaVersion: 2, name: value.name, version: value.version, sha256: value.sha256,
     node: value.node, npm: value.npm, platform: value.platform, installScripts: value.installScripts,
-    producerLockCopied: false, installedBin: true, bridgeAndUi: true, dependencies,
+    producerLockCopied: false, installedBin: true, bridgeAndUi: true, dependencies, licenseEvidence,
     registrySignature: value.registrySignature, provenance: value.provenance,
   };
 }
@@ -370,6 +380,7 @@ export class GateRunner {
       try {
         const summary = externalFailureSummary(this.owned, phase, binding);
         console.error(`External gate failure: gate=${summary.gate}; code=${summary.code}`);
+        if (summary.reviewRequired) console.error(summary.reviewRequired);
       } catch { /* Reporting must not replace the original failure. */ }
       throw error;
     }

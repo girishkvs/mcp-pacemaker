@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, posix } from 'node:path';
@@ -16,6 +17,7 @@ import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
 import { fixturePlan, ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { cleanNpmEnvironment } from '../tools/npm-publication/run.mjs';
 import { temporaryEnvironment } from '../tools/npm-publication/gate-environment.mjs';
+import { LICENSE_FAILURE_HINTS } from '../tools/npm-publication/runtime-licenses.mjs';
 
 for (const [platform, tempRoot] of [
   ['linux', '/home/runner/work/_temp'],
@@ -106,11 +108,13 @@ const humanGates = [
 ];
 
 function lane(toolchain, platform, mode, artifact = binding) {
+  const dependencies = [{ path: `node_modules/${POLICY.name}`, name: POLICY.name,
+    version: artifact.version, integrity: artifact.artifact.integrity }];
   return {
-    name: POLICY.name, version: artifact.version, sha256: artifact.artifact.sha256,
+    schemaVersion: 2, name: POLICY.name, version: artifact.version, sha256: artifact.artifact.sha256,
     ...toolchain, platform, installScripts: mode, producerLockCopied: false,
     installedBin: true, bridgeAndUi: true,
-    dependencies: [{ name: POLICY.name, version: artifact.version, integrity: null }],
+    dependencies, licenseEvidence: fixtureLicenseEvidence(dependencies),
     registrySignature: 'pending-publication', provenance: 'not-verified-by-consumer-smoke',
   };
 }
@@ -550,6 +554,48 @@ class ExternalFailureFixture {
 }
 
 const unavailable = { gate: 'report-unavailable', code: 'external-report-unavailable' };
+
+test('license failure summary retains only a bounded exact public diagnostic', t => {
+  const f = new ExternalFailureFixture(t, 'artifact');
+  const reviewRequired = 'Exact-version license review required: @alcalzone/ansi-tokenize@0.3.1 (no standalone license text)';
+  f.report.error = { gate: 'licenses-notices', code: 'external-gate-rejected', reviewRequired };
+  f.write();
+  assert.deepEqual(f.summary(), { gate: 'licenses-notices', code: 'external-gate-rejected', reviewRequired });
+  for (const value of [
+    `${reviewRequired}\n`, `${reviewRequired}\r\n`,
+    `${reviewRequired}\n::error::injected`, `${reviewRequired} private path /tmp/secret`,
+    'Exact-version license review required: unit@1.0.0 (secret=private)',
+    `Exact-version license review required: ${'a'.repeat(600)}@1.0.0`,
+    { private: 'text' }, null,
+  ]) {
+    f.report.error.reviewRequired = value;
+    f.write();
+    assert.deepEqual(f.summary(), { gate: 'licenses-notices', code: 'external-gate-rejected' });
+  }
+  f.report.error = { gate: 'consumer-advisories', code: 'external-gate-rejected', reviewRequired };
+  f.write();
+  assert.deepEqual(f.summary(), { gate: 'consumer-advisories', code: 'external-gate-rejected' });
+});
+
+test('fixed evidence recovery hints remain bounded and tied to their exact gate', t => {
+  const f = new ExternalFailureFixture(t, 'artifact');
+  for (const [gate, reviewRequired] of Object.entries(LICENSE_FAILURE_HINTS)) {
+    assert.ok(reviewRequired.length <= 512);
+    assert.doesNotMatch(reviewRequired, /[\r\n]/);
+    f.report.error = { gate, code: 'external-gate-rejected', reviewRequired };
+    f.write();
+    assert.deepEqual(f.summary(), f.report.error);
+    for (const value of [`${reviewRequired}\n`, `${reviewRequired} PRIVATE-STDOUT`,
+      LICENSE_FAILURE_HINTS[gate === 'consumer-platforms' ? 'licenses-notices' : 'consumer-platforms']]) {
+      f.report.error.reviewRequired = value;
+      f.write();
+      assert.deepEqual(f.summary(), { gate, code: 'external-gate-rejected' });
+    }
+    f.report.error = { gate: 'consumer-advisories', code: 'external-gate-rejected', reviewRequired };
+    f.write();
+    assert.deepEqual(f.summary(), { gate: 'consumer-advisories', code: 'external-gate-rejected' });
+  }
+});
 
 test('Safe external failures pin an owned root through a temporary-directory alias', () => {
   const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), 'external-owner-alias-')));
