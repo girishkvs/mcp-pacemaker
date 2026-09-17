@@ -137,11 +137,13 @@ jobs:
         env:
           ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: node tools/npm-publication/install-consumer-toolchain.mjs
+      # Both script modes capture license bytes before each fresh install is removed.
       - name: Verify source transfer and run real consumers
         env:
           ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node tools/npm-publication/matrix.mjs run
+      # Schema 2 embeds hash-bound exact-version license evidence in the original report.
       - name: Upload one consumer report
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

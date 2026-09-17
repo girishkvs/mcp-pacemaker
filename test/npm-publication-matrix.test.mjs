@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -217,12 +218,14 @@ class Fixture {
       if (args.includes('ci')) return { stdout: 'injected root restore', stderr: '' };
       if (args.includes('--test')) return { stdout: tap, stderr: '' };
       assert.ok(args.includes('consumer:check'));
+      const dependencies = [{ path: `node_modules/${POLICY.name}`, name: POLICY.name,
+        version: approval.version, integrity: this.prepared.artifact.integrity }];
       return { stdout: JSON.stringify({
-        name: POLICY.name, version: approval.version, sha256: this.prepared.artifact.sha256,
+        schemaVersion: 2, name: POLICY.name, version: approval.version, sha256: this.prepared.artifact.sha256,
         node: `v${lane.node}`, npm: lane.npm, platform: lane.platform,
         installScripts: args.includes('--ignore-scripts') ? 'disabled' : 'npm-default',
         producerLockCopied: false, installedBin: true, bridgeAndUi: true,
-        dependencies: [{ name: POLICY.name, version: approval.version, integrity: this.prepared.artifact.integrity }],
+        dependencies, licenseEvidence: fixtureLicenseEvidence(dependencies),
         registrySignature: 'pending-publication', provenance: 'not-verified-by-consumer-smoke',
       }), stderr: '' };
     };
@@ -311,7 +314,7 @@ for (const version of ['1.3.1', '2.0.1']) {
 test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
-    ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/'].map(namespace => ({ version, namespace })))) {
+    ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(namespace => ({ version, namespace })))) {
     const a = { ...approval, version, ref: `refs/tags/${namespace}v${version}` };
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
@@ -322,7 +325,7 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
     }, a, event));
     for (const ref of ['refs/heads/main', `refs/tags/${namespace}v${version}-other`,
-      `refs/tags/other/v${version}`, `refs/tags/npm-r5/v${version}`]) {
+      `refs/tags/other/v${version}`, `refs/tags/npm-r6/v${version}`]) {
       const invalid = { ...a, ref };
       const invalidEnv = { ...env, GITHUB_REF: ref,
         GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };
@@ -465,6 +468,10 @@ test('local success-shaped report is rejected unless its bytes match the API arc
 });
 
 for (const [name, index, change] of [
+  ['old consumer report schema', 0, report => { report.schemaVersion = 1; }],
+  ['missing fresh license evidence', 0, report => { delete report.consumers[0].result.licenseEvidence; }],
+  ['tampered license text', 0, report => { report.consumers[0].result.licenseEvidence.packages[0].files[0].text += 'changed'; }],
+  ['substituted license integrity', 0, report => { report.consumers[0].result.licenseEvidence.packages[0].integrity = null; }],
   ['missing consumer mode', 0, report => report.consumers.pop()],
   ['wrong source tuple', 0, report => { report.source.tree = hex('e'); }],
   ['wrong prepared binding', 0, report => { report.sourceArtifact.preparedSha256 = '0'.repeat(64); }],
@@ -483,6 +490,26 @@ for (const [name, index, change] of [
     await assert.rejects(fixture.verify());
   });
 }
+
+test('fresh license validation still runs when report archive and stdout hashes are all recomputed', async t => {
+  const fixture = new Fixture(t);
+  await fixture.complete();
+  for (let index = 0; index < MATRIX.length; index++) {
+    for (const mode of [0, 1]) {
+      const path = join(fixture.reports, fixture.metadata[index + 1].name, 'report.json');
+      const original = JSON.parse(readFileSync(path));
+      fixture.rewriteReport(index, report => {
+        const consumer = report.consumers[mode];
+        consumer.result.licenseEvidence.packages[0].files[0].text += 'tampered';
+        consumer.stdout = JSON.stringify(consumer.result);
+        consumer.evidence.stdoutSha256 = hash(consumer.stdout);
+      });
+      await assert.rejects(fixture.verify(), /Consumer license evidence hash mismatch/);
+      fixture.rewriteReport(index, report => Object.assign(report, original));
+    }
+  }
+  await fixture.verify();
+});
 
 test('ZIP traversal, duplicate names and unsupported compression are rejected', () => {
   assert.throws(() => zipFiles(zip({ '../outside.json': '{}' })));

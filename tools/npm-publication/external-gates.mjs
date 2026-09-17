@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { CURRENT_REF, LEGACY_REF } from '../compatibility/fixtures.mjs';
 import { scanAdvisories, scanPublicationRequest } from '../publication-scanners/index.mjs';
 import { CONSUMER_TOOLCHAINS, validateConsumerMatrix } from './gates.mjs';
-import { inspectRuntimeLicenses } from './runtime-licenses.mjs';
+import { inspectRuntimeLicenses, LICENSE_FAILURE_HINTS, safeLicenseDiagnostic } from './runtime-licenses.mjs';
 import { inspectTarball } from './tarball.mjs';
 
 export const SOURCE_GATES = Object.freeze([
@@ -538,7 +538,9 @@ export async function aggregateExternalGates(request, {
       report.nativeIdentity = await verifyNativeIdentity(request, { run });
       report.gates[active] = pass('Native helper bytes match immutable same-major release; build script matches its Git blob and declared CRLF checkout; no rebuild', report.nativeIdentity);
     } else {
-      report.consumerLanes = consumers;
+      report.consumerLanes = consumers.map(({ licenseEvidence, ...consumer }) => ({
+        ...consumer, licenseEvidenceSha256: hash(JSON.stringify(licenseEvidence)),
+      }));
       for (const major of ['11', '12']) {
         const name = `consumer-npm${major}`;
         report.gates[name] = pass(`Actual npm ${major} installed-bin/bridge/UI and fresh graphs across three platforms and both modes`,
@@ -556,7 +558,7 @@ export async function aggregateExternalGates(request, {
       active = 'licenses-notices';
       report.runtimeLicenses = await licenses({ sourceRoot: request.sourceRoot, extractedRoot: request.extractedRoot,
         consumers, name: request.name, version: request.version });
-      report.gates[active] = pass('Actual packed notice verification and exact-version installed license/text coverage for every consumer coordinate',
+      report.gates[active] = pass('Packed notice verification and hash-bound fresh consumer license/text coverage for every exact path/name/version/integrity',
         report.runtimeLicenses);
       active = 'runtime-closure';
       report.runtimeClosure = verifyRuntimeClosure(request, consumers);
@@ -591,10 +593,11 @@ export async function aggregateExternalGates(request, {
       diagnosticSha256: hash(String(error?.message ?? error)) };
     if (known) report.gates[active] = { status: 'failed',
       evidence: [evidence(`${active}: actual evidence missing, inconsistent, finding, or execution error`, report.error)] };
-    // Only this helper's reviewed public-coordinate diagnostic is safe to print.
-    if (active === 'licenses-notices' &&
-        /^Exact-version license (?:text )?review required: [@a-z0-9._/-]+@\d/.test(error.message)) {
-      report.error.reviewRequired = error.message;
+    // Only reviewed public-coordinate diagnostics or fixed recovery hints are safe to print.
+    const reviewRequired = safeLicenseDiagnostic(error?.message, active) ?? LICENSE_FAILURE_HINTS[active];
+    if (request.phase === 'artifact' &&
+        reviewRequired) {
+      report.error.reviewRequired = reviewRequired;
     }
   }
   return report;
