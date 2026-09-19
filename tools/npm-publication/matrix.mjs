@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
+import { readOwnerLocalAcceptance } from './local-regression-hosted.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -37,6 +39,7 @@ const archiveDigest = value => {
 };
 
 export function validateMatrixContext(env, approval, event) {
+  validateLocalApproval(approval, { continuing: true });
   assert.equal(env.ACTUAL_RUNNER_ENVIRONMENT, 'github-hosted');
   assert.equal(env.RUNNER_ENVIRONMENT, 'github-hosted');
   assert.ok(['Linux', 'Windows', 'macOS'].includes(env.RUNNER_OS));
@@ -299,6 +302,7 @@ export async function verifyPreparedBundle({
     files.has('source-gates.json'), 'Incomplete prepared bundle');
   assert.equal(sha256(files.get('prepared.json')), env.PREPARED_MANIFEST_SHA256);
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
+  validatePreparedLocal(prepared, approval);
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);
@@ -594,6 +598,7 @@ if (process.argv[1] &&
   const approval = JSON.parse(event.inputs.approval);
   validateMatrixContext(env, approval, event);
   assert.ok(isAbsolute(env.RUNNER_TEMP));
+  await readOwnerLocalAcceptance({ approval, env, event, readers: githubReaders(env), continuing: true });
   if (process.argv.length === 3 &&
       process.argv[2] === 'run') {
     await runMatrix({ approval, env, event });

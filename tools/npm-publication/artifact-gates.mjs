@@ -9,8 +9,12 @@ import {
 } from './gates.mjs';
 import { POLICY, digest, sameDigests, validateGates } from './policy.mjs';
 import { extractTarball } from './tarball.mjs';
+import { validateLocalApproval } from './local-regression.mjs';
+import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
 
 export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence) {
+  validateLocalApproval(runner.context.approval, { continuing: true });
+  assert.deepEqual(sourceReport?.localRegression, runner.context.approval.localRegression);
   runner.requireScripts(['compat:prepare', 'compat:clean', 'test:compat', 'test:compat:browser']);
   assert.equal(sourceReport?.schemaVersion, 1);
   assert.equal(sourceReport.phase, 'source', 'A real source-gate report is required');
@@ -58,8 +62,10 @@ export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence
   gates['runtime-closure'].evidence.push(noticesEvidence, ...compatibility);
   const report = {
     schemaVersion: 1, commit: binding.commit, artifact: binding.artifact,
+    localRegression: runner.context.approval.localRegression,
     source: binding.source, toolchain: sourceReport.toolchain,
     sourceReportSha256: binding.sourceReportSha256,
+    ...(sourceReport.secretEvidence ? { sourceSecretEvidence: sourceReport.secretEvidence } : {}),
     gates, consumers, sourceChecks: sourceReport.checks, restores,
     matrixArtifacts: matrix.artifactEvidence, peerArtifact: peer.evidence,
     nativeIdentity: sourceReport.nativeIdentity, nativeWindows: external.nativeWindows,
@@ -77,9 +83,11 @@ export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence
   return report;
 }
 
-export function main(args = process.argv.slice(2)) {
+export async function main(args = process.argv.slice(2)) {
   const options = gateOptions(args, ['--tarball', '--source-report', '--context', '--output']);
-  const runner = new GateRunner(ROOT, readJson(options['--context']));
+  const context = readJson(options['--context']);
+  await requireHostedLocalPreparation(context.approval);
+  const runner = new GateRunner(ROOT, context);
   let success = false;
   try {
     const source = runner.snapshot();
@@ -108,4 +116,4 @@ export function main(args = process.argv.slice(2)) {
 }
 
 if (process.argv[1] &&
-    import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
+    import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

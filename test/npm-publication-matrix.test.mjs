@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,10 +23,11 @@ import {
 // Every subprocess and API boundary is injected. These tests never install or start a consumer.
 const hash = data => digest(data).sha256;
 const hex = value => value.repeat(40);
-const approval = {
+const approval = syntheticLocalApproval({
   schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version: '2.0.1',
   ref: 'refs/tags/v2.0.1', tagObject: hex('a'), commit: hex('b'), tree: hex('c'),
-};
+  peerArtifact: { version: '1.3.1', commit: hex('e'), tree: hex('f') },
+});
 const nativeNames = [
   'real helper inspection emits only one fingerprint and does not change file contents',
   'real helper prepares both files with matching security without writing config data',
@@ -111,7 +113,7 @@ function packageFixture(version = approval.version, nativeFiles) {
 
 class Fixture {
   constructor(t, version = approval.version, nativeFiles) {
-    this.approval = { ...approval, version, ref: `refs/tags/v${version}` };
+    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}` });
     const approved = this.approval;
     this.dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-')));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
@@ -142,6 +144,7 @@ class Fixture {
       artifact: { filename: 'candidate.tgz', ...digest(this.package.tarball),
         files: inspectTarball(this.package.tarball, approved).files },
     };
+    syntheticPreparedLocal(this.prepared, this.approval);
     this.sourceFiles = {
       'prepared.json': JSON.stringify(this.prepared), 'candidate.tgz': this.package.tarball,
       'source-gates.json': sourceReport, 'baseline.json': '{}',
@@ -203,6 +206,7 @@ class Fixture {
       toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash('{}'),
       artifact: { filename: 'candidate.tgz', ...digest(peerPackage.tarball),
         files: inspectTarball(peerPackage.tarball, { version: '1.3.1' }).files } };
+    syntheticPreparedLocal(peerPrepared, f.approval);
     const peerMetadata = f.addArtifact(700, 'npm-prepared-198-1', {
       'candidate.tgz': peerPackage.tarball, 'prepared.json': JSON.stringify(peerPrepared), 'source-gates.json': '{}',
     });
@@ -222,6 +226,7 @@ class Fixture {
       consumerJobs: peerJobs.slice(0, 6).map(job => ({ id: String(job.id), name: job.name })),
       sourcePassed: true, matrixPassed: true, finalizerNotRequired: true };
     const gates = { schemaVersion: 1, commit: approval.commit, artifact: digest(f.package.tarball),
+      localRegression: f.approval.localRegression,
       sourceReportSha256: f.prepared.sourceReportSha256, gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, {
         status: 'passed', evidence: [{ description: 'unit-only injected gate evidence', sha256: hash(name) }],
       }])) };
@@ -476,7 +481,7 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
     ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(namespace => ({ version, namespace })))) {
-    const a = { ...approval, version, ref: `refs/tags/${namespace}v${version}` };
+    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}` });
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
     const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };

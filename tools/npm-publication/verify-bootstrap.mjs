@@ -10,6 +10,7 @@ import { githubReaders } from './matrix.mjs';
 import { sourceAndCi, sourceLocks, cleanNpmEnvironment } from './run.mjs';
 import { npmProvenance } from './provenance.mjs';
 import { validateOwnerContext } from './owner-bootstrap.mjs';
+import { validateLocalApproval } from './local-regression.mjs';
 import { readSignedArtifact, readCandidateEvidence, readRemoteSource, readProtectedEnvironment,
   readAbsentRegistry, readOwnerRun } from './bootstrap-readers.mjs';
 
@@ -72,6 +73,7 @@ export async function main(args) {
 }
 
 export async function createHostedBootstrapVerifier({ approval, directory, env = process.env }) {
+  validateLocalApproval(approval);
   const event = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
   validateOwnerContext({ env, event, approval });
   const local = readBootstrapDirectory(directory);

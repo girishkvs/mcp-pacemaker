@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { publicationHelperEnvironment } from './local-regression-hosted.mjs';
 import { spawnSync } from 'node:child_process';
 import {
   closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
@@ -269,9 +270,9 @@ export class GateRunner {
     sameDigests(digest(readFileSync(path)), artifact);
   }
 
-  run(label, executable, args, cwd = this.root) {
+  run(label, executable, args, cwd = this.root, environment = this.env) {
     const result = spawnSync(executable, args, {
-      cwd, env: this.env, encoding: 'utf8', shell: false, maxBuffer: 32 * 1024 * 1024,
+      cwd, env: environment, encoding: 'utf8', shell: false, maxBuffer: 32 * 1024 * 1024,
     });
     const transcript = JSON.stringify({
       exitCode: result.status, signal: result.signal,
@@ -366,12 +367,14 @@ export class GateRunner {
       commit: binding.commit, version: binding.version, name: POLICY.name,
       requiredGates: phase === 'source' ? SOURCE_EXTERNAL : ARTIFACT_EXTERNAL,
       publicPackages: this.context.publicPackages,
+      approval: this.context.approval,
       ...(binding.artifact ? { artifact: binding.artifact, tarball: binding.tarball } : {}),
       ...additional,
     }), { flag: 'wx', mode: 0o600 });
     try {
-      const execution = this.node('tools/npm-publication/external-gates.mjs',
-        ['--request', request, '--output', output], 'Execute real external gate aggregator');
+      const execution = this.run('Execute real external gate aggregator', process.execPath,
+        [join(this.root, 'tools/npm-publication/external-gates.mjs'), '--request', request, '--output', output],
+        this.root, publicationHelperEnvironment(this.env, process.env));
       const report = readJson(output);
       const gates = externalGates(report, phase, binding);
       for (const gate of Object.values(gates)) gate.evidence.push(execution.evidence);

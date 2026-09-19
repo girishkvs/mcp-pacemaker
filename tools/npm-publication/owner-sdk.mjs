@@ -7,6 +7,7 @@ import { POLICY, digest, sameDigests, validatePackage } from './policy.mjs';
 import { readBootstrapDirectory } from './verify-bootstrap.mjs';
 import { officialRegistryUrl, officialWebsiteUrl, validateOwnerContext } from './owner-bootstrap.mjs';
 import { npmProvenance } from './provenance.mjs';
+import { validateLocalApproval, validateLocalManifest } from './local-regression.mjs';
 
 export const PROFILE_SOURCE_SHA256 = 'ae6998f77dda9eee717e7b4b883407fe956e9d94c16e784db4943ed66a9d143e';
 
@@ -47,12 +48,15 @@ export function loadOwnerLibraries(cli) {
 }
 
 export function createOwnerSdk({ cli, directory, approval, home, libraries }) {
+  validateLocalApproval(approval);
   if (!libraries) {
     const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
     validateOwnerContext({ env: process.env, event, approval });
     libraries = loadOwnerLibraries(cli);
   }
   const original = readBootstrapDirectory(directory);
+  validateLocalManifest(original.get('manifest.json'), approval,
+    JSON.parse(original.get('gates.json').toString('utf8')));
   const tarball = join(directory, 'candidate.tgz');
   const provenanceFile = join(directory, 'provenance.sigstore');
   const base = { registry: POLICY.registry, authType: 'web', access: 'public', defaultTag: 'latest',
@@ -62,6 +66,7 @@ export function createOwnerSdk({ cli, directory, approval, home, libraries }) {
   let manifest;
   const checkBytes = async () => {
     const files = readBootstrapDirectory(directory);
+    validateLocalManifest(files.get('manifest.json'), approval, JSON.parse(files.get('gates.json').toString('utf8')));
     assert.deepEqual(files, original, 'Signed artifact changed after verification');
     sameDigests(digest(files.get('candidate.tgz')), approval.artifact);
     assert.equal(digest(files.get('provenance.sigstore')).sha256, approval.signedArtifact.bundleSha256);

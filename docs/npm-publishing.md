@@ -11,6 +11,10 @@ run only on GitHub-hosted runners.** Do not run these operational entrypoints
 against npm from a local machine. Local injected unit tests and permitted
 verification of already fetched evidence are separate.
 
+Run the [local publication regression gate](local-publication-gate.md) for both
+candidate checkouts before requesting a source push. Its isolated offline
+results are a prerequisite, not a substitute for the hosted evidence below.
+
 ## Prerequisites
 
 1. Commit this workflow and its tools in each candidate. Put the workflow on the
@@ -88,7 +92,141 @@ There are two dispatch inputs: `action` (default **prepare**) and `approval`
 (JSON). Inputs are parsed from the actual event file, not interpolated into shell
 commands. Dispatch against the approved release **tag**, not `main`.
 
-Preparation approval fields:
+Every operational action now requires `approval.localRegression`: the unchanged
+compact schema-1 output of the private offline verifier. Old manifests/approvals
+without it fail. This is an integrity-checked local statement with
+`executionProof: "not-authenticated"` and `releaseReady: false`, not a release
+authorization. Both subjects must identify the exact clean final source commits
+and trees, including the opposite peer.
+
+For **prepare**, add a separate `localRegressionReview` object. For **stage**,
+**sign-bootstrap** and **publish-bootstrap**, put that fresh review at
+`ownerPreflight.privateContentReview.localRegression`, alongside the existing
+mandatory source/history/tarball review. Its exact fields are:
+
+| Field | Required meaning |
+| --- | --- |
+| `reviewer` | The existing owner, `girishkvs`, after actual private-evidence review |
+| `scope` | `private-local-regression-evidence` |
+| `disposition` | `accepted`, only after explicit owner acceptance |
+| `statementSha256` | SHA256 of the statement serialized by `localJson` in `local-regression.mjs` |
+| `reviewedAt` | Actual owner review time; no more than one hour old when authorizing the action |
+
+No tool fills in this review. A digest or `authenticated: true` is not acceptance.
+The hosted reader checks the actual dispatch input and GitHub run/repository/owner
+IDs. Existing protected-environment, CI, source, consumer, signing and npm owner
+checks still apply. The claim is authenticated **human acceptance**, not an
+independently authenticated local execution. Preparation continuation uses its
+original approval time rather than spending another approval during a long run.
+Cleanup/session revocation does not depend on this new prerequisite.
+
+The source and final manifests carry the same compact statement and original
+prepare review. Later fresh artifact-specific approvals also bind their exact
+manifest bytes. Full private reports/paths/TARs are never uploaded. Reprepare
+old artifacts; do not retrofit a successful statement into an existing ZIP.
+
+### Exact source secret review
+
+`collect-secrets` is a separate non-eligible action, not preparation success.
+Its approval has exactly `schemaVersion`, `name`, `version`, `ref`, `tagObject`,
+`commit`, `tree`, `ciRunId`, `ciAttempt`, `approver`, `approvedAt`, `scope`
+(`collect-secrets`), `localRegression` and `localRegressionReview`.
+It retains the existing fresh owner dispatch, exact tag/source, clean checkout,
+successful push CI and separately reviewed local-regression prerequisites.
+It does not accept `secretReview`, public-package disclosure, artifact or stage
+approval fields. It runs no npm restore, pack, sign, stage or publish command.
+The only artifact is `npm-secret-collection-<runId>-1`, containing schema-2
+`report.json` and four original redacted execution receipts:
+`execution-working-tree-gitleaks.json`, `execution-working-tree-trufflehog.json`,
+`execution-history-gitleaks.json`, and `execution-history-trufflehog.json`.
+The report binds every canonical receipt byte sequence and remains explicitly
+`eligibility: "none"`; this cannot replace any prepared/source/candidate bundle.
+
+If review of that exact report identifies only the supported synthetic URI
+rejection inputs, a **new real owner prepare dispatch** may add `secretReview`.
+No tool creates this human review. Its exact fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion` | `1` |
+| `scope` | `exact-source-secret-report` |
+| `classification` | `synthetic-uri-userinfo-rejection-input`, only after inspecting the exact code |
+| `reviewer` | Existing owner `girishkvs`, authenticated by the actual dispatch and API |
+| `reviewedAt` | After collection completed; no more than one hour before `approval.approvedAt` |
+| `admissionRunNumber` | The exact next intended GitHub workflow run number, as a decimal string |
+| `collection` | Exact `runId`, `jobId`, `artifactId`, `artifactDigest` (`sha256:...`) and raw report-file `reportSha256` |
+| `findingIds` | Every distinct TruffleHog working-tree/history finding ID from that report, each exactly once |
+
+Read the intended next workflow run number before dispatch. Concurrent or
+intervening dispatches fail closed; do not automatically update/retry consent.
+The API run number and workflow ID are checked, so the review cannot be reused
+in a later run or a recreated workflow. Reruns are rejected. Long-running source
+gate continuation uses the original dispatch time; another action needs fresh
+approval. Collection and admission may not share a run.
+
+The original completed collection run must be owner-only, same repository,
+workflow and exact source; its collection job and both collection/upload steps
+must succeed. All other jobs must be skipped. Original archive bytes are fetched
+through the existing authenticated GitHub artifact readers; only canonical,
+bounded schema-2 report and its exact four canonical redacted receipts are
+permitted. Original native argv digests, digest-only path roles, full stream
+byte counts/hashes, timings, completion/count facts and pinned bootstrap
+provenance are cross-checked before creating a capability. The complete original
+hosted step sequence is required, not just a success flag. Raw scanner output
+is never an artifact. The source job checks actual unchanged checkout/root/inventory and
+file/blob/line/attribute bindings before and after admission. It does not rescan
+and relabel a new report as reviewed.
+
+Only the three source URI negative-test inputs documented in
+[`publication-scanners/USAGE.md`](../tools/publication-scanners/USAGE.md) are
+eligible. Both tools and both source scopes remain required. Scanner failure,
+partial output, Gitleaks findings, other findings and payload findings cannot
+be waived. All raw findings must be individually reviewed; matching values or
+blobs in another report are correlations, not approval. A gate may pass policy
+with remaining findings zero while preserving raw TruffleHog findings/183/count.
+The final report retains the original collection and authenticated admission
+receipt; it must never describe the raw scanner as returning zero.
+
+The URI detector's pathless `Raw` and complete `RawV2` are treated as one
+representation only for the three pinned fixture blob/path/line pairs and
+their exact hashes/lengths. The complete uniquely quoted source literal,
+URI/PLAIN record fields and `SecretParts` must all agree, without URL
+normalization, percent decoding or prefix acceptance. Other disagreements
+remain blocked. This correlation and eligibility check is not owner admission:
+the complete original record, finding IDs, hosted collection and fresh exact
+owner dispatch above remain required. A locally pinned scanner reporting
+`vcs.modified=true` is not proof of official-release binary equivalence and
+does not replace the hosted scanner provenance checks or full qualification.
+
+The added `secret-collection` job is permitted only as **skipped** in preparation
+transfer/peer and signing/publication readback. Unknown jobs and active collection
+in those flows still fail. Collection success cannot satisfy their required
+source, matrix or finalizer jobs. Missing `secretReview` leaves the existing
+scan-and-deny behavior unchanged; it is not needed for an actually clean scan.
+
+This adds no artifact secret exemption. Payload scanners still inspect the exact
+tarball/extraction through the existing artifact gates. Local-regression review,
+private source/history/content review, publication, signing and staging approvals
+remain independent. Local correlation is inspection only, not authentication or
+authorization. The trust boundary is the reviewed collector code at the exact
+approved source plus authenticated original GitHub artifact linkage: redacted
+digests are not independently re-executed raw scanner evidence.
+
+The private producer-backed verifier must retain that distinction: no reconstructed
+stdout/stderr, reused local scan, or raw-private-envelope relabeling is permitted.
+Fresh native execution and collection-step times must follow the same exact
+successful source CI. Reachable commit/object/type/byte counts and original
+bundle/corpus commitments remain mandatory.
+
+Qualified source inputs and private source-policy inputs must use the exact
+collected bytes, materialized through actual Git under `core.autocrlf=false`,
+`core.eol=lf` and verified committed attributes. Explicit CRLF and binary rules
+remain authoritative. A different raw checkout or old policy result is not
+equivalent merely because the tree matches. Recompute the public ordered
+inventory hash and private canonical file commitment in their own formats;
+neither a different root nor filesystem mode is normalized into another claim.
+
+Preparation approval fields (without optional secret review):
 
 ```json
 {
@@ -268,8 +406,12 @@ scan pass. The separate owner review is mandatory before staging.
 
 For an existing matching stage, `pending` must instead contain `status:
 "matching"`, `stageId`, `version`, `tag`, `sha256`, `sha512`, `integrity`, and its
-**original** `workflow` object (`ref`, `commit`, `runId`, `attempt: 1`).
-That path records the original stage ID/workflow without another submission.
+**original** `workflow` object (`ref`, `commit`, `runId`, `attempt: 1`), plus
+`captureArtifactId` identifying the original GitHub `npm-stage-ledger-<runId>-1`
+artifact. The reader authenticates that original run/archive and binds its
+capture to the pending stage, source and tarball before recording the original
+stage ID/workflow without another submission. It never creates replacement
+capture evidence. Missing or invalid original capture blocks reuse.
 Unknown/conflicting stages, unknown prior outcomes, wrong owners, missing trust,
 registry errors or changed tags stop. A matching already-published version
 produces a readback-required result, not another write; a different digest is an
@@ -285,7 +427,8 @@ The stage job's only npm mutation is:
 ```text
 npm stage publish <exact-candidate.tgz> --access=public --tag=<derived-channel>
   --registry=https://registry.npmjs.org/ --provenance --ignore-scripts --json
-  --fetch-retries=0 --userconfig=<empty-owned-file> --globalconfig=<empty-owned-file>
+  --fetch-retries=0 --logs-max=0 --loglevel=silent --update-notifier=false
+  --userconfig=<empty-owned-file> --globalconfig=<empty-owned-file>
 ```
 
 There is no token fallback. npm runs in an empty owned directory with a restricted
@@ -309,7 +452,7 @@ The approval has **exactly** these top-level fields:
 
 ```text
 schemaVersion, name, version, ref, tagObject, commit, tree,
-ciRunId, ciAttempt, approver, approvedAt, scope, artifact, ownerPreflight
+ciRunId, ciAttempt, approver, approvedAt, scope, artifact, ownerPreflight, localRegression
 ```
 
 Use the source fields above, `version: "2.0.1"`, `scope: "sign-bootstrap"`,
@@ -463,7 +606,7 @@ The complete strict top-level publish approval is:
 
 ```text
 schemaVersion, name, version, ref, tagObject, commit, tree, ciRunId, ciAttempt,
-approver, approvedAt, scope, artifact, ownerPreflight, signedArtifact, ownerAuth
+approver, approvedAt, scope, artifact, ownerPreflight, signedArtifact, ownerAuth, localRegression
 ```
 
 ### Owner execution and encrypted challenge handoff
@@ -830,7 +973,46 @@ reviewed inputs, never ambient configuration.
 
 The job writes an **unknown-outcome** ledger before calling npm. npm 12.0.2 emits
 name-keyed JSON, with `stageId` inside the package entry on successful submission.
-The parser checks version, size, hashes and a UUID stage ID. npm 11 array output,
+The fresh source-pinned child retains the automatic `.sigstore` JSON-text
+attachment from the **actual serialized POST**, not a separately signed bundle.
+Before loading npm, the adapter binds the physical distribution inventory
+(including package manifests, exports and delegates), actual caller-specific
+`require.resolve` destinations, and an empty npm module cache. Generated
+`node_modules/.bin` command shims are platform-specific and excluded from the
+inventory; none is an allowed loader destination. Changed distributions fail
+closed and need explicit review rather than refreshed hashes at execution time.
+
+The original `ACTIONS_ID_TOKEN_REQUEST_URL` must be HTTPS without userinfo,
+fragment or an existing ambiguous audience. Both the npm audience and the real
+Sigstore `CIContextProvider('sigstore')` request use the same guarded transport.
+Original query/identity data and the requested audience are preserved. Issuer
+requests have no redirects/retries, a 30-second total/body deadline and a 64 KiB
+response cap. An issuer failure prevents another hop, token exchange or stage.
+Raw issuer responses, credentials and underlying errors are never retained.
+
+Fulcio is not credential-free: its certificate POST contains
+`credentials.oidcIdentityToken` in the JSON body. The adapter binds that request
+to `https://fulcio.sigstore.dev/api/v2/signingCert`, permits one certificate
+attempt, disables both its outer Sigstore retry helper and lower HTTP retries,
+rejects redirects, and bounds the request/response to 64 KiB/256 KiB with a
+30-second total/body deadline. A certificate failure blocks later continuation.
+The supported CLI already flattens `--fetch-retries=0` to zero outer retries;
+the explicit adapter guard also covers the general SDK's retry defaults.
+The certificate body, token and raw response are never retained in production.
+TUF's credential-free global-fetch metadata reads are a separate path, unchanged
+by these issuer/certificate controls.
+
+It writes durable unknown intent before the request, forces zero retries and
+redirect rejection below npm-registry-fetch, and permits at most one stage POST.
+307/308 cannot replay it. The serialized body, bundle and successful response are
+hash-bound to the **same call's** stage ID and exact source/workflow/tarball.
+Limits are 64 MiB request, 2 MiB bundle, 64 KiB response and 30 seconds including
+body consumption; the CLI child has a two-minute cap. Capture failure leaves the
+outcome unknown. Request auth headers/options and raw body/response are not saved;
+only the actual provenance bundle and bounded metadata/hashes are retained.
+
+The parser checks version, size, hashes and a UUID stage ID and requires the CLI
+ID to equal the captured response ID. npm 11 array output,
 missing IDs, network loss or malformed responses leave the outcome unknown.
 The ledger is uploaded even on failure when possible. A lost runner can lose that
 artifact: absence of a ledger is not proof nothing was staged.
@@ -856,37 +1038,51 @@ These commands are **not run by this workflow**. The view JSON's real fields
 include `id`, `packageName`, `version`, `tag`, `shasum`; SHA1 alone is insufficient.
 Match downloaded bytes to the approved SHA256 and SHA512/SRI.
 
-Before owner publication approval, obtain the **actual staged provenance bundle**
-through a supported npm/Sigstore retrieval path and verify it:
+Before owner publication approval, obtain `stage-1.json`,
+`capture/provenance.sigstore` and `capture/receipt.json` from the **original**
+successful stage run's `npm-stage-ledger-<runId>-1` artifact. Use its actual
+GitHub artifact ID. Verification requires a read-only GitHub token for the
+existing authenticated API readers and the separate owner stage/tarball readback:
 
 ```text
 NPM_PUBLICATION_CLI=<isolated npm12.0.2/bin/npm-cli.js>
 node tools/npm-publication/verify-staged.mjs stage-record.json stage-view.json
-  downloaded.tgz bundle.sigstore current-tags.json
+  downloaded.tgz provenance.sigstore current-tags.json receipt.json
+  <original-github-capture-artifact-id>
 ```
 
-The verifier uses npm 12.0.2's bundled **sigstore 5.0.0**, validates signature,
+The verifier first fetches the original run/jobs/artifact through GitHub, validates
+the actual archive digest, and requires the exact capture, bundle and original
+stage records from that archive. Local hashes or `authenticated: true` cannot
+replace this read. A reconciled ledger points back to that original artifact;
+verify the original `stage-1.json`, not a newly relabelled record.
+
+It then uses npm 12.0.2's bundled **sigstore 5.0.0**, validates signature,
 chain, certificate identity/issuer and transparency thresholds, and separately
 checks package subject/digest, source/workflow and the **original staging run**.
 It can read official Sigstore TUF metadata. It never creates a token or signs.
 Its result does not perform or authorize npm approval.
 
-**Retrieval remains an execution gate:** the versioned stage download command
-returns the tarball, not a documented provenance bundle. This tool deliberately
-does not guess an attestation endpoint or accept a rendered provenance link as
-proof. If the expected bundle cannot be obtained and verified, **stop before owner
-approval**. Hashes are not signatures. Staging can already disclose source/package
-metadata through public Sigstore transparency, even before npm owner approval.
+**A genuine hosted capture remains an execution gate.** Stage download returns
+only the tarball; no undocumented bundle endpoint is guessed. The authenticated
+GitHub artifact establishes the source-bound observer's same-call linkage. It
+does not turn a local hash into execution authentication or cryptographically
+prove which attachment bytes the registry stored. Stage view/download cannot
+prove that either. Missing, lost, expired or mismatched original capture blocks
+owner approval, even if an unrelated bundle verifies for the same source/run.
+Readback, reconciliation, rejection/removal and credential cleanup remain
+independent of this acceptance prerequisite. Staging can disclose source/package
+metadata through public Sigstore transparency before owner approval.
 
 Do not reuse the bootstrap export as staged proof. In npm **12.0.2**, the OIDC
 publish path can set `opts.provenance=true` even when `provenance-file` was
 supplied; libnpmpublish then generates another bundle instead of using that
 file. `--no-provenance` plus `--provenance-file` is also mutually exclusive.
-Therefore pre-signing/exporting a bundle in the stage job would not prove it
-was the bundle actually attached to the stage. Stage arguments and verification
-remain unchanged until a supported retrieval path supplies the **actual**
-staged bundle. Inspect the real owner UI/API with separate authorization;
-do not guess endpoints or weaken this acceptance gate.
+Therefore a pre-signed export is not staged proof. The reviewed adapter preserves
+automatic Trusted Publishing and captures its actual attachment after SDK
+generation and registry JSON serialization. Offline tests use explicit synthetic
+OIDC/signature/HTTP fixtures in fresh children with denied external I/O; they are
+not real captures, owner approvals or independently authenticated execution.
 
 The owner approves the exact stage separately with npm 2FA, after fresh tag
 readback and proof verification. Stage tags are immutable. A wrong tag requires

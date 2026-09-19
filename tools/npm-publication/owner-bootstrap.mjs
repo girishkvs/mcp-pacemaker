@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { POLICY, exactKeys, validateApproval, validateContext } from './policy.mjs';
 import { OwnerAuthEnvelope } from './owner-auth-envelope.mjs';
+import { validateLocalApproval } from './local-regression.mjs';
 
 export function validateOwnerContext({ env, event, approval, runtime = process, approvalTime = Date.now() }) {
   validateApproval(approval, 'publish-bootstrap', approvalTime);
@@ -103,7 +104,9 @@ export function validateOwnerReply(message, expected) {
 
 // Injected SDK boundaries are unit-test seams, not crypto/server evidence.
 export async function publishOwnerOnce({ approval, sdk, revalidate, record, challenge, signal }) {
+  validateLocalApproval(approval);
   validateApproval(approval, 'publish-bootstrap');
+  validateLocalApproval(approval);
   validateOwnerKey(approval.ownerAuth);
   let token;
   let outcome = 'not-submitted';

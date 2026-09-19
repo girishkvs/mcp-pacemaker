@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { validateLocalApproval, validateLocalManifest } from './local-regression.mjs';
 import {
   POLICY, digest, sameDigests, validateApproval, validateContext, validateGates, exactKeys, fresh,
 } from './policy.mjs';
@@ -41,6 +42,7 @@ export function bootstrapWorkflow(env) {
 }
 
 export function validateBootstrapContext({ env, event, approval, runtime = process }) {
+  validateLocalApproval(approval);
   validateApproval(approval, 'sign-bootstrap');
   validateContext(env, event, approval);
   assert.equal(runtime.platform, 'linux', 'Bootstrap signing requires actual hosted Linux');
@@ -64,6 +66,7 @@ export function validateBootstrapContext({ env, event, approval, runtime = proce
 
 export function validateCandidate(files, approval, locks) {
   exactFiles(files, CANDIDATE_FILES);
+  validateLocalManifest(files.get('manifest.json'), approval, parse(files.get('gates.json')));
   assert.equal(digest(files.get('manifest.json')).sha256, approval.artifact.manifestSha256);
   const manifest = parse(files.get('manifest.json'));
   const gates = parse(files.get('gates.json'));
@@ -184,6 +187,8 @@ export async function verifyBootstrapProof({
   assert.ok(Number.isFinite(Date.parse(receipt.recordedAt)) &&
     Date.parse(receipt.recordedAt) <= Date.now(), 'Invalid signing receipt time');
   validateApproval(receipt.signApproval, 'sign-bootstrap', Date.parse(receipt.recordedAt));
+  validateLocalApproval(receipt.signApproval, { now: Date.parse(receipt.recordedAt) });
+  assert.deepEqual(receipt.signApproval.localRegression, approval.localRegression);
   for (const key of ['ref', 'tagObject', 'commit', 'tree', 'ciRunId', 'ciAttempt']) {
     assert.equal(String(receipt.signApproval[key]), String(approval[key]));
   }
