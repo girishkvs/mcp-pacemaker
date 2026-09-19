@@ -104,6 +104,96 @@ replace the full source/publication gate or separate owner review. Default publi
 remain counts/hashes only. The direct API is `diagnoseSource({root, tools?, localOnly: true})`
 from `secrets.mjs`, with the same CI rejection; keep returned locations local.
 
+## Exact synthetic URI review (source only)
+
+Findings still block by default. The separate `collect-secrets` workflow action
+collects non-eligible, digest-only evidence with the same pinned scanner arguments
+and complete working-tree/reachable-history coverage. Errors, incomplete output,
+unknown diagnostics, online verification and mismatched counts cannot be reviewed
+away. The same artifact contains schema-2 `report.json` and exactly four canonical
+`execution-<working-tree|history>-<gitleaks|trufflehog>.json` receipts. They retain
+original native stream digests/byte counts, timestamps, literal argument flags
+with digest-only path slots, parser completion/count facts, pinned release
+provenance and full source/history commitments. No raw scanner stdout, matches,
+tokens, absolute paths, private policies or local triage is uploaded.
+
+This is producer-backed evidence, not independent replay of withheld raw streams.
+Original hosted checkout/bootstrap/collection/upload steps and authenticated ZIP
+bytes must agree. Native failures, signals, output loss, incomplete coverage and
+changed inputs cannot produce admissible evidence. The report remains bounded
+to 512 KiB; oversized evidence fails instead of dropping findings or members.
+
+Collection requires the exact committed file set and a verified Git rendering
+with `core.autocrlf=false`, `core.eol=lf` and committed attributes. Explicit CRLF
+and binary declarations remain authoritative. Filters, encoding, `ident`, local
+attribute overrides and extra ignored/untracked files block. Public ordered
+inventory-with-mode and private canonical file commitments are different named
+formats. A private consumer must reconstruct both and require collected bytes
+to match its qualified source and fresh private-policy byte subject exactly.
+A Windows Git LF materialization is not Linux execution evidence. Old checkout
+bytes, policies or reports cannot be relabeled.
+
+A later fresh owner **prepare** dispatch can review the exact original artifact,
+report and complete finding-ID set. The original GitHub run/job/steps, archive
+bytes, owner/repository IDs and exact source/root/inventory are verified through
+the existing readers. Only this readback creates the optional `secretAdmission`
+capability for `scanPublicationRequest`; JSON booleans and local dispositions
+cannot create it. The request CLI accepts `request.approval.secretReview` only
+through the same real owner dispatch reader. External gates use that reader too.
+
+Eligibility is limited to URI userinfo rejection inputs at
+`test/helpers/npm-publication-stage-issuer.mjs:36`,
+`test/helpers/npm-publication-stage-fulcio.mjs:41`, and
+`tools/npm-publication/offline-stage/npm.cjs:44`. These paths are not exemptions:
+every finding still needs a separate owner review bound to its detector, value
+and record hashes, exact file/blob bytes, line, Git attributes, scope and source.
+History requires an exported verified blob with one exact path in HEAD.
+Exact Git blob bytes, or their explicitly declared `text eol=crlf` rendering,
+are required; no guessed normalization, filters or local attribute overrides.
+Other detectors, Gitleaks findings, unmapped/ambiguous history, unused/duplicate
+approvals and all payload findings remain blocking. Nothing is automatically
+accepted because it is in a test.
+
+TruffleHog 3.97.1's URI detector reports the pathless URL in `Raw` and the
+complete URL in `RawV2`. A disagreement is eligible only for the three pinned
+fixture blob/path/line pairs, with exact byte lengths and hashes for both
+representations. The complete value must be one uniquely quoted source literal,
+not a matching prefix. The verified tool/version, exact URI/PLAIN filesystem
+record shape, `SecretParts` and redacted representation must agree. No URL
+normalization or percent decoding is performed. Unknown fields, added credential
+material, changed pairs and other disagreements remain blocked. Missing/empty
+or equal `RawV2` retains the existing correlation path; malformed non-string
+values do not become an absent field.
+
+These checks establish source-finding eligibility only. They do not approve a
+false positive, change raw findings/183/counts, authenticate a local report or
+reuse consent from another report. The complete parsed-record hash and finding
+ID still bind both representations and every other field. Native local evidence
+whose executable reports `vcs.modified=true` does not prove official-release
+binary equivalence. Local binary pins are not substituted for the existing
+hosted release bootstrap and authenticated producer/readback requirements.
+
+Policy pass records raw count, reviewed false positives and remaining findings
+separately. Raw `findings`/183/count remains unchanged in source and final evidence.
+No later report is relabeled as the reviewed one, and admission rechecks source
+bytes before and after the other scanner-adapter gates.
+See [exact owner input](../../docs/npm-publishing.md#exact-source-secret-review).
+
+For private inspection only:
+
+```sh
+node tools/publication-scanners/correlate.mjs --local-only \
+  --root /private/exact-checkout --report /private/report.json \
+  --output /private/new-correlation.json
+```
+
+The new output must be outside all Git checkouts; CI is rejected. It contains
+repository-relative paths/lines and hashes, never values. It verifies exact source
+and finding bytes but does not authenticate the report, classify synthetic use or
+issue approval. A different local root is allowed for inspection only; admission
+requires the original root/inventory hashes. Original local approvals remain
+scoped to their exact reports, not hosted, legacy, history or payload reports.
+
 ## OSV exact-lock advisory gate
 
 Only explicit approved **public package names and exact versions** leave the process.

@@ -1,13 +1,35 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
+import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isolatedEnvironment, runBounded, sha256, workspace } from '../tools/publication-scanners/core.mjs';
+import { sha256, workspace } from '../tools/publication-scanners/core.mjs';
 import {
   publicationSecretGates, scanPublicationRequest, validatePublicationRequest,
 } from '../tools/publication-scanners/publication.mjs';
 import { main } from '../tools/publication-scanners/cli.mjs';
+
+const heads = new Map();
+const originalSpawn = childProcess.spawn;
+childProcess.spawn = (file, args, options) => {
+  if (file !== 'git') return originalSpawn(file, args, options);
+  const at = args.indexOf('-C');
+  const root = args[at + 1];
+  assert.deepEqual(args.slice(at + 2), ['rev-parse', '--show-toplevel', '--verify', 'HEAD^{commit}']);
+  assert.ok(heads.has(root), 'Only an explicit owned synthetic Git boundary is available');
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  queueMicrotask(() => {
+    child.stdout.emit('data', Buffer.from(`${root}\n${heads.get(root)}\n`));
+    child.emit('close', 0, null);
+  });
+  return child;
+};
+syncBuiltinESMExports();
+after(() => { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); });
 
 async function sourceRequest(root) {
   const sourceRoot = join(root, 'candidate');
@@ -19,19 +41,10 @@ async function sourceRequest(root) {
   } } };
   await writeFile(join(sourceRoot, 'package-lock.json'), JSON.stringify(lock));
   await writeFile(join(sourceRoot, 'ui', 'package-lock.json'), JSON.stringify(lock));
-  const git = async args => {
-    const result = await runBounded('git', ['-C', sourceRoot, ...args],
-      { cwd: root, env: isolatedEnvironment(root), timeoutMs: 30_000 });
-    assert.equal(result.code, 0, 'Owned fixture Git command failed');
-    return result.stdout.trim();
-  };
-  await git(['init', '--quiet']);
-  await git(['add', '.']);
-  // Fixture commit only, inside the owned disposable directory.
-  await git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-    'commit', '--quiet', '-m', 'Publication request fixture']);
+  const commit = sha256(`SYNTHETIC UNIT GIT BOUNDARY ${sourceRoot}`).slice(0, 40);
+  heads.set(sourceRoot, commit);
   return { schemaVersion: 1, phase: 'source', sourceRoot, root: sourceRoot,
-    commit: await git(['rev-parse', 'HEAD']), name: 'fixture-candidate', version: '2.0.1',
+    commit, name: 'fixture-candidate', version: '2.0.1',
     requiredGates: ['source-private-identifiers', 'native-rebuild'] };
 }
 

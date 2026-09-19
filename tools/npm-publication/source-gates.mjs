@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GateRunner, gateOptions, passed, readJson, ROOT } from './gates.mjs';
 import { POLICY } from './policy.mjs';
+import { validateLocalApproval } from './local-regression.mjs';
+import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
 
 export function validateAudit(output) {
   const report = JSON.parse(output);
@@ -14,6 +16,7 @@ export function validateAudit(output) {
 }
 
 export function runSourceChecks(runner) {
+  validateLocalApproval(runner.context.approval, { continuing: true });
   runner.requireScripts(['test']);
   runner.requireScripts(['typecheck', 'build'], runner.uiPackage);
   const source = runner.snapshot();
@@ -44,18 +47,23 @@ export function runSourceChecks(runner) {
   assert.deepEqual(runner.snapshot(), source, 'Source, generated files or producer locks changed during gates');
   return {
     schemaVersion: 1, phase: 'source', source,
+    localRegression: runner.context.approval.localRegression,
     toolchain: { node: POLICY.node, npm: POLICY.npm },
     checks: { restores, sourceTests, uiTests, compatibility: 'pending-exact-tarball' },
     nativeIdentity: external.nativeIdentity, authorIdentity: external.authorIdentity,
+    ...(external.scannerDetails?.secrets?.collection
+      ? { secretEvidence: external.scannerDetails.secrets } : {}),
     gates: { ...external.gates,
       'producer-advisories': passed(...external.gates['producer-advisories'].evidence, ...audits),
       'ui-build': passed(...ui) },
   };
 }
 
-export function main(args = process.argv.slice(2)) {
+export async function main(args = process.argv.slice(2)) {
   const options = gateOptions(args, ['--context', '--output']);
-  const runner = new GateRunner(ROOT, readJson(options['--context']));
+  const context = readJson(options['--context']);
+  await requireHostedLocalPreparation(context.approval);
+  const runner = new GateRunner(ROOT, context);
   let success = false;
   try {
     runner.writeReport(options['--output'], runSourceChecks(runner));
@@ -67,4 +75,4 @@ export function main(args = process.argv.slice(2)) {
 }
 
 if (process.argv[1] &&
-    import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
+    import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

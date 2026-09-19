@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -20,10 +21,10 @@ import {
 // Every subprocess and API boundary is injected. These tests never install or start a consumer.
 const hash = data => digest(data).sha256;
 const hex = value => value.repeat(40);
-const approval = {
+const approval = syntheticLocalApproval({
   schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version: '1.3.1',
   ref: 'refs/tags/v1.3.1', tagObject: hex('a'), commit: hex('b'), tree: hex('c'),
-};
+});
 const nativeNames = [
   'real helper inspection emits only one fingerprint and does not change file contents',
   'real helper prepares both files with matching security without writing config data',
@@ -109,7 +110,7 @@ function packageFixture(version = approval.version, nativeFiles) {
 
 class Fixture {
   constructor(t, version = approval.version, nativeFiles) {
-    this.approval = { ...approval, version, ref: `refs/tags/v${version}` };
+    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}` });
     const selectedApproval = this.approval;
     this.dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-')));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
@@ -137,6 +138,7 @@ class Fixture {
       artifact: { filename: 'candidate.tgz', ...digest(this.package.tarball),
         files: inspectTarball(this.package.tarball, selectedApproval).files },
     };
+    syntheticPreparedLocal(this.prepared, this.approval);
     this.sourceFiles = {
       'prepared.json': JSON.stringify(this.prepared), 'candidate.tgz': this.package.tarball,
       'source-gates.json': sourceReport, 'baseline.json': '{}',
@@ -315,7 +317,7 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
     ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(namespace => ({ version, namespace })))) {
-    const a = { ...approval, version, ref: `refs/tags/${namespace}v${version}` };
+    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}` });
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
     const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };

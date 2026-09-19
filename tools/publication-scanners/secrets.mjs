@@ -6,6 +6,7 @@ import {
 } from './core.mjs';
 import { materializeHistory } from './history.mjs';
 import { diagnosticLocations } from './locations.mjs';
+import { collectFindingIdentities, readReviewSource } from './review-source.mjs';
 
 export const TOOL_PINS = Object.freeze({
   gitleaks: {
@@ -107,6 +108,16 @@ export function parseGitleaks(result) {
       /INF \d+ commits scanned\.$/.test(line);
     requireCondition(supported, 'gitleaks-unexpected-diagnostic');
   }
+  const summaries = lines.filter(line => /INF no leaks found$|WRN leaks found: \d+$/.test(line));
+  requireCondition(summaries.length > 0, 'gitleaks-leak-summary-missing');
+  requireCondition(summaries.length === 1, 'gitleaks-leak-summary-ambiguous');
+  const summary = summaries[0];
+  requireCondition(lines.at(-1) === summary, 'gitleaks-leak-summary-not-terminal');
+  const clean = /INF no leaks found$/.test(summary);
+  const reportedText = clean ? '0' : summary.match(/WRN leaks found: (\d+)$/)[1];
+  const reported = Number(reportedText);
+  requireCondition(Number.isSafeInteger(reported) && String(reported) === reportedText &&
+    reported === findings.length && clean === (reported === 0), 'gitleaks-leak-summary-mismatch');
   requireCondition((result.code === 183) === (findings.length > 0), 'gitleaks-exit-report-mismatch');
   return { status: findings.length ? 'findings' : 'passed', findings: findings.length,
     scannedBytes: Number(bytesLine.match(/scanned ~(\d+) bytes/)[1]),
@@ -143,10 +154,10 @@ export function parseTrufflehog(result) {
     scannedBytes: summary.bytes, chunks: summary.chunks, evidenceSha256: sha256(result.stdout) };
 }
 
-async function executeScanners(target, mode, tools, context, executions) {
+export async function executeScanners(target, mode, tools, context, executions) {
   for (const name of ['gitleaks', 'trufflehog']) {
     // Check the exact executable immediately before every scan, not just once per process lifetime.
-    const tool = await verifyTool(name, tools[name], context);
+    const tool = await (context.verifyTool ?? verifyTool)(name, tools[name], context);
     const startedAt = new Date().toISOString();
     const scanTarget = name === 'trufflehog' && mode === 'history' ? context.historyObjects : target;
     requireCondition(typeof scanTarget === 'string', 'history-object-snapshot-required');
@@ -154,9 +165,24 @@ async function executeScanners(target, mode, tools, context, executions) {
     const commandSha256 = sha256(JSON.stringify(args));
     let result;
     try {
-      result = await runBounded(tools[name].path, args, context);
+      const checkConfiguration = async () => {
+        if (name !== 'gitleaks' || !context.reviewSource) return;
+        requireCondition(await fileDigest(context.config) === context.configEvidence.effectiveSha256 &&
+          (await readFile(context.ignore)).length === 0, 'producer-configuration-changed');
+      };
+      await checkConfiguration();
+      result = await (context.run ?? runBounded)(tools[name].path, args, context);
       requireCondition(await fileDigest(tools[name].path) === tool.sha256, 'tool-changed-during-scan');
+      await checkConfiguration();
       const parsed = name === 'gitleaks' ? parseGitleaks(result) : parseTrufflehog(result);
+      let review;
+      if (context.reviewSource) {
+        const entries = (await inventory(scanTarget)).entries;
+        const identities = name === 'trufflehog'
+          ? await collectFindingIdentities(result, mode, scanTarget, context.reviewSource, entries, tool) : [];
+        review = { exitCode: result.code, stdoutSha256: sha256(result.stdout),
+          stderrSha256: sha256(result.stderr), targetSha256: sha256(scanTarget), identities };
+      }
       if (context.localDiagnostics) {
         const locations = diagnosticLocations(name, result, scanTarget, context.localDiagnostics.entries);
         context.localDiagnostics.executions.push({ tool: name, locations,
@@ -166,6 +192,50 @@ async function executeScanners(target, mode, tools, context, executions) {
         ...(name === 'trufflehog' && mode === 'history'
           ? { historyMechanism: 'filesystem-over-verified-reachable-git-objects' } : {}),
         ...(name === 'gitleaks' ? { config: context.configEvidence } : {}), ...parsed });
+      if (review) executions.at(-1).review = review;
+      if (review) {
+        const native = result.audit;
+        requireCondition(native?.kind === 'bounded-native-execution' &&
+          native.argumentsSha256 === commandSha256 &&
+          native.executablePathSha256 === sha256(tools[name].path) &&
+          native.code === result.code && native.signal === null, 'producer-native-receipt');
+        for (const stream of ['stdout', 'stderr']) {
+          const encoded = Buffer.from(result[stream], 'utf8');
+          const captured = native.streams[stream];
+          requireCondition(captured.sha256 === sha256(encoded) && captured.bytes === encoded.length &&
+            captured.receivedBytes === captured.bytes, 'producer-stream-not-lossless');
+        }
+        requireCondition(parsed.scannedBytes > 0, 'producer-empty-coverage');
+        const lines = result.stderr.split(/\r?\n/).filter(line => line.trim());
+        const commits = name === 'gitleaks'
+          ? [...result.stderr.matchAll(/INF (\d+) commits scanned\./g)].map(match => Number(match[1])) : [];
+        const completion = name === 'trufflehog' ? lines.map(parseJson).filter(row => row.msg === 'finished scanning') : [];
+        if (name === 'gitleaks') {
+          requireCondition(lines.filter(line => /INF scanned ~\d+ bytes .+ in .+$/.test(line)).length === 1,
+            'producer-gitleaks-completion');
+          requireCondition(mode === 'history'
+            ? commits.length === 1 && commits[0] === context.historyEvidence.reachableCommits
+            : commits.length === 0, 'producer-history-commit-count');
+        }
+        const slot = (role, value) => ({ role, sha256: sha256(value) });
+        executions.at(-1).producerReceipt = {
+          schemaVersion: 1, kind: 'redacted-original-native-source-execution',
+          source: context.reviewSource.binding, scope: mode,
+          tool: { name: tool.name, version: tool.version, sha256: tool.sha256 },
+          native,
+          argv: scannerArguments(name, mode, slot('target', scanTarget),
+            { config: slot('config', context.config), ignore: slot('ignore', context.ignore), commit: context.commit }),
+          configuration: name === 'gitleaks' ? context.configEvidence : null,
+          target: { sha256: sha256(scanTarget), kind: mode === 'working-tree' ? 'source-snapshot'
+            : name === 'gitleaks' ? 'verified-bundle-git-history' : 'verified-reachable-object-corpus',
+          inventorySha256: mode === 'working-tree' ? context.reviewSource.binding.filesSha256
+            : name === 'gitleaks' ? context.historyEvidence.bundle.sha256 : context.historyEvidence.objects.sha256 },
+          parser: { status: parsed.status, findings: parsed.findings, scannedBytes: parsed.scannedBytes,
+            chunks: parsed.chunks ?? null, completionCount: 1, diagnosticFrames: lines.length,
+            reportedCommits: commits[0] ?? null, verified: name === 'trufflehog' ? completion[0].verified_secrets : null,
+            unverified: name === 'trufflehog' ? completion[0].unverified_secrets : null },
+        };
+      }
     } catch (error) {
       executions.push({ scope: mode, tool, commandSha256, startedAt, status: 'error',
         error: error instanceof ScannerError ? error.code : 'scanner-operation-failed',
@@ -211,11 +281,19 @@ async function git(tools, context, root, args) {
   return result.stdout.trim();
 }
 
-export async function scanSource({ root, tools = toolsFromEnvironment() }) {
+export async function scanSource({ root, tools = toolsFromEnvironment(), collectReview = false }) {
   const executions = [];
   let scope;
+  let reviewSource;
+  let producerSource;
+  let producerHistory;
   const result = await guarded('source-secrets', () => workspace(async temp => {
     const context = await scannerContext(temp, tools);
+    if (collectReview) {
+      context.reviewSource = await readReviewSource(root, { tools, context });
+      reviewSource = context.reviewSource.binding;
+      producerSource = await context.reviewSource.producerEvidence();
+    }
     requireCondition(await git(tools, context, root, ['rev-parse', '--is-shallow-repository']) === 'false',
       'shallow-history-not-supported');
     const commit = await git(tools, context, root, ['rev-parse', '--verify', 'HEAD^{commit}']);
@@ -230,6 +308,7 @@ export async function scanSource({ root, tools = toolsFromEnvironment() }) {
     const before = await inventory(root, { source: true, copyTo: snapshot, trackedPaths });
     const bundle = join(temp, 'history.bundle');
     await git(tools, context, root, ['bundle', 'create', bundle, 'HEAD']);
+    const bundleEvidence = { sha256: await fileDigest(bundle), bytes: (await lstat(bundle)).size };
     const history = join(temp, 'history.git');
     await git(tools, context, temp, ['clone', '--bare', '--no-local', bundle, history]);
     const historyContext = { ...context, env: { ...context.env, GIT_DIR: history } };
@@ -239,24 +318,38 @@ export async function scanSource({ root, tools = toolsFromEnvironment() }) {
     const historyEvidence = await materializeHistory({
       history, commit, destination: historyObjects, tools, context: historyContext,
     });
+    requireCondition(historyEvidence.objectTypes.commit === count, 'producer-history-object-commit-count');
+    producerHistory = { commit, reachableCommits: count, bundle: bundleEvidence, objects: historyEvidence };
+    context.historyEvidence = producerHistory;
     scope = { workingTree: 'all-files-including-untracked-and-ignored',
       exclusions: ['git-metadata', 'untracked-generated-node_modules-directories'], ...before.evidence,
       history: { commit, reachableCommits: count, selection: 'HEAD-and-all-ancestors',
         trufflehogObjects: historyEvidence } };
     context.commit = commit;
     await executeScanners(snapshot, 'working-tree', tools, context, executions);
-    await executeScanners(history, 'history', tools, { ...historyContext, commit, historyObjects }, executions);
+    await executeScanners(history, 'history', tools, { ...historyContext, commit, historyObjects,
+      historyEvidence: producerHistory,
+      ...(context.reviewSource ? { reviewSource: context.reviewSource } : {}) }, executions);
     requireCondition((await inventory(historyObjects)).evidence.sha256 === historyEvidence.sha256,
       'history-export-changed-during-scan');
+    requireCondition(await fileDigest(bundle) === bundleEvidence.sha256, 'producer-bundle-changed');
     const after = await inventory(root, { source: true, trackedPaths });
     requireCondition(before.evidence.sha256 === after.evidence.sha256 &&
       commit === await git(tools, context, root, ['rev-parse', 'HEAD']), 'source-changed-during-scan');
+    requireCondition((await inventory(snapshot)).evidence.sha256 === (await inventory(root, { source: true, trackedPaths })).evidence.sha256,
+      'source-snapshot-changed-during-scan');
+    if (reviewSource) {
+      requireCondition(reviewSource.filesSha256 === before.evidence.sha256 &&
+        JSON.stringify(reviewSource) === JSON.stringify((await readReviewSource(root, { tools, context })).binding),
+      'review-source-changed-during-scan');
+    }
     return {
       status: executions.some(item => item.status === 'findings') ? 'findings' : 'passed',
       scope,
     };
   }));
-  return { ...result, ...(scope ? { scope } : {}), executions, ...secretLimits() };
+  return { ...result, ...(scope ? { scope } : {}), executions,
+    ...(reviewSource ? { reviewSource, producerSource, producerHistory } : {}), ...secretLimits() };
 }
 
 export async function diagnoseSource({ root, tools = toolsFromEnvironment(), localOnly = false }) {

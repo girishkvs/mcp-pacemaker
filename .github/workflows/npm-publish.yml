@@ -6,7 +6,7 @@ on:
       action:
         description: Prepare never stages; stage requires separate exact artifact approval
         type: choice
-        options: [prepare, stage]
+        options: [collect-secrets, prepare, stage]
         default: prepare
         required: true
       approval:
@@ -22,6 +22,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  secret-collection:
+    if: inputs.action == 'collect-secrets'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require supported hosted runner before any credentials can be requested
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install pinned publication scanners
+        run: node tools/npm-publication/install-scanners.mjs
+      - name: Collect redacted source secret evidence only
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/run.mjs collect-secrets
+      - name: Retain non-eligible secret collection
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-secret-collection-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-secret-collection/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   source:
     if: inputs.action == 'prepare'
     runs-on: ubuntu-24.04
@@ -255,6 +295,8 @@ jobs:
           package-manager-cache: false
       - name: Check source and exact prepare artifact identity
         id: transfer
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: node tools/npm-publication/run.mjs transfer
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
@@ -266,6 +308,8 @@ jobs:
       - name: Install reviewed npm without saved publishing credentials
         run: node tools/npm-publication/install-toolchain.mjs
       - name: Recheck approval and stage exact bytes once using OIDC
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: node tools/npm-publication/run.mjs stage
       - name: Preserve stage ID or unknown-outcome ledger even on failure
         if: always()

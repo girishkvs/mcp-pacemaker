@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, lstatSync, mkdtempSync, realpathSync, writeF
 import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
-import { TOOL_PINS } from '../publication-scanners/index.mjs';
+import { TOOL_PINS } from '../publication-scanners/secrets.mjs';
 
 // Official release API asset digests and independently read release checksum files, 2026-09-13.
 export const SCANNER_RELEASES = Object.freeze({
@@ -120,6 +120,11 @@ function execute(file, args, options) {
   return `${result.stdout}${result.stderr}`.trim();
 }
 
+export function retainScannerProvenance(root, values, evidence) {
+  values.MCP_SCANNER_PROVENANCE_FILE = join(root, 'provenance.json');
+  writeFileSync(values.MCP_SCANNER_PROVENANCE_FILE, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+}
+
 export async function installScanners({
   env = process.env, runtime = process, fetchBytes = download, run = execute,
 } = {}) {
@@ -163,9 +168,10 @@ export async function installScanners({
   requireValue(hash(config) === TOOL_PINS.gitleaks.configSha256, 'Gitleaks upstream configuration digest mismatch');
   values.MCP_GITLEAKS_CONFIG = join(root, 'gitleaks.toml');
   writeFileSync(values.MCP_GITLEAKS_CONFIG, config, { flag: 'wx', mode: 0o600 });
+  const evidence = { schemaVersion: 1, platform: 'linux-x64', tools: provenance, configSha256: hash(config) };
+  retainScannerProvenance(root, values, evidence);
   appendFileSync(env.GITHUB_ENV, Object.entries(values).map(([key, value]) => `${key}=${value}\n`).join(''));
-  return { schemaVersion: 1, platform: 'linux-x64', tools: provenance,
-    configSha256: hash(config), environmentKeys: Object.keys(values),
+  return { ...evidence, environmentKeys: Object.keys(values),
     cleanup: 'Owned RUNNER_TEMP directory retained for following source/finalizer steps; runner teardown removes it' };
 }
 

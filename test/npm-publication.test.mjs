@@ -1,4 +1,12 @@
 import test from 'node:test';
+import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
+import './helpers/npm-publication-local-gate.mjs';
+import './helpers/npm-publication-local-inner.mjs';
+import './helpers/npm-publication-stage-capture.mjs';
+import './helpers/npm-publication-stage-issuer.mjs';
+import './helpers/npm-publication-stage-fulcio.mjs';
+import { stageCaptureFixture } from './helpers/stage-capture-fixture.mjs';
+import { reconcileStageCapture } from '../tools/npm-publication/stage-capture-hosted.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -17,7 +25,7 @@ const humanGates = [
   'source-private-identifiers', 'payload-private-identifiers', 'author-identity', 'historical-risk-disposition',
 ];
 function approval(version = '1.3.1') {
-  return {
+  return syntheticLocalApproval({
     schemaVersion: 1, name: POLICY.name, version, ref: `refs/tags/v${version}`,
     tagObject: 'a'.repeat(40), commit: 'b'.repeat(40), tree: 'c'.repeat(40), ciRunId: '42', ciAttempt: 1,
     approver: POLICY.owner, approvedAt: new Date().toISOString(), scope: 'stage',
@@ -35,7 +43,7 @@ function approval(version = '1.3.1') {
       trust: { repository: POLICY.repository, workflow: 'npm-publish.yml', environment: POLICY.environment,
         allowPublish: false, allowStagePublish: true },
     },
-  };
+  });
 }
 
 function context(a) {
@@ -77,10 +85,19 @@ function output(a) {
 function submission(a = approval()) {
   const calls = [];
   const records = [];
-  return { calls, records, args: {
+  const captured = stageCaptureFixture({
+    name: a.name, version: a.version, channel: channelFor(a.version), artifact: digest(bytes),
+    source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, a[key]])),
+    workflow: a.ownerPreflight.pending.workflow ?? {
+      ref: `${POLICY.repository}/${POLICY.workflow}@${a.ref}`, commit: a.commit, runId: '45', attempt: 1,
+    }, stageId, status: 'submitted-awaiting-owner-verification',
+    ownerPreflight: a.ownerPreflight,
+  }, { syntheticOnly: true });
+  return { calls, records, captured, args: {
     approval: a, bytes, tarball: '/owned/candidate.tgz', config: { user: '/owned/u', global: '/owned/g' },
     readRegistry: async () => published(a),
-    execute: async args => { calls.push(args); return output(a); },
+    execute: async args => { calls.push(args); return { stdout: output(a), capture: captured.record.capture }; },
+    reconcile: () => reconcileStageCapture(a, captured.readers),
     record: async value => { records.push(value); },
   } };
 }
@@ -265,7 +282,7 @@ test('T04: tampered bytes cannot cross the injected mutation boundary', async ()
 
 test('T13: owner-reconciled matching pending stage returns its ID without another write', async () => {
   const a = approval();
-  a.ownerPreflight.pending = { status: 'matching', stageId, version: a.version,
+  a.ownerPreflight.pending = { status: 'matching', stageId, version: a.version, captureArtifactId: '456',
     tag: 'legacy', ...digest(bytes), workflow: {
       ref: `${POLICY.repository}/${POLICY.workflow}@${a.ref}`, commit: a.commit, runId: '40', attempt: 1,
     } };
@@ -275,6 +292,9 @@ test('T13: owner-reconciled matching pending stage returns its ID without anothe
   assert.equal(s.records[0].stageId, stageId);
   assert.equal(s.records[0].workflow.runId, '40');
   assert.equal(s.records[0].provenance, 'pending-owner-cryptographic-verification');
+  assert.equal(s.records[0].originalCapture.authentication, 'original-github-api-artifact');
+  assert.ok(s.captured.fixtureOnly.calls.some(([kind]) => kind === 'archive'));
+  assert.equal(s.records[0].originalCapture.bundleSha256, s.captured.record.capture.bundleSha256);
 });
 
 test('T14/T17: ambiguous/conflicting pending stages and unresolved outcomes never retry', async () => {
@@ -313,7 +333,7 @@ test('T17: lost response, malformed JSON and missing stage ID preserve unknown o
     s.args.execute = async args => {
       s.calls.push(args);
       if (response === 'lost') throw new Error('lost response');
-      return response;
+      return { stdout: response, capture: s.captured.record.capture };
     };
     await assert.rejects(() => submitOnce(s.args));
     assert.equal(s.calls.length, 1);
@@ -362,7 +382,7 @@ test('npm12 official name-keyed pack/stage schema is distinct from npm11 array o
 
 test('T22-T28/T42: missing, generic-pending or unbound gates fail without changing designated owner-pending states', () => {
   const a = approval();
-  const report = { schemaVersion: 1, commit: a.commit, artifact: digest(bytes),
+  const report = { schemaVersion: 1, commit: a.commit, artifact: digest(bytes), localRegression: a.localRegression,
     gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, {
       ...(humanGates.includes(name) ? { status: 'pending-owner-review', ownerReview: 'pending' } : { status: 'passed' }),
       evidence: [{ description: 'controlled unit-test evidence', sha256: '1'.repeat(64) }],
@@ -467,11 +487,18 @@ test('T22: private-pattern scanning cannot substitute for fresh owner source-and
     await assert.rejects(() => submitOnce(s.args));
     assert.equal(s.calls.length, 0);
   }
+  const missing = approval();
+  delete missing.ownerPreflight.privateContentReview;
+  const missingSubmission = submission(missing);
+  await assert.rejects(() => submitOnce(missingSubmission.args), { message: 'Missing local regression object' });
+  assert.equal(missingSubmission.calls.length, 0);
+  assert.equal(missingSubmission.records.length, 0);
   const a = approval();
-  delete a.ownerPreflight.privateContentReview;
+  a.ownerPreflight.privateContentReview = { localRegression: a.ownerPreflight.privateContentReview.localRegression };
   const s = submission(a);
   await assert.rejects(() => submitOnce(s.args), /Separate owner/);
   assert.equal(s.calls.length, 0);
+  assert.equal(s.records.length, 0);
   assert.equal(validateApproval({ ...a, scope: 'prepare' }, 'prepare'), 'legacy');
 });
 
@@ -559,6 +586,7 @@ test('T18: workflow is manual-only, package-wide serialized, stage-only OIDC and
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s+(?:push|release|pull_request|schedule|workflow_run):/m);
   assert.match(workflow, /default: prepare/);
+  assert.match(workflow, /options: \[collect-secrets, prepare, stage\]/);
   assert.match(workflow, /group: npm-publication-mcp-pacemaker\n\s+cancel-in-progress: false/);
   assert.equal((workflow.match(/id-token: write/g) ?? []).length, 1);
   assert.doesNotMatch(workflow.split('\n  stage:')[0], /id-token/);
@@ -566,6 +594,13 @@ test('T18: workflow is manual-only, package-wide serialized, stage-only OIDC and
   assert.match(workflow, /ACTUAL_RUNNER_ENVIRONMENT: \$\{\{ runner.environment }}/);
   assert.doesNotMatch(workflow, /^ {6}\S[^\n]*\$\{\{\s*runner\./m,
     'GitHub job-env context excludes runner; runner-derived env belongs on steps');
+  const stageSteps = workflow.split('\n  stage:')[1].split('\n      - ');
+  for (const command of ['transfer', 'stage']) {
+    const step = stageSteps.find(value => value.split('\n')
+      .some(line => line.trim() === `run: node tools/npm-publication/run.mjs ${command}`));
+    assert.ok(step?.includes('\n        env:\n          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}'),
+      `${command} must bind the actual runner at step scope`);
+  }
   for (const match of workflow.matchAll(/uses: (.+)/g)) {
     assert.match(match[1], /^actions\/[\w-]+@[a-f0-9]{40}(?: # .+)?$/);
   }

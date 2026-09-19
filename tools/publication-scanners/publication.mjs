@@ -9,6 +9,7 @@ import {
 import { scanAdvisories } from './advisories.mjs';
 import { scanPrivateContent } from './private.mjs';
 import { TOOL_PINS, scanArtifact, scanSource, toolsFromEnvironment } from './secrets.mjs';
+import { consumeSecretAdmission } from '../npm-publication/secret-admission.mjs';
 
 const GATES = Object.freeze({
   source: ['source-gitleaks', 'source-trufflehog', 'source-private-identifiers', 'producer-advisories'],
@@ -155,21 +156,36 @@ export function publicationSecretGates(result, phase, names) {
 
 export async function scanPublicationRequest({
   request, tools = toolsFromEnvironment(), policyPath, publicPackages, publicPackagesPath,
-  exemptionsPath, fetchImpl,
+  exemptionsPath, fetchImpl, secretAdmission,
+  bindingReader = verifyRequestBinding, sourceScanner = scanSource, artifactScanner = scanArtifact,
 }) {
   const scannerDetails = {};
   const result = await guarded('publication-scanner-request', async () => {
     const names = validatePublicationRequest(request);
-    const before = await verifyRequestBinding(request, tools);
+    const before = await bindingReader(request, tools);
+    requireCondition(secretAdmission === undefined || request.phase === 'source',
+      'source-secret-admission-not-for-artifacts');
     const prefix = request.phase === 'source' ? 'source' : 'payload';
     let gates = {};
+    let admitted;
     if (names.some(name => name === `${prefix}-gitleaks` ||
         name === `${prefix}-trufflehog`)) {
-      const secrets = request.phase === 'source'
-        ? await scanSource({ root: request.root, tools })
-        : await scanArtifact({ root: request.root, tools, artifactSha256: request.artifact.sha256 });
+      admitted = secretAdmission === undefined ? undefined
+        : await consumeSecretAdmission(secretAdmission, request, tools);
+      const secrets = admitted?.secrets ?? (request.phase === 'source'
+        ? await sourceScanner({ root: request.root, tools })
+        : await artifactScanner({ root: request.root, tools, artifactSha256: request.artifact.sha256 }));
       scannerDetails.secrets = secrets;
       gates = publicationSecretGates(secrets, request.phase, names);
+      if (admitted) {
+        requireCondition(names.includes('source-trufflehog') && names.includes('source-gitleaks'),
+          'admission-requires-both-source-tools');
+        gates['source-trufflehog'] = {
+          status: 'passed', admission: admitted.admission,
+          evidence: [evidence('Exact original report admitted after separate owner review; raw scanner findings retained', secrets),
+            evidence('Authenticated collection artifact and one-dispatch exact-finding review', admitted.admission)],
+        };
+      }
     }
     const privateName = `${prefix}-private-identifiers`;
     if (names.includes(privateName)) {
@@ -205,7 +221,8 @@ export async function scanPublicationRequest({
           advisory)],
       };
     }
-    const after = await verifyRequestBinding(request, tools);
+    if (admitted) await admitted.revalidate();
+    const after = await bindingReader(request, tools);
     requireCondition(JSON.stringify(before) === JSON.stringify(after), 'publication-binding-changed');
     const statuses = Object.values(gates).map(gate => gate.status);
     const scannerError = Object.values(scannerDetails).some(detail => detail.status === 'error');

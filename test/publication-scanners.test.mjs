@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -30,6 +33,48 @@ function trufflehogResult(findings = [], code = findings.length ? 183 : 0) {
     stderr: JSON.stringify({ level: 'info-0', msg: 'finished scanning', bytes: 14, chunks: 1,
       verified_secrets: 0, unverified_secrets: findings.length, trufflehog_version: '3.97.1' }) };
 }
+
+test('Gitleaks terminal summary must agree with original JSON rows and native exit', async t => {
+  const finding = { RuleID: 'SYNTHETIC-UNIT', Secret: 'UNIT-NOT-A-CREDENTIAL', File: 'unit-input.txt' };
+  const completion = 'INF scanned ~1234 bytes (SYNTHETIC UNIT) in 1s\n';
+  const none = 'INF no leaks found';
+  const one = 'WRN leaks found: 1';
+  const cases = [
+    ['reviewer zero JSON versus one diagnostic finding', [], 0, `${completion}${one}`, 'gitleaks-leak-summary-mismatch'],
+    ['one JSON versus no-leaks summary', [finding], 183, `${completion}${none}`, 'gitleaks-leak-summary-mismatch'],
+    ['different positive counts', [finding], 183, `${completion}WRN leaks found: 2`, 'gitleaks-leak-summary-mismatch'],
+    ['missing summary', [], 0, completion, 'gitleaks-leak-summary-missing'],
+    ['duplicate zero summaries', [], 0, `${completion}${none}\n${none}`, 'gitleaks-leak-summary-ambiguous'],
+    ['duplicate finding summaries', [finding], 183, `${completion}${one}\n${one}`, 'gitleaks-leak-summary-ambiguous'],
+    ['conflicting summaries', [], 0, `${completion}${none}\n${one}`, 'gitleaks-leak-summary-ambiguous'],
+    ['summary before completion', [], 0, `${none}\n${completion}`, 'gitleaks-leak-summary-not-terminal'],
+    ['history diagnostic after summary', [], 0, `${completion}${none}\nINF 17 commits scanned.`, 'gitleaks-leak-summary-not-terminal'],
+    ['zero warning is not clean terminal form', [], 0, `${completion}WRN leaks found: 0`, 'gitleaks-leak-summary-mismatch'],
+    ['noncanonical count', [finding], 183, `${completion}WRN leaks found: 01`, 'gitleaks-leak-summary-mismatch'],
+    ['unsafe count', [finding], 183, `${completion}WRN leaks found: 9007199254740992`, 'gitleaks-leak-summary-mismatch'],
+    ['zero findings with exit183', [], 183, `${completion}${none}`, 'gitleaks-exit-report-mismatch'],
+    ['findings with exit0', [finding], 0, `${completion}${one}`, 'gitleaks-exit-report-mismatch'],
+  ];
+  for (const [name, rows, code, stderr, expected] of cases) {
+    await t.test(name, () => {
+      const result = { stdout: JSON.stringify(rows), code, stderr };
+      const original = structuredClone(result);
+      assert.throws(() => parseGitleaks(result), error => error.code === expected);
+      assert.deepEqual(result, original, 'Original native data must not be rewritten');
+    });
+  }
+  for (const prefix of ['', 'INF 17 commits scanned.\n']) {
+    for (const rows of [[], [finding], [finding, { ...finding, File: 'second-unit-input.txt' }]]) {
+      const original = gitleaksResult(rows);
+      original.stderr = prefix + original.stderr;
+      const parsed = parseGitleaks(original);
+      assert.equal(parsed.findings, rows.length);
+      assert.equal(parsed.status, rows.length ? 'findings' : 'passed');
+      assert.equal(parsed.evidenceSha256, sha256(original.stdout));
+      assert.equal(original.code, rows.length ? 183 : 0);
+    }
+  }
+});
 
 test('T22/T42: scanner arguments disable verification, updates, ignores and silent scan-error success', () => {
   const context = { config: 'owned-config', ignore: 'owned-empty-ignore', commit };
@@ -207,11 +252,43 @@ test('T22: private policy absence is not-run; empty policies cannot pass; matche
   }));
 
 test('T42: subprocess timeout/output limits and native errors never print their captured contents', async () => workspace(async root => {
+  const originalSpawn = childProcess.spawn;
+  const originalKill = process.kill;
+  let behaviour = 'output-limit';
+  let child;
+  childProcess.spawn = (file, args) => {
+    if (file.endsWith('taskkill.exe')) {
+      assert.deepEqual(args, ['/PID', String(child.pid), '/T', '/F']);
+      queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      return new EventEmitter();
+    }
+    assert.equal(file, process.execPath);
+    child = new EventEmitter();
+    child.pid = 123456789; // Explicitly synthetic; no native process is created.
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = () => child.emit('close', null, 'SIGKILL');
+    queueMicrotask(() => {
+      if (behaviour === 'output-limit') child.stdout.emit('data', Buffer.from('private-fixture'.repeat(1000)));
+      if (behaviour === 'success') {
+        child.stdout.emit('data', Buffer.from('SYNTHETIC stdout'));
+        child.stderr.emit('data', Buffer.from('SYNTHETIC diagnostic'));
+        child.emit('close', 0, null);
+      }
+    });
+    return child;
+  };
+  process.kill = (pid, signal) => {
+    assert.equal(pid, -child.pid); assert.equal(signal, 'SIGKILL');
+    queueMicrotask(() => child.emit('close', null, signal));
+  };
+  syncBuiltinESMExports();
+  try {
   const context = { cwd: root, env: isolatedEnvironment(root) };
   const failure = await guarded('fixture', () => runBounded(process.execPath,
     ['-e', 'process.stdout.write("private-fixture".repeat(1000))'], { ...context, maxOutputBytes: 128 }));
   assert.equal(failure.error, 'scanner-output-limit');
   assert.ok(!JSON.stringify(failure).includes('private-fixture'));
+  behaviour = 'timeout';
   const timeout = await guarded('fixture', () => runBounded(process.execPath,
     ['-e', 'setInterval(() => {}, 1000)'], { ...context, timeoutMs: 100 }));
   assert.equal(timeout.error, 'scanner-timeout');
@@ -220,6 +297,22 @@ test('T42: subprocess timeout/output limits and native errors never print their 
   const cli = await main(['artifact', '--private-fixture']);
   assert.equal(cli.status, 'error');
   assert.ok(!JSON.stringify(cli).includes('private-fixture'));
+  behaviour = 'success';
+  const args = ['SYNTHETIC-ARGV'];
+  const success = await runBounded(process.execPath, args, context);
+  assert.equal(success.audit.argumentsSha256, sha256(JSON.stringify(args)));
+  assert.equal(success.audit.executablePathSha256, sha256(process.execPath));
+  assert.equal(success.audit.code, 0);
+  assert.equal(success.audit.signal, null);
+  for (const name of ['stdout', 'stderr']) {
+    assert.equal(success.audit.streams[name].sha256, sha256(success[name]));
+    assert.equal(success.audit.streams[name].receivedBytes, Buffer.byteLength(success[name]));
+    assert.equal(success.audit.streams[name].bytes, Buffer.byteLength(success[name]));
+  }
+  assert.ok(Date.parse(success.audit.completedAt) >= Date.parse(success.audit.startedAt));
+  } finally {
+    childProcess.spawn = originalSpawn; process.kill = originalKill; syncBuiltinESMExports();
+  }
 }));
 
 test('T22/T42: real pinned scanners cover a tiny owned source/history and unchanged unpacked fixture', {

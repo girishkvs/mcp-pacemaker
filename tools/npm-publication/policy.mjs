@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
+import {
+  assertCollectionJobSkipped, secretHash, secretId, secretKeys as exactKeys,
+  validateSecretCollection, validateSecretReview,
+} from './secret-report.mjs';
 
 export const POLICY = Object.freeze({
   name: 'mcp-pacemaker',
@@ -22,6 +27,26 @@ export const REQUIRED_GATES = Object.freeze([
 ]);
 
 export function validateGateStatus(name, gate) {
+  if (gate?.admission !== undefined) {
+    assert.equal(name, 'source-trufflehog');
+    const value = gate.admission;
+    exactKeys(value, ['kind', 'commit', 'tree', 'collection', 'reviewSha256', 'admissionRunId',
+      'admissionRunNumber', 'rawStatus', 'rawFindings', 'reviewedFalsePositives', 'remainingFindings'],
+    'secret admission receipt');
+    assert.equal(value.kind, 'exact-reviewed-source-secret-admission');
+    assert.equal(value.rawStatus, 'findings');
+    assert.ok(Number.isSafeInteger(value.rawFindings) && value.rawFindings > 0 && value.rawFindings <= 128);
+    assert.equal(value.reviewedFalsePositives, value.rawFindings);
+    assert.equal(value.remainingFindings, 0);
+    for (const key of ['commit', 'tree']) assert.match(value[key], /^[a-f0-9]{40}$/);
+    assert.match(value.reviewSha256, /^[a-f0-9]{64}$/);
+    for (const key of ['admissionRunId', 'admissionRunNumber']) secretId(value[key]);
+    exactKeys(value.collection, ['runId', 'jobId', 'artifactId', 'artifactDigest', 'reportSha256'],
+      'admitted collection link');
+    for (const key of ['runId', 'jobId', 'artifactId']) secretId(value.collection[key]);
+    assert.match(value.collection.artifactDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.match(value.collection.reportSha256, /^[a-f0-9]{64}$/);
+  }
   const human = ['source-private-identifiers', 'payload-private-identifiers',
     'author-identity', 'historical-risk-disposition'].includes(name);
   assert.ok(gate?.status === 'passed' ||
@@ -69,7 +94,7 @@ export function fresh(value, now = Date.now()) {
 }
 
 export function validateApproval(approval, action, now = Date.now()) {
-  assert.ok(['prepare', 'stage'].includes(action), 'Only prepare and stage are supported');
+  assert.ok(['collect-secrets', 'prepare', 'stage'].includes(action), 'Unsupported publication action');
   assert.equal(approval.schemaVersion, 1);
   assert.equal(approval.name, POLICY.name);
   const channel = channelFor(approval.version);
@@ -83,6 +108,12 @@ export function validateApproval(approval, action, now = Date.now()) {
   assert.equal(approval.approver, POLICY.owner);
   assert.equal(approval.scope, action, 'Approval does not authorize this action');
   fresh(approval.approvedAt, now);
+  if (approval.secretReview !== undefined) validateSecretReview(approval.secretReview, approval, now);
+  if (action === 'collect-secrets') {
+    exactKeys(approval, ['schemaVersion', 'name', 'version', 'ref', 'tagObject', 'commit', 'tree',
+      'ciRunId', 'ciAttempt', 'approver', 'approvedAt', 'scope', 'localRegression', 'localRegressionReview'],
+    'collection-only approval');
+  }
   if (action === 'prepare') {
     assert.ok(Array.isArray(approval.publicPackages) &&
       approval.publicPackages.length > 0, 'Explicit public-package disclosure approval is required');
@@ -137,6 +168,8 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
   assert.ok(['none', 'matching'].includes(pending?.status),
     'Conflicting/unknown pending stage: owner disposition required, no retry');
   if (pending.status === 'matching') {
+    assert.match(String(pending.captureArtifactId ?? ''), /^[1-9][0-9]*$/,
+      'Original capture artifact ID required for stage reuse');
     assert.match(pending.stageId ?? '', /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i);
     assert.equal(pending.version, approval.version);
     assert.equal(pending.tag, channelFor(approval.version));
@@ -247,6 +280,10 @@ export function validateRegistry(packument, approval) {
 
 export function validateGates(report, approval, artifact) {
   assert.equal(report?.schemaVersion, 1, 'Missing real artifact-gate report');
+  validateLocalRegression(report.localRegression);
+  const subject = report.localRegression.subjects.find(item => item.commit === approval.commit);
+  assert.ok(subject, 'Artifact gates do not cover a tested local source');
+  if (approval.localRegression) assert.deepEqual(report.localRegression, approval.localRegression);
   assert.equal(report.commit, approval.commit);
   sameDigests(report.artifact, artifact);
   for (const name of REQUIRED_GATES) {
@@ -259,6 +296,19 @@ export function validateGates(report, approval, artifact) {
       assert.ok(typeof evidence.description === 'string' &&
         evidence.description.length > 0, `Missing evidence description: ${name}`);
     }
+  }
+  const admission = report.gates['source-trufflehog'].admission;
+  if (admission) {
+    const collection = validateSecretCollection(report.sourceSecretEvidence?.collection);
+    assert.equal(collection.source.commit, approval.commit);
+    assert.equal(admission.commit, approval.commit);
+    assert.equal(admission.tree, collection.source.tree);
+    assert.equal(admission.collection.reportSha256, secretHash(`${JSON.stringify(collection, null, 2)}\n`));
+    assert.equal(secretId(admission.collection.runId), secretId(collection.workflow.runId));
+    const raw = collection.raw.executions.reduce((total, item) => total + item.findings, 0);
+    assert.equal(admission.rawFindings, raw);
+    assert.equal(report.sourceSecretEvidence.status, collection.raw.status);
+    assert.deepEqual(report.sourceSecretEvidence.executions, collection.raw.executions);
   }
 }
 
@@ -305,6 +355,7 @@ export function validateEnvironment(environment, policies, reviews, approval) {
 }
 
 export function validateTransfer(runInfo, jobs, metadata, approval) {
+  assertCollectionJobSkipped(jobs);
   const artifact = approval.artifact;
   assert.equal(String(runInfo.id), String(artifact.runId));
   assert.equal(runInfo.head_sha, approval.commit);
@@ -341,10 +392,12 @@ export function stageArguments(tarball, channel, config) {
   assert.ok(tarball.endsWith('.tgz'), 'Only the approved tarball may be staged');
   return ['stage', 'publish', tarball, '--access=public', `--tag=${channel}`,
     `--registry=${POLICY.registry}`, '--provenance', '--ignore-scripts', '--json',
-    '--fetch-retries=0', `--userconfig=${config.user}`, `--globalconfig=${config.global}`];
+    '--fetch-retries=0', '--logs-max=0', '--loglevel=silent', '--update-notifier=false',
+    `--userconfig=${config.user}`, `--globalconfig=${config.global}`];
 }
 
-export async function submitOnce({ approval, bytes, readRegistry, execute, record, config, tarball }) {
+export async function submitOnce({ approval, bytes, readRegistry, execute, reconcile, record, config, tarball }) {
+  validateLocalApproval(approval);
   validateApproval(approval, 'stage');
   sameDigests(digest(bytes), approval.artifact);
   const state = validateRegistry(await readRegistry(), approval);
@@ -354,17 +407,30 @@ export async function submitOnce({ approval, bytes, readRegistry, execute, recor
   }
   const pending = approval.ownerPreflight.pending;
   if (pending.status === 'matching') {
-    await record({ status: 'owner-reconciled-existing-stage', stageId: pending.stageId,
-      workflow: pending.workflow,
+    assert.equal(typeof reconcile, 'function', 'Original authenticated stage capture reader required');
+    const original = await reconcile();
+    assert.equal(original.stageId, pending.stageId);
+    assert.deepEqual(original.workflow, pending.workflow);
+    assert.equal(String(original.capture.artifactId), String(pending.captureArtifactId));
+    await record({ status: 'owner-reconciled-existing-stage', stageId: original.stageId,
+      workflow: original.workflow, originalCapture: original.capture,
       provenance: 'pending-owner-cryptographic-verification' });
     return;
   }
   await record({ status: 'submission-outcome-unknown', stageId: null,
     instruction: 'Owner-authenticated stage/version reconciliation required before another dispatch' });
   // One call only. The pinned CLI disables HTTP retries; failure never authorizes a second write.
-  const output = await execute(stageArguments(tarball, channelFor(approval.version), config));
-  const item = npm12Contents(output, approval, bytes, true);
+  const result = await execute(stageArguments(tarball, channelFor(approval.version), config));
+  assert.equal(typeof result?.stdout, 'string', 'Actual captured stage child output required');
+  const item = npm12Contents(result.stdout, approval, bytes, true);
+  const capture = result.capture;
+  assert.ok(capture &&
+    typeof capture === 'object', 'Actual stage capture required');
+  assert.deepEqual(Object.keys(capture).sort(), ['bundleSha256', 'receiptSha256', 'stageId']);
+  assert.equal(capture.stageId, item.stageId, 'CLI stage ID differs from the actual POST response');
+  for (const key of ['receiptSha256', 'bundleSha256']) assert.match(capture[key], /^[a-f0-9]{64}$/);
   await record({ status: 'submitted-awaiting-owner-verification', stageId: item.stageId,
+    capture,
     provenance: 'pending-owner-cryptographic-verification',
     registrySignatures: 'pending-publication', ownerPublicationApproval: 'pending' });
 }

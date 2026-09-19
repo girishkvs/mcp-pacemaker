@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, lstatSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -12,10 +12,25 @@ import { inspectTarball } from './tarball.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
 import { githubReaders, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
 import { downloadPeer } from './peer.mjs';
+import { validateLocalApproval, validateLocalManifest, validatePreparedLocal } from './local-regression.mjs';
+import { LocalSourceReader, validateSourceSubject } from './local-source.mjs';
+import { readOwnerLocalAcceptance, publicationHelperEnvironment } from './local-regression-hosted.mjs';
+import { validateCapture } from './stage-capture.mjs';
+import { reconcileStageCapture } from './stage-capture-hosted.mjs';
+import { scanSource, toolsFromEnvironment } from '../publication-scanners/secrets.mjs';
+import { makeSecretCollection, secretCollectionFiles, secretHash, secretId } from './secret-report.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const save = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx' });
+
+export function capturedStageOutput({ stdout, approval, bytes, subject, directory }) {
+  const item = npm12Contents(stdout, approval, bytes, true);
+  const capture = validateCapture({ record: { ...subject, stageId: item.stageId },
+    receiptBytes: readFileSync(join(directory, 'receipt.json')),
+    bundleBytes: readFileSync(join(directory, 'provenance.sigstore')) });
+  return { stdout, capture };
+}
 
 function run(executable, args, options = {}) {
   const { showOutput = false, ...spawnOptions } = options;
@@ -99,9 +114,13 @@ async function jobs(runId, attempt) {
   throw new Error('Unexpected CI job count');
 }
 
-async function sourceAndCi(approval) {
+async function sourceAndCi(approval, { continuing = false, collectionProof = false } = {}) {
+  validateLocalApproval(approval, { continuing });
   validateSource(source(approval), approval);
   validatePackage(json(join(root, 'package.json')), approval);
+  validateSourceSubject(new LocalSourceReader(root).capture(), approval.localRegression);
+  await readOwnerLocalAcceptance({ approval, continuing, env: process.env,
+    event: json(process.env.GITHUB_EVENT_PATH), readers: githubReaders(process.env) });
   for (const name of ['.npmrc', 'ui/.npmrc']) {
     assert.ok(!existsSync(join(root, name)), 'Project npm configuration is forbidden in publication preparation');
   }
@@ -110,6 +129,8 @@ async function sourceAndCi(approval) {
   assert.equal(tag.object?.sha, approval.tagObject, 'Remote release tag moved');
   const ci = await github(`actions/runs/${approval.ciRunId}/attempts/${approval.ciAttempt}`);
   validateCi(ci, await jobs(approval.ciRunId, approval.ciAttempt), approval);
+  if (collectionProof) return { runId: String(ci.id), attempt: ci.run_attempt, commit: ci.head_sha,
+    completedAt: new Date(ci.updated_at).toISOString() };
   return { runId: ci.id, attempt: ci.run_attempt, headSha: ci.head_sha, conclusion: ci.conclusion };
 }
 
@@ -146,10 +167,11 @@ async function prepare(approval) {
     env, showOutput: args[0] === 'run',
   });
   const context = join(home, 'context.json');
-  save(context, { publicPackages: approval.publicPackages });
+  save(context, { publicPackages: approval.publicPackages, approval });
   const sourceReport = join(output, 'source-gates.json');
   run(process.execPath, [join(root, 'tools/npm-publication/source-gates.mjs'),
-    '--context', context, '--output', sourceReport], { env, showOutput: true });
+    '--context', context, '--output', sourceReport],
+  { env: publicationHelperEnvironment(env, process.env), showOutput: true });
   validateSource(source(approval), approval);
   const locks = {
     root: digest(readFileSync(join(root, 'package-lock.json'))).sha256,
@@ -182,6 +204,7 @@ async function prepare(approval) {
     sourceReportSha256: digest(readFileSync(sourceReport)).sha256,
     publicPackages: approval.publicPackages,
     preparationApproval: { approver: approval.approver, approvedAt: approval.approvedAt, scope: 'prepare' },
+    localRegression: approval.localRegression, localRegressionReview: approval.localRegressionReview,
     stage: { status: 'not-submitted', stageId: null },
     provenance: { status: 'pending-stage', verification: 'pending-owner-cryptographic-verification' },
     registrySignatures: { status: 'pending-publication' },
@@ -200,12 +223,53 @@ async function prepare(approval) {
   console.log(JSON.stringify({ preparedSha256, artifact: digest(bytes), status: prepared.status }, null, 2));
 }
 
+export async function collectSecrets(approval, options = {}) {
+  try { return await collectOriginalSecrets(approval, options); }
+  catch { throw new Error('Secret collection rejected; no eligible evidence was produced'); }
+}
+
+async function collectOriginalSecrets(approval, {
+  env = process.env, sourceRoot = root, preflight = sourceAndCi, scan = scanSource,
+  tools = toolsFromEnvironment(), postflight = () => validateSource(source(approval), approval), runtime = process,
+} = {}) {
+  assert.equal(approval.scope, 'collect-secrets');
+  assert.equal(env.GITHUB_JOB, 'secret-collection');
+  const output = join(resolve(env.RUNNER_TEMP), 'npm-secret-collection');
+  assert.equal(existsSync(output), false, 'Collection output already exists; no retry');
+  const ci = await preflight(approval, { collectionProof: true });
+  const path = resolve(env.MCP_SCANNER_PROVENANCE_FILE ?? '');
+  assert.equal(realpathSync(env.RUNNER_TEMP), resolve(env.RUNNER_TEMP));
+  assert.ok(path.startsWith(`${resolve(env.RUNNER_TEMP)}/`) || path.startsWith(`${resolve(env.RUNNER_TEMP)}\\`));
+  assert.equal(realpathSync(path), path);
+  const stat = lstatSync(path);
+  assert.ok(stat.isFile() && stat.nlink === 1 && stat.size <= 64 * 1024);
+  const provenance = readFileSync(path);
+  const secrets = await scan({ root: sourceRoot, tools, collectReview: true });
+  const report = makeSecretCollection(secrets, {
+    runId: secretId(env.GITHUB_RUN_ID), runNumber: secretId(env.GITHUB_RUN_NUMBER), attempt: 1,
+    repositoryId: secretId(env.GITHUB_REPOSITORY_ID), ownerId: secretId(env.GITHUB_REPOSITORY_OWNER_ID),
+    ref: approval.ref,
+  }, { ci, runtime: { platform: runtime.platform, arch: runtime.arch, node: runtime.versions.node },
+    bootstrap: JSON.parse(provenance.toString('utf8')) });
+  assert.equal(report.source.commit, approval.commit);
+  assert.equal(report.source.tree, approval.tree);
+  await postflight();
+  assert.equal(secretHash(readFileSync(path)), secretHash(provenance));
+  const files = secretCollectionFiles(report);
+  mkdirSync(output, { mode: 0o700 });
+  for (const [name, bytes] of files) writeFileSync(join(output, name), bytes, { flag: 'wx', mode: 0o600 });
+  assert.deepEqual(readdirSync(output).sort(), [...files.keys()].sort());
+  console.log('Redacted secret evidence collected. Not preparation, package, stage or publication eligibility.');
+  return report;
+}
+
 async function finalize(approval) {
-  const ci = await sourceAndCi(approval);
+  const ci = await sourceAndCi(approval, { continuing: true });
   const input = join(resolve(process.env.RUNNER_TEMP), 'npm-prepared');
   const { prepared, inspection, sourceArtifact } = await verifyPreparedBundle({
     directory: input, approval, env: process.env,
   });
+  validatePreparedLocal(prepared, approval);
   assert.deepEqual(prepared.publicPackages, approval.publicPackages);
   assert.deepEqual(prepared.ci, ci);
   assert.deepEqual(prepared.preparationApproval,
@@ -221,7 +285,7 @@ async function finalize(approval) {
   const { output, home } = workspace();
   const env = { ...cleanNpmEnvironment(process.env, home), NPM_PUBLICATION_CLI: cli };
   const context = join(home, 'context.json');
-  save(context, { publicPackages: approval.publicPackages, matrix, peer });
+  save(context, { publicPackages: approval.publicPackages, matrix, peer, approval });
   const bytes = readFileSync(join(input, 'candidate.tgz'));
   sameDigests(digest(bytes), prepared.artifact);
   const tarball = join(output, 'candidate.tgz');
@@ -229,8 +293,10 @@ async function finalize(approval) {
   const reportPath = join(output, 'gates.json');
   run(process.execPath, [join(root, 'tools/npm-publication/artifact-gates.mjs'),
     '--tarball', tarball, '--source-report', join(input, 'source-gates.json'),
-    '--context', context, '--output', reportPath], { env, showOutput: true });
+    '--context', context, '--output', reportPath],
+  { env: publicationHelperEnvironment(env, process.env), showOutput: true });
   const report = json(reportPath);
+  assert.deepEqual(report.localRegression, prepared.localRegression);
   validateGates(report, approval, prepared.artifact);
   assert.equal(report.sourceReportSha256, prepared.sourceReportSha256, 'Finalizer consumed different source evidence');
   sameDigests(digest(readFileSync(tarball)), prepared.artifact);
@@ -261,6 +327,8 @@ async function transfer(approval) {
   const files = zipFiles(archive);
   assert.deepEqual([...files.keys()].sort(), ['candidate.tgz', 'gates.json', 'manifest.json']);
   assert.equal(digest(files.get('manifest.json')).sha256, artifact.manifestSha256);
+  validateLocalManifest(files.get('manifest.json'), approval,
+    JSON.parse(files.get('gates.json').toString('utf8')));
   sameDigests(digest(files.get('candidate.tgz')), artifact);
 }
 
@@ -277,6 +345,7 @@ async function stage(approval) {
   for (const name of readdirSync(input)) assert.equal(lstatSync(join(input, name)).isFile(), true);
   assert.equal(digest(readFileSync(join(input, 'manifest.json'))).sha256, approval.artifact.manifestSha256);
   const manifest = json(join(input, 'manifest.json'));
+  validateLocalManifest(readFileSync(join(input, 'manifest.json')), approval, json(join(input, 'gates.json')));
   assert.equal(manifest.phase, 'prepared-not-staged');
   assert.equal(manifest.name, approval.name);
   assert.equal(manifest.version, approval.version);
@@ -311,6 +380,7 @@ async function stage(approval) {
   let sequence = 0;
   await submitOnce({
     approval, bytes, tarball, config,
+    reconcile: () => reconcileStageCapture(approval),
     readRegistry: async () => {
       const response = await fetch(`${POLICY.registry}${POLICY.name}`, {
         redirect: 'error', signal: AbortSignal.timeout(30_000), headers: { accept: 'application/json' },
@@ -320,10 +390,31 @@ async function stage(approval) {
       return response.json();
     },
     execute: args => {
+      validateLocalManifest(readFileSync(join(input, 'manifest.json')), approval, json(join(input, 'gates.json')));
       validateContext(process.env, json(process.env.GITHUB_EVENT_PATH), approval);
       validateSource(source(approval), approval);
       sameDigests(digest(readFileSync(tarball)), approval.artifact);
-      return run(process.execPath, [cli, ...args], { cwd: home, env });
+      const subject = {
+        name: approval.name, version: approval.version, channel: manifest.channel,
+        source: manifest.source, artifact: digest(bytes),
+        workflow: { ref: process.env.GITHUB_WORKFLOW_REF, commit: process.env.GITHUB_WORKFLOW_SHA,
+          runId: process.env.GITHUB_RUN_ID, attempt: 1 },
+      };
+      const directory = join(output, 'capture');
+      mkdirSync(directory, { mode: 0o700 });
+      const context = join(home, 'stage-context.json');
+      save(context, { approval, subject, config });
+      const childEnv = { ...env };
+      for (const key of ['GITHUB_API_URL', 'GITHUB_REPOSITORY_OWNER', 'GITHUB_ACTOR',
+        'GITHUB_TRIGGERING_ACTOR', 'GITHUB_JOB', 'GITHUB_EVENT_PATH', 'RUNNER_OS',
+        'RUNNER_ARCH', 'ACTUAL_RUNNER_ENVIRONMENT']) {
+        assert.ok(process.env[key], `Missing original stage context: ${key}`);
+        childEnv[key] = process.env[key];
+      }
+      const stdout = run(process.execPath, [join(root, 'tools/npm-publication/stage-child.mjs'),
+        context, tarball, directory, cli], { cwd: home, env: childEnv, timeout: 120_000, killSignal: 'SIGKILL' });
+      sameDigests(digest(readFileSync(tarball)), approval.artifact);
+      return capturedStageOutput({ stdout, approval, bytes, subject, directory });
     },
     record: state => {
       save(join(output, `stage-${sequence++}.json`), {
@@ -341,16 +432,18 @@ async function stage(approval) {
 }
 
 export async function main(command) {
-  assert.ok(['prepare', 'finalize', 'transfer', 'stage'].includes(command), 'Unknown publication command');
+  assert.ok(['collect-secrets', 'prepare', 'finalize', 'transfer', 'stage'].includes(command), 'Unknown publication command');
   const event = json(process.env.GITHUB_EVENT_PATH);
   const action = event.inputs?.action;
   const approval = JSON.parse(event.inputs?.approval ?? '');
+  validateLocalApproval(approval, { continuing: command === 'finalize' });
   // Finalization continues the same source-approved run; it does not consume a new approval.
   if (command === 'finalize') validateMatrixContext(process.env, approval, event);
   else validateApproval(approval, action);
   validateContext(process.env, event, approval);
-  assert.equal(action, ['prepare', 'finalize'].includes(command) ? 'prepare' : 'stage');
-  if (command === 'prepare') await prepare(approval);
+  assert.equal(action, command === 'collect-secrets' ? command : ['prepare', 'finalize'].includes(command) ? 'prepare' : 'stage');
+  if (command === 'collect-secrets') await collectSecrets(approval);
+  else if (command === 'prepare') await prepare(approval);
   else if (command === 'finalize') await finalize(approval);
   else if (command === 'transfer') {
     await sourceAndCi(approval);

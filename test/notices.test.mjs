@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { PackagedCheckoutFixture } from './helpers/packaged-checkout-fixture.mjs';
 import {
   BundleInventory, MANIFEST_FILE, NOTICE_FILE, artifactRecords, jsonText,
   normalizeText, noticeComments, relativeFile, renderNotices, sha256, verifyArtifacts,
@@ -12,6 +13,29 @@ import {
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const MIT = normalizeText(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8'));
+
+for (const autocrlf of ['false', 'true']) {
+  test(`canonical package checkout: complete packed inventory matches LF input with autocrlf=${autocrlf}`, t => {
+    const fixture = new PackagedCheckoutFixture(t, ROOT);
+    const frozen = fixture.checkout('lf-input', 'false', 'lf');
+    const checkout = fixture.checkout('windows', autocrlf, 'crlf');
+    assert.deepEqual(fixture.mismatches(frozen, checkout), [], 'All canonical packed files must retain exact source bytes');
+    for (const name of ['LICENSE', 'THIRD_PARTY_NOTICES.txt']) {
+      assert.equal(fs.readFileSync(path.join(checkout, name)).includes(Buffer.from('\r')), false);
+    }
+    fixture.controls(frozen, checkout);
+  });
+
+  test(`canonical package checkout: missing root rules reproduce both metadata mismatches with autocrlf=${autocrlf}`, t => {
+    const attributes = fs.readFileSync(path.join(ROOT, '.gitattributes'), 'utf8')
+      .replace(/^\/(?:LICENSE|THIRD_PARTY_NOTICES\.txt)[ \t]+text[ \t]+eol=lf\r?\n/gm, '');
+    const fixture = new PackagedCheckoutFixture(t, ROOT, attributes);
+    const frozen = fixture.checkout('lf-input', 'false', 'lf');
+    const checkout = fixture.checkout('windows', autocrlf, 'crlf');
+    assert.deepEqual(fixture.mismatches(frozen, checkout), ['LICENSE', 'THIRD_PARTY_NOTICES.txt']);
+    fixture.controls(frozen, checkout);
+  });
+}
 
 class NoticeFixture {
   constructor(t, tempRoot = tmpdir()) {

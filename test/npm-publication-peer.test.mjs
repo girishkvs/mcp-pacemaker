@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
 import { beforeEach, test } from 'node:test';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
@@ -48,6 +49,7 @@ class Fixture {
       tagObject: gitHash('d'), commit: gitHash('e'), tree: gitHash('f'),
     };
     this.peer.ref = `refs/tags/${namespaces.peer ?? ''}v${this.peer.version}`;
+    syntheticLocalApproval(this.approval);
     this.bytes = this.tarball();
     Object.assign(this.peer, digest(this.bytes));
     const owner = { login: POLICY.owner, id: 10 };
@@ -91,6 +93,7 @@ class Fixture {
       privateContentReview: { status: 'pending-owner-review', commit: this.peer.commit, artifact: digest(this.bytes) },
       publicationApproval: { status: 'not-authorized' },
     };
+    syntheticPreparedLocal(this.prepared, this.approval);
     this.rebundle();
     this.calls = [];
     this.readers = Object.fromEntries([
