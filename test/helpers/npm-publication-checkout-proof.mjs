@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -19,7 +19,7 @@ class BoundedCheckoutGate extends LocalGate {
 
 export class CheckoutProofFixture {
   constructor(t, version = '2.0.1') {
-    this.base = mkdtempSync(join(tmpdir(), 'checkout-proof-unit-'));
+    this.base = realpathSync.native(mkdtempSync(join(tmpdir(), 'checkout-proof-unit-')));
     t.after(() => rmSync(this.base, { recursive: true, force: true, maxRetries: 3 }));
     this.root = join(this.base, 'source');
     this.empty = join(this.base, 'empty');

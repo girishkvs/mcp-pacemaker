@@ -144,6 +144,18 @@ class Fixture {
 
   time(seconds) { return new Date(this.now + seconds * 1000).toISOString(); }
 
+  async withCi(value, action) {
+    const previous = process.env.CI;
+    try {
+      if (value === undefined) delete process.env.CI;
+      else process.env.CI = value;
+      return await action();
+    } finally {
+      if (previous === undefined) delete process.env.CI;
+      else process.env.CI = previous;
+    }
+  }
+
   run(id, runNumber, completed) {
     return { id, run_number: runNumber, workflow_id: 333, run_attempt: 1, head_sha: this.commit, path: POLICY.workflow,
       event: 'workflow_dispatch', repository: this.repository, head_repository: this.repository,
@@ -870,14 +882,34 @@ test('CLI cannot turn local approval JSON or forged flags into owner authenticat
 
 test('local correlation never authenticates, approves or exposes finding material', async t => {
   const f = await new Fixture().init(t);
-  const result = await correlateSecretReport({ root: f.root, report: f.report, localOnly: true, readSource: f.readSource });
-  assert.equal(result.eligibility, 'none');
-  assert.equal(result.ownerApproval, 'not-supplied');
-  assert.equal(result.findings.length, 6);
-  assert.ok(result.findings.every(item => item.classification === 'not-assessed'));
-  for (const value of f.values) assert.equal(JSON.stringify(result).includes(value), false);
-  await assert.rejects(correlateSecretReport({ root: f.root, report: f.report, readSource: f.readSource }));
-  assert.equal((await correlateCli(['--root', f.root])).status, 'error');
+  await f.withCi(undefined, async () => {
+    const result = await correlateSecretReport({ root: f.root, report: f.report, localOnly: true, readSource: f.readSource });
+    assert.equal(result.eligibility, 'none');
+    assert.equal(result.ownerApproval, 'not-supplied');
+    assert.equal(result.findings.length, 6);
+    assert.ok(result.findings.every(item => item.classification === 'not-assessed'));
+    for (const value of f.values) assert.equal(JSON.stringify(result).includes(value), false);
+    await assert.rejects(correlateSecretReport({ root: f.root, report: f.report, readSource: f.readSource }));
+    assert.equal((await correlateCli(['--root', f.root])).error, 'local-correlation-not-for-ci');
+  });
+});
+
+test('local correlation rejects CI in both API and CLI before source reads', async t => {
+  const f = await new Fixture().init(t);
+  const inherited = process.env.CI;
+  let sourceReads = 0;
+  for (const value of ['true', '1', 'false']) {
+    await f.withCi(value, async () => {
+      await assert.rejects(correlateSecretReport({ root: f.root, report: f.report, localOnly: true,
+        readSource: async () => { sourceReads++; return f.source; } }), { code: 'local-correlation-not-for-ci' });
+      assert.equal((await correlateCli(['--local-only', '--root', f.root])).error, 'local-correlation-not-for-ci');
+    });
+    assert.equal(process.env.CI, inherited);
+  }
+  assert.equal(sourceReads, 0);
+  const failure = new Error('Synthetic local fixture failure');
+  await assert.rejects(f.withCi(undefined, async () => { throw failure; }), error => error === failure);
+  assert.equal(process.env.CI, inherited);
 });
 
 test('collection action and strict topology remain separate from preparation, signing and publication', async t => {
@@ -976,8 +1008,8 @@ test('SYNTHETIC URI native collection remains non-eligible until separate exact 
     assert.equal(execution.exitCode, 183);
     assert.equal(execution.findings, 3);
   }
-  const correlation = await correlateSecretReport({ root: f.root, report: f.report,
-    localOnly: true, readSource: f.readSource });
+  const correlation = await f.withCi(undefined, () => correlateSecretReport({ root: f.root, report: f.report,
+    localOnly: true, readSource: f.readSource }));
   assert.equal(correlation.eligibility, 'none');
   assert.equal(correlation.ownerApproval, 'not-supplied');
   assert.ok((await f.nativeIdentities('artifact')).every(item => item.binding === null));

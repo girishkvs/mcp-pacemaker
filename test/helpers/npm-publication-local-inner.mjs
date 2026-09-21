@@ -11,8 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import net from 'node:net';
 import {
   LocalGate, localEnvironment, main, retainedDependencies, testArguments, testTotals,
-  uiTestArguments, validateContainment,
+  SOURCE_SUITE_TIMEOUT_MS, uiTestArguments, validateContainment,
 } from '../../tools/npm-publication/local-gate.mjs';
+import { AUDIT_MODE, AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
 import { validateSdkContract } from '../../tools/npm-publication/local-sdk-check.mjs';
 import { CURRENT_REF } from '../../tools/compatibility/fixtures.mjs';
 import { POLICY, channelFor, digest } from '../../tools/npm-publication/policy.mjs';
@@ -394,6 +395,38 @@ test('publisher commands use the selected runtime without changing the source su
   assert.equal(calls[0].file, process.execPath);
   assert.equal(calls[1].file, gate.publisherNode);
 });
+
+for (const version of ['1.3.1', '2.0.1']) {
+  test(`source suite child receives CI mode without hosted authority for ${version}`, t => {
+    const gate = fixture(t);
+    gate.env.CI = 'inherited-marker';
+    const script = `process.stdout.write(JSON.stringify({
+      ci: process.env.CI,
+      audit: process.env[${JSON.stringify(AUDIT_MODE_VARIABLE)}],
+      github: process.env.GITHUB_ACTIONS,
+      token: process.env.GITHUB_TOKEN,
+      npmToken: process.env.NPM_TOKEN,
+      temporary: require('node:os').tmpdir(),
+      physicalTemporary: require('node:fs').realpathSync.native(require('node:os').tmpdir())
+    }));`;
+    const output = gate.sourceSuite(gate.root, version, ['-e', script]);
+    assert.deepEqual(JSON.parse(output), {
+      ci: 'true', ...(version === '2.0.1' ? { audit: AUDIT_MODE } : {}),
+      temporary: join(gate.work, 'source-test-temp-alias'),
+      physicalTemporary: realpathSync.native(join(gate.work, 'source-test-temp')),
+    });
+    assert.equal(gate.env.CI, 'inherited-marker');
+    assert.equal(gate.env[AUDIT_MODE_VARIABLE], undefined);
+    assert.equal(gate.env.TEMP, gate.env.HOME);
+    const receipt = JSON.parse(readFileSync(join(gate.output, gate.steps[0].file)));
+    assert.equal(receipt.label, 'Complete source suite');
+    assert.equal(receipt.executable, process.execPath);
+    assert.deepEqual(receipt.args, ['-e', script]);
+    assert.equal(receipt.cwd, gate.root);
+    assert.equal(receipt.timeoutMs, SOURCE_SUITE_TIMEOUT_MS);
+    assert.equal(receipt.exitCode, 0);
+  });
+}
 
 test('SDK receives a new home rather than reusing the source suite home', t => {
   const gate = fixture(t, true);

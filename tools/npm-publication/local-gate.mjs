@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
-  realpathSync, rmSync, writeFileSync,
+  realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath, win32 } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -322,6 +322,17 @@ export class LocalGate {
     return this.command(label, process.execPath, args, cwd);
   }
 
+  sourceSuite(root, version, selected) {
+    const environment = auditEnvironment({ ...this.env, CI: 'true' }, version);
+    const temporary = join(this.work, 'source-test-temp');
+    const alias = join(this.work, 'source-test-temp-alias');
+    mkdirSync(temporary);
+    symlinkSync(temporary, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    for (const key of ['TEMP', 'TMP', 'TMPDIR']) environment[key] = alias;
+    return this.command('Complete source suite', process.execPath, selected,
+      root, false, SOURCE_SUITE_TIMEOUT_MS, environment);
+  }
+
   publisher(label, args, cwd) {
     return this.command(label, this.publisherNode, args, cwd);
   }
@@ -428,8 +439,7 @@ export class LocalGate {
         checks.uiRebuild = true;
         assert.deepEqual(this.snapshot(root), before, 'UI rebuild modified checkout files');
         if (autocrlf === 'true') continue;
-        const sourceOutput = this.command('Complete source suite', process.execPath, selected,
-          root, false, SOURCE_SUITE_TIMEOUT_MS, auditEnvironment(this.env, pkg.version));
+        const sourceOutput = this.sourceSuite(root, pkg.version, selected);
         checks.sourceTests = testTotals(sourceOutput);
         auditEvidence(sourceOutput, pkg.version, process.version);
         this.publisher('UI typecheck', ['node_modules/typescript/bin/tsc', '--noEmit'], join(root, 'ui'));

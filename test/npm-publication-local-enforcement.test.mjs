@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,8 +15,9 @@ import { evidenceTar } from '../tools/npm-publication/local-evidence.mjs';
 import { submitOnce, validateCi } from '../tools/npm-publication/policy.mjs';
 import { main as publicationMain } from '../tools/npm-publication/run.mjs';
 import { LocalCaseFixture } from './helpers/local-case-fixture.mjs';
+import { physical } from '../tools/npm-publication/local-inputs.mjs';
 import './helpers/npm-publication-local-audit.mjs';
-import './helpers/npm-publication-checkout-proof.mjs';
+import { CheckoutProofFixture } from './helpers/npm-publication-checkout-proof.mjs';
 
 // All positive objects below are SYNTHETIC UNIT FIXTURES. None are report evidence or owner acceptance.
 class Fixtures {
@@ -78,7 +79,7 @@ class Fixtures {
   }
 
   directory(t) {
-    const path = mkdtempSync(join(tmpdir(), 'pacemaker-enforcement-unit-'));
+    const path = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-enforcement-unit-')));
     t.after(() => rmSync(path, { recursive: true, force: true }));
     return path;
   }
@@ -96,6 +97,39 @@ class Fixtures {
   }
 }
 const fixture = new Fixtures();
+
+test('owned publication fixtures resolve aliased temporary parents without accepting linked inputs', async t => {
+  const parent = fixture.directory(t);
+  const target = join(parent, 'physical-temp');
+  const alias = join(parent, 'temp-alias');
+  mkdirSync(target);
+  symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const previous = Object.fromEntries(['TEMP', 'TMP', 'TMPDIR'].map(key => [key, process.env[key]]));
+  try {
+    for (const key of Object.keys(previous)) process.env[key] = alias;
+    assert.equal(tmpdir(), alias);
+    assert.notEqual(realpathSync.native(alias), alias);
+    const directory = fixture.directory(t);
+    assert.equal(directory, realpathSync.native(directory));
+    assert.doesNotThrow(() => physical(directory));
+    for (const version of ['1.3.1', '2.0.1']) {
+      const checkout = new CheckoutProofFixture(t, version).create();
+      const complete = await new LocalCaseFixture(t, version).create();
+      for (const root of [checkout.base, checkout.root, complete.base, complete.root, complete.directory]) {
+        assert.equal(root, realpathSync.native(root));
+        assert.doesNotThrow(() => physical(root));
+      }
+      assert.doesNotThrow(() => checkout.verify());
+      await verifyRawSteps(complete.directory, complete.gate, complete.root, version, { checkout: complete.checkoutBinding });
+    }
+    assert.throws(() => physical(alias), /Linked input/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test('SYNTHETIC statement schema is integrity-only and rejects success/authentication shortcuts', () => {
   const statement = fixture.statement();
