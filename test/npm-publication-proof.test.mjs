@@ -8,13 +8,17 @@ import { POLICY, channelFor, digest } from '../tools/npm-publication/policy.mjs'
 import { extractTarball, inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import { ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { verifyStaged } from '../tools/npm-publication/verify-staged.mjs';
+import { stageCaptureFixture } from './helpers/stage-capture-fixture.mjs';
 
 function fixture(version = '1.3.1', namespace = '') {
   const bytes = Buffer.from('synthetic proof fixture, not a real signed npm package');
-  const source = { ref: `refs/tags/${namespace}v${version}`, commit: 'a'.repeat(40) };
+  const source = { ref: `refs/tags/${namespace}v${version}`, commit: 'a'.repeat(40),
+    tagObject: 'b'.repeat(40), tree: 'c'.repeat(40) };
   const record = {
     status: 'submitted-awaiting-owner-verification', stageId: 'b24a7be2-f726-407a-8ae3-367189f1f236',
-    version, source, artifact: digest(bytes), workflow: { runId: '42', attempt: 1 },
+    name: POLICY.name, channel: channelFor(version), version, source, artifact: digest(bytes),
+    workflow: { ref: `${POLICY.repository}/${POLICY.workflow}@${source.ref}`,
+      commit: source.commit, runId: '42', attempt: 1 },
     ownerPreflight: { expectedDistTags: { latest: '2.0.1' } },
   };
   const view = { id: record.stageId, packageName: POLICY.name, version, tag: channelFor(version),
@@ -47,7 +51,7 @@ function fixture(version = '1.3.1', namespace = '') {
 test('T12/T44: hashes alone never complete provenance verification or authorize owner publication', async () => {
   const f = fixture();
   let called = false;
-  const result = await verifyStaged({ ...f, bundle: f.bundle(f.payload), verifyBundle: async (bundle, options) => {
+  const result = await verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(f.payload)), verifyBundle: async (bundle, options) => {
     called = true;
     assert.equal(options.certificateIssuer, 'https://token.actions.githubusercontent.com');
     assert.equal(options.tlogThreshold, 1);
@@ -73,18 +77,18 @@ for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
       assert.ok(identity.test(`https://github.com/${POLICY.repository}/${POLICY.workflow}@${f.record.source.ref}`));
       assert.ok(!identity.test(`https://github.com/${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`));
     };
-    await verifyStaged({ ...f, bundle: f.bundle(f.payload), verifyBundle });
+    await verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(f.payload)), verifyBundle });
     assert.equal(calls, 1);
     const differentRef = structuredClone(f.payload);
     differentRef.predicate.buildDefinition.externalParameters.workflow.ref = `refs/tags/v${version}`;
-    await assert.rejects(() => verifyStaged({ ...f, bundle: f.bundle(differentRef), verifyBundle }));
+    await assert.rejects(() => verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(differentRef)), verifyBundle }));
     assert.equal(calls, 1, 'A ref mismatch must fail before signature verification.');
   });
 }
 
 test('T44: cryptographic verifier failure blocks matching hashes and matching metadata', async () => {
   const f = fixture();
-  await assert.rejects(() => verifyStaged({ ...f, bundle: f.bundle(f.payload), verifyBundle: async () => {
+  await assert.rejects(() => verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(f.payload)), verifyBundle: async () => {
     throw new Error('controlled invalid signature/chain/transparency evidence');
   } }), /invalid signature/);
 });
@@ -103,10 +107,10 @@ test('T44: absent proof and wrong subject/source/workflow/run fail before crypto
   for (const mutate of variants) {
     const payload = structuredClone(f.payload);
     mutate(payload);
-    await assert.rejects(() => verifyStaged({ ...f, bundle: f.bundle(payload),
+    await assert.rejects(() => verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(payload)),
       verifyBundle: async () => { calls++; } }));
   }
-  await assert.rejects(() => verifyStaged({ ...f, bundle: null, verifyBundle: async () => { calls++; } }));
+  await assert.rejects(() => verifyStaged({ ...f, ...stageCaptureFixture(f.record, null), verifyBundle: async () => { calls++; } }));
   assert.equal(calls, 0);
 });
 
@@ -114,7 +118,7 @@ test('T12/T19: wrong stage ID, immutable stage tag or changed channel blocks own
   const f = fixture();
   for (const delta of [{ view: { ...f.view, id: 'other' } }, { view: { ...f.view, tag: 'latest' } },
     { currentTags: { latest: '2.0.2' } }]) {
-    await assert.rejects(() => verifyStaged({ ...f, ...delta, bundle: f.bundle(f.payload),
+    await assert.rejects(() => verifyStaged({ ...f, ...stageCaptureFixture(f.record, f.bundle(f.payload)), ...delta,
       verifyBundle: async () => { throw new Error('should not reach verifier'); } }));
   }
 });

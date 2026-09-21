@@ -6,6 +6,7 @@ import { guarded, readJson, requireCondition } from './core.mjs';
 import {
   scanAdvisories, scanArtifact, scanPrivateContent, scanPublicationRequest, scanSource, toolsFromEnvironment,
 } from './index.mjs';
+import { readSecretAdmission } from '../npm-publication/secret-admission.mjs';
 
 async function publicationReportPath(path, request) {
   requireCondition(typeof path === 'string' && isAbsolute(path), 'absolute-report-path-required');
@@ -46,8 +47,13 @@ export async function main(args = process.argv.slice(2)) {
       'publication-request-options');
       const input = await readJson(values.request);
       const destination = await publicationReportPath(values.output, input.value);
+      let secretAdmission;
+      if (input.value.approval?.secretReview !== undefined) {
+        requireCondition(input.value.phase === 'source', 'source-secret-admission-not-for-artifacts');
+        secretAdmission = await readSecretAdmission({ approval: input.value.approval });
+      }
       const report = await scanPublicationRequest({
-        request: input.value, tools,
+        request: input.value, tools, secretAdmission,
         policyPath: values.policy ?? process.env.MCP_PUBLICATION_PRIVATE_POLICY,
         publicPackagesPath: values['public-packages'] ?? process.env.MCP_PUBLICATION_PUBLIC_PACKAGES,
         exemptionsPath: values.exemptions ?? process.env.MCP_PUBLICATION_ADVISORY_EXEMPTIONS,

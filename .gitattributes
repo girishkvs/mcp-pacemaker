@@ -9,6 +9,10 @@
 *.md    text eol=lf
 *.yml   text eol=lf
 
+# Published root metadata must not inherit the host's default line endings.
+/LICENSE text eol=lf
+/THIRD_PARTY_NOTICES.txt text eol=lf
+
 # Windows scripts use CRLF.
 *.ps1   text eol=crlf
 *.vbs   text eol=crlf

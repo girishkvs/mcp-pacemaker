@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
+import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -19,10 +21,23 @@ import { inspectRuntimeLicenses, LICENSE_FAILURE_HINTS } from '../tools/npm-publ
 import { fixtureLicenseEvidence, fixtureIntegrity, fixtureFile } from './fixtures/consumer-license-evidence.mjs';
 import { captureConsumerLicenseEvidence } from '../tools/npm-consumer/license-evidence.mjs';
 import {
-  assertHostedScannerContext, installScanners, releaseExecutable, SCANNER_RELEASES,
+  assertHostedScannerContext, installScanners, releaseExecutable, retainScannerProvenance, SCANNER_RELEASES,
 } from '../tools/npm-publication/install-scanners.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
+test('scanner bootstrap retains exact create-only safe provenance for the original collector', t => {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'producer-provenance-unit-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const values = {};
+  const evidence = { schemaVersion: 1, platform: 'linux-x64', tools: [], configSha256: hash('SYNTHETIC UNIT CONFIG') };
+  retainScannerProvenance(root, values, evidence);
+  assert.equal(values.MCP_SCANNER_PROVENANCE_FILE, join(root, 'provenance.json'));
+  const bytes = readFileSync(values.MCP_SCANNER_PROVENANCE_FILE);
+  assert.equal(bytes.toString(), `${JSON.stringify(evidence, null, 2)}\n`);
+  assert.equal(bytes.includes(Buffer.from(root)), false);
+  assert.throws(() => retainScannerProvenance(root, values, evidence), /EEXIST/);
+  assert.deepEqual(readFileSync(values.MCP_SCANNER_PROVENANCE_FILE), bytes);
+});
 const commit = 'a'.repeat(40);
 const artifact = { sha256: 'b'.repeat(64), sha512: 'c'.repeat(128),
   integrity: `sha512-${Buffer.from('c'.repeat(128), 'hex').toString('base64')}` };
@@ -81,6 +96,7 @@ function fixture(t, temporaryParent = tmpdir()) {
     files: nativePaths.map(path => ({ path, sha256: hash(readFileSync(join(sourceRoot, path))) }))
       .sort((a, b) => a.path.localeCompare(b.path)) };
   const request = { schemaVersion: 1, phase: 'source', sourceRoot, root: sourceRoot, commit,
+    approval: syntheticLocalApproval({ version: pkg.version, commit, tree: '9'.repeat(40), scope: 'prepare' }),
     name: pkg.name, version: pkg.version, requiredGates: SOURCE_GATES,
     publicPackages: ['fixture-public'] };
   return { root, sourceRoot, extractedRoot, request, nativeIdentity };
@@ -889,7 +905,8 @@ test('CLI writes only new outside-root safe reports; no overwrite or unknown opt
   const input = join(f.root, 'request.json');
   const output = join(f.root, 'output.json');
   write(f.root, 'request.json', f.request);
-  const injected = { scanPublication: scanner, run: gitRunner(f) };
+  const injected = { scanPublication: scanner, run: gitRunner(f),
+    admitPreparation: async approval => validateLocalApproval(approval, { continuing: true }) };
   assert.equal(await externalCli(['--request', input, '--output', output], injected), 0);
   assert.equal(JSON.parse(readFileSync(output)).gates['author-identity'].status, 'pending-owner-review');
   await assert.rejects(externalCli(['--request', input, '--output', output], injected));
@@ -911,7 +928,8 @@ test('owned external fixtures canonicalize real aliased temp parents', async t =
     const f = fixture(child, alias);
     assert.equal(dirname(f.root), physical);
     assert.equal(realpathSync.native(f.root), f.root);
-    const injected = { scanPublication: scanner, run: gitRunner(f) };
+    const injected = { scanPublication: scanner, run: gitRunner(f),
+      admitPreparation: async approval => validateLocalApproval(approval, { continuing: true }) };
     const native = await verifyNativeIdentity(f.request, injected);
     assert.equal(native.baselineCommit, CURRENT_REF);
     const consumers = normalizeMatrix(artifactRequest(f));
@@ -940,7 +958,8 @@ test('owned external fixtures canonicalize real aliased temp parents', async t =
     write(f.root, 'request.json', f.request);
     await assert.rejects(externalCli([
       '--request', join(f.root, 'request.json'), '--output', join(externalAlias, 'rejected.json'),
-    ], { scanPublication: scanner, run: gitRunner(f) }), /Output parent must not be a link/);
+    ], { scanPublication: scanner, run: gitRunner(f),
+      admitPreparation: async approval => validateLocalApproval(approval, { continuing: true }) }), /Output parent must not be a link/);
     assert.equal(existsSync(join(f.root, 'rejected.json')), false);
     const retainedBin = join(f.root, 'retained-bin');
     const bin = join(f.extractedRoot, 'bin');
