@@ -12,6 +12,8 @@ import { scanAdvisories, scanPublicationRequest } from '../publication-scanners/
 import { CONSUMER_TOOLCHAINS, validateConsumerMatrix } from './gates.mjs';
 import { inspectRuntimeLicenses, LICENSE_FAILURE_HINTS, safeLicenseDiagnostic } from './runtime-licenses.mjs';
 import { inspectTarball } from './tarball.mjs';
+import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
+import { readSecretAdmission } from './secret-admission.mjs';
 
 export const SOURCE_GATES = Object.freeze([
   'source-gitleaks', 'source-trufflehog', 'source-private-identifiers', 'producer-advisories',
@@ -471,7 +473,7 @@ function validateRequest(request) {
 export async function aggregateExternalGates(request, {
   run = command, scanPublication = scanPublicationRequest, advisories = scanAdvisories,
   licenses = inspectRuntimeLicenses, artifactFiles = verifyArtifactFiles,
-  policyPath, exemptionsPath, tools, fetchImpl,
+  policyPath, exemptionsPath, tools, fetchImpl, secretAdmission,
 } = {}) {
   const report = { schemaVersion: 1, phase: request?.phase, commit: request?.commit,
     ...(request?.phase === 'artifact' ? { artifact: Object.fromEntries(['sha256', 'sha512', 'integrity']
@@ -498,11 +500,11 @@ export async function aggregateExternalGates(request, {
       ...(consumers ? { consumers: consumers.filter(item => item.platform === 'linux' &&
         item.npm === CONSUMER_TOOLCHAINS[1].npm) } : {}) };
     // Do not pass receipts, private JSON, or author/history evidence into scanner request details.
-    for (const key of ['matrix', 'replacement', 'sourceReport', 'publicPackages', 'policyPath', 'exemptionsPath']) {
+    for (const key of ['matrix', 'replacement', 'sourceReport', 'publicPackages', 'policyPath', 'exemptionsPath', 'approval']) {
       delete scannerRequest[key];
     }
     const scanned = await scanPublication({ request: scannerRequest, policyPath, exemptionsPath,
-      publicPackages: request.publicPackages, tools, fetchImpl });
+      publicPackages: request.publicPackages, tools, fetchImpl, secretAdmission });
     equal(scanned.schemaVersion, 1);
     equal(scanned.phase, request.phase);
     equal(scanned.commit, request.commit);
@@ -608,6 +610,7 @@ export function externalExitCode(report) {
 }
 
 export async function externalCli(args, injected = {}) {
+  const { admitPreparation = requireHostedLocalPreparation, readAdmission = readSecretAdmission, ...gates } = injected;
   const options = {};
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index];
@@ -620,11 +623,17 @@ export async function externalCli(args, injected = {}) {
   assert.ok(options['--request'] &&
     options['--output'], 'Usage: --request <absolute.json> --output <absolute.json> [--policy <absolute.json>] [--exemptions <absolute.json>]');
   const request = JSON.parse(readFileSync(options['--request'], 'utf8'));
+  await admitPreparation(request.approval);
+  const secretAdmission = request.phase === 'source' && request.approval.secretReview !== undefined
+    ? await readAdmission({ approval: request.approval }) : undefined;
+  // The read credential is only for admission; no scanner/library receives it.
+  delete process.env.GITHUB_TOKEN;
   for (const root of [request.root, request.sourceRoot]) assert.ok(!inside(root, options['--output']),
     'Output must be outside source and extracted roots');
   const outputParent = resolve(options['--output'], '..');
   assert.equal(realpathSync(outputParent), outputParent, 'Output parent must not be a link');
-  const report = await aggregateExternalGates(request, { ...injected,
+  const report = await aggregateExternalGates(request, { ...gates,
+    secretAdmission,
     policyPath: options['--policy'] ?? request.policyPath,
     exemptionsPath: options['--exemptions'] ?? request.exemptionsPath });
   writeFileSync(options['--output'], `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 });

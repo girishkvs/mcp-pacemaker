@@ -88,7 +88,7 @@ export function isolatedEnvironment(root) {
     ...env, HOME: join(root, 'home'), USERPROFILE: join(root, 'home'),
     XDG_CONFIG_HOME: join(root, 'home'), XDG_CACHE_HOME: join(root, 'home'),
     TMP: root, TEMP: root, TMPDIR: root, NO_COLOR: '1', TERM: 'dumb',
-    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
+    GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
     GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.bareRepository', GIT_CONFIG_VALUE_0: 'explicit',
     GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: 'file',
     GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(root, 'no-grafts'),
@@ -106,8 +106,10 @@ export async function runBounded(file, args, options = {}) {
   requireCondition(options.input === undefined ||
     (Buffer.isBuffer(options.input) && options.input.length <= LIMITS.outputBytes), 'invalid-process-input');
   return new Promise((resolveResult, reject) => {
+    const startedAt = new Date().toISOString();
     const stdout = [];
     const stderr = [];
+    const received = { stdout: 0, stderr: 0 };
     let size = 0;
     let failure;
     let settled = false;
@@ -142,11 +144,21 @@ export async function runBounded(file, args, options = {}) {
         reject(new ScannerError('scanner-terminated'));
       } else {
         const output = Buffer.concat(stdout);
+        const diagnostic = Buffer.concat(stderr);
+        const audit = {
+          schemaVersion: 1, kind: 'bounded-native-execution',
+          executablePathSha256: sha256(file), argumentsSha256: sha256(JSON.stringify(args)),
+          startedAt, completedAt: new Date().toISOString(), code, signal: null,
+          timeoutMs, maxOutputBytes,
+          streams: Object.fromEntries([['stdout', output], ['stderr', diagnostic]].map(([name, bytes]) =>
+            [name, { sha256: sha256(bytes), bytes: bytes.length, receivedBytes: received[name] }])),
+        };
         resolveResult({ code, stdout: options.binaryOutput ? output : output.toString('utf8'),
-          stderr: Buffer.concat(stderr).toString('utf8') });
+          stderr: diagnostic.toString('utf8'), audit });
       }
     };
-    const collect = target => bytes => {
+    const collect = (target, name) => bytes => {
+      received[name] += bytes.length;
       size += bytes.length;
       if (size > maxOutputBytes) {
         stop('scanner-output-limit');
@@ -155,8 +167,8 @@ export async function runBounded(file, args, options = {}) {
       }
     };
     const timer = setTimeout(() => stop('scanner-timeout'), timeoutMs);
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
+    child.stdout.on('data', collect(stdout, 'stdout'));
+    child.stderr.on('data', collect(stderr, 'stderr'));
     child.on('error', () => {
       failure = 'scanner-start-failed';
       finish();

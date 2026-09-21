@@ -11,6 +11,7 @@ import { readSignedArtifact } from './bootstrap-readers.mjs';
 import { createHostedBootstrapVerifier } from './verify-bootstrap.mjs';
 import { ownerEnvironment, validateOwnerContext } from './owner-bootstrap.mjs';
 import { ownerState, atomicJson, readJsonFile } from './owner-state.mjs';
+import { validateLocalApproval } from './local-regression.mjs';
 
 const entry = fileURLToPath(import.meta.url);
 
@@ -26,6 +27,7 @@ function inputs(cleanupOnly = false) {
   const approval = JSON.parse(event.inputs.approval);
   validateOwnerContext({ env: process.env, event, approval,
     ...(cleanupOnly ? { approvalTime: Date.parse(approval.approvedAt) } : {}) });
+  if (!cleanupOnly) validateLocalApproval(approval);
   return approval;
 }
 
@@ -199,7 +201,10 @@ async function cleanup(approval) {
 }
 
 export async function main(args) {
-  const approval = inputs(args[0] === 'cleanup');
+  const cleanupOnly = args[0] === 'cleanup' ||
+    args[0] === 'wait' &&
+    args[1] === 'cleanup';
+  const approval = inputs(cleanupOnly);
   assert.ok(['start', 'supervise', 'wait', 'cleanup'].includes(args[0]));
   assert.equal(args.length, args[0] === 'wait' ? 2 : 1);
   if (args[0] === 'start') await start(approval);

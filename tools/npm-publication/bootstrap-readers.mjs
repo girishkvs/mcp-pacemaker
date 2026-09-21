@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { validatePreparedLocal } from './local-regression.mjs';
+import { SECRET_COLLECTION_JOB } from './secret-report.mjs';
 import {
   POLICY, digest, sameDigests, validateTransfer, validateCi, validateEnvironment, publicationTagName,
 } from './policy.mjs';
@@ -107,10 +109,12 @@ export async function readCandidateEvidence(approval, locks, readers) {
   assert.equal(source.sourceReportSha256, manifest.sourceReportSha256);
   sameDigests(digest(preparedFiles.get('candidate.tgz')), approved);
   const prepared = parse(preparedFiles.get('prepared.json'));
+  validatePreparedLocal(prepared, approval);
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   for (const key of ['name', 'version', 'source', 'workflow', 'ci', 'toolchain', 'producerLocks',
-    'artifact', 'publicPackages', 'sourceReportSha256', 'privateContentReview']) {
+    'artifact', 'publicPackages', 'sourceReportSha256', 'privateContentReview',
+    'localRegression', 'localRegressionReview']) {
     assert.deepEqual(prepared[key], manifest[key], `Prepared/finalized ${key} differs`);
   }
   const ids = new Set([id(metadata.id), id(source.id)]);
@@ -144,14 +148,14 @@ export async function readCandidateEvidence(approval, locks, readers) {
   }
   assert.equal(names.size, 6);
   assert.equal(lanes, 12);
-  await readPeerEvidence(manifest.peerArtifact, run.repository.id, readers);
+  await readPeerEvidence(manifest.peerArtifact, run.repository.id, readers, approval);
   return { ...candidate, files, repository: run.repository,
     evidence: { prepareRunId: id(approved.runId), candidateArtifactId: id(metadata.id),
       sourceArtifactId: id(source.id), consumerArtifacts: 6, consumerInstalls: lanes,
       peerArtifactId: id(manifest.peerArtifact.artifactId), checkedAt: new Date().toISOString() } };
 }
 
-async function readPeerEvidence(peer, repositoryId, readers) {
+async function readPeerEvidence(peer, repositoryId, readers, approval) {
   assert.equal(peer.schemaVersion, 1);
   assert.equal(peer.purpose, 'service-comparison-only');
   assert.equal(peer.name, POLICY.name);
@@ -201,6 +205,7 @@ async function readPeerEvidence(peer, repositoryId, readers) {
   assert.equal(digest(files.get('source-gates.json')).sha256, peer.sourceReportSha256);
   sameDigests(digest(files.get('candidate.tgz')), peer);
   const prepared = parse(files.get('prepared.json'));
+  validatePreparedLocal(prepared, approval, { ...peer, ...peer.source });
   assert.deepEqual(prepared.source, peer.source);
   assert.equal(prepared.version, peer.version);
   assert.equal(prepared.name, POLICY.name);
@@ -227,7 +232,7 @@ export async function readSigningRun(approval, runId, readers, completed) {
   assert.equal(job.conclusion, completed ? 'success' : null);
   assert.ok(job.labels?.includes('ubuntu-24.04'));
   assert.ok(job.runner_name);
-  const allowed = new Set(['source', 'prepare', 'consumers', 'stage', 'sign-bootstrap', 'publish-bootstrap',
+  const allowed = new Set(['source', 'prepare', 'consumers', 'stage', 'sign-bootstrap', 'publish-bootstrap', SECRET_COLLECTION_JOB,
     ...MATRIX.map(lane => lane.jobName)]);
   const seen = new Set();
   for (const item of jobs) {
@@ -277,7 +282,7 @@ export async function readOwnerRun(approval, runId, readers) {
   assert.equal(job.conclusion, null);
   assert.ok(job.labels?.includes('ubuntu-24.04'));
   assert.ok(job.runner_name);
-  const allowed = new Set(['source', 'prepare', 'consumers', 'stage', 'sign-bootstrap', 'publish-bootstrap',
+  const allowed = new Set(['source', 'prepare', 'consumers', 'stage', 'sign-bootstrap', 'publish-bootstrap', SECRET_COLLECTION_JOB,
     ...MATRIX.map(lane => lane.jobName)]);
   const seen = new Set();
   for (const item of jobs) {

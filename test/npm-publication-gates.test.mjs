@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { createHash } from 'node:crypto';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -18,6 +19,43 @@ import { fixturePlan, ownedDirectory, removeOwnedDirectory } from '../tools/comp
 import { cleanNpmEnvironment } from '../tools/npm-publication/run.mjs';
 import { temporaryEnvironment } from '../tools/npm-publication/gate-environment.mjs';
 import { LICENSE_FAILURE_HINTS } from '../tools/npm-publication/runtime-licenses.mjs';
+
+// Only the adapter is under test. The child executor remains injected; no hosted reader is called.
+class ExternalRunnerAdapterFixture {
+  constructor(t) {
+    const values = {
+      GITHUB_ACTIONS: 'true', GITHUB_SERVER_URL: 'https://github.com', GITHUB_API_URL: 'https://api.github.com',
+      GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: POLICY.repository,
+      GITHUB_REPOSITORY_ID: '100', GITHUB_REPOSITORY_OWNER_ID: '101', GITHUB_SHA: 'a'.repeat(40),
+      GITHUB_REF: 'refs/tags/v2.0.1', GITHUB_WORKFLOW_SHA: 'a'.repeat(40),
+      GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v2.0.1`,
+      GITHUB_RUN_ATTEMPT: '1', GITHUB_RUN_ID: '42', GITHUB_ACTOR: POLICY.owner,
+      GITHUB_TRIGGERING_ACTOR: POLICY.owner, GITHUB_EVENT_PATH: 'unit-only-not-read.json',
+      RUNNER_ENVIRONMENT: 'github-hosted', ACTUAL_RUNNER_ENVIRONMENT: 'github-hosted',
+      GITHUB_TOKEN: 'unit-only-injected-reader',
+    };
+    const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    t.after(() => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+  }
+
+  adapt(runner) {
+    runner.run = (label, file, args, cwd, environment) => {
+      assert.equal(label, 'Execute real external gate aggregator');
+      assert.equal(file, process.execPath);
+      assert.equal(cwd, runner.root);
+      assert.equal(args[0], join(runner.root, 'tools/npm-publication/external-gates.mjs'));
+      assert.equal(environment.GITHUB_TOKEN, 'unit-only-injected-reader');
+      assert.equal(environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN, undefined);
+      return runner.node('tools/npm-publication/external-gates.mjs', args.slice(1));
+    };
+  }
+}
 
 for (const [platform, tempRoot] of [
   ['linux', '/home/runner/work/_temp'],
@@ -147,6 +185,8 @@ class ControlledRunner {
       ['test', 'compat:prepare', 'compat:clean', 'test:compat', 'test:compat:browser']
         .map(name => [name, 'controlled fixture'])) };
     this.context = {
+      approval: syntheticLocalApproval({ ...artifact.source, version: artifact.version, scope: 'prepare',
+        ref: `refs/tags/v${artifact.version}`, tagObject: 'c'.repeat(40), approver: POLICY.owner }),
       publicPackages: [POLICY.name, 'smol-toml'],
       matrix: { consumerLanes: lanes(artifact).map(result => ({ result })), artifactEvidence: [evidence] },
       peer: {
@@ -474,7 +514,8 @@ test('External evidence is phase/source/payload bound; only designated owner-pen
   }
 });
 
-test('External adapter calls the node entrypoint directly without an undefined package-script hook', () => {
+test('External adapter calls the node entrypoint directly without an undefined package-script hook', t => {
+  const adapter = new ExternalRunnerAdapterFixture(t);
   const owned = ownedDirectory();
   try {
     for (const phase of ['source', 'artifact']) {
@@ -494,6 +535,7 @@ test('External adapter calls the node entrypoint directly without an undefined p
           return { evidence };
         },
       };
+      adapter.adapt(runner);
       const report = GateRunner.prototype.external.call(runner, phase, binding);
       assert.deepEqual(calls, [{ file: 'tools/npm-publication/external-gates.mjs', args: [
         '--request', join(owned.dir, `${phase}-request.json`),
@@ -507,6 +549,7 @@ test('External adapter calls the node entrypoint directly without an undefined p
 });
 
 test('External adapter exposes only the safe subgate and preserves the original execution failure', t => {
+  const adapter = new ExternalRunnerAdapterFixture(t);
   const owned = ownedDirectory();
   t.after(() => removeOwnedDirectory(owned));
   const messages = [];
@@ -526,6 +569,7 @@ test('External adapter exposes only the safe subgate and preserves the original 
       throw failure;
     },
   };
+  adapter.adapt(runner);
   assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === failure);
   assert.deepEqual(messages, [
     'External gate failure: gate=native-release-identity; code=external-gate-rejected',
@@ -708,6 +752,7 @@ test('Safe external failure rejects missing, unowned, linked and payload-substit
 });
 
 test('Real controlled child exit and private transcript survive safe external reporting without replay', t => {
+  const adapter = new ExternalRunnerAdapterFixture(t);
   const owned = ownedDirectory();
   t.after(() => removeOwnedDirectory(owned));
   const messages = [];
@@ -726,6 +771,7 @@ test('Real controlled child exit and private transcript survive safe external re
       catch (error) { original = error; throw error; }
     },
   };
+  adapter.adapt(runner);
   assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === original);
   assert.equal(original.actual, 23);
   assert.equal(calls, 1);
@@ -734,12 +780,14 @@ test('Real controlled child exit and private transcript survive safe external re
 });
 
 test('Unavailable reports and a failed diagnostic sink cannot replace or retry the original failure', t => {
+  const adapter = new ExternalRunnerAdapterFixture(t);
   const f = new ExternalFailureFixture(t);
   t.mock.method(console, 'error', () => { throw new Error('Controlled diagnostic sink failure'); });
   const failure = new Error('Controlled original failure');
   let calls = 0;
   const runner = { owned: f.owned, root: f.owned.dir, context: {},
     node() { calls++; throw failure; } };
+  adapter.adapt(runner);
   assert.throws(() => GateRunner.prototype.external.call(runner, 'source', binding), error => error === failure);
   assert.equal(calls, 1);
 });
@@ -828,7 +876,7 @@ test('Compatibility evidence requires the reviewed npm and the exact root-role t
   }
 });
 
-test('Gate CLI requires explicit absolute paths and rejects duplicates and unknown actions', () => {
+test('Gate CLI requires explicit absolute paths and rejects duplicates and unknown actions', async () => {
   const output = join(tmpdir(), 'gate-output.json');
   assert.equal(gateOptions(['--output', output], ['--output'])['--output'], output);
   for (const args of [[], ['--output', 'relative'], ['--output', output, '--output', output],
@@ -843,12 +891,12 @@ test('Gate CLI requires explicit absolute paths and rejects duplicates and unkno
     assert.deepEqual(Object.keys(gateOptions(values, required)), required);
     for (let index = 0; index < required.length; index++) {
       const missing = values.filter((_, at) => Math.floor(at / 2) !== index);
-      assert.throws(() => main(missing), /Missing gate option/);
+      await assert.rejects(() => main(missing), /Missing gate option/);
       const relative = [...values];
       relative[index * 2 + 1] = 'relative.json';
-      assert.throws(() => main(relative), /absolute path/);
+      await assert.rejects(() => main(relative), /absolute path/);
     }
-    assert.throws(() => main([...values, '--output', output]), /Repeated gate option/);
-    assert.throws(() => main([...values, '--stage', output]), /Unknown gate option/);
+    await assert.rejects(() => main([...values, '--output', output]), /Repeated gate option/);
+    await assert.rejects(() => main([...values, '--stage', output]), /Unknown gate option/);
   }
 });

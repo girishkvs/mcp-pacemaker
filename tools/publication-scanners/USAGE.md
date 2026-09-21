@@ -104,6 +104,112 @@ replace the full source/publication gate or separate owner review. Default publi
 remain counts/hashes only. The direct API is `diagnoseSource({root, tools?, localOnly: true})`
 from `secrets.mjs`, with the same CI rejection; keep returned locations local.
 
+## Exact synthetic URI review (source only)
+
+Secret findings still block by default. No scanner option, local disposition JSON,
+test-directory rule, advisory exemption, `authenticated` flag or owner content
+review overrides a secret finding. `parseTrufflehog` continues to return the raw
+`findings` status and count; its process exit remains 183.
+
+The separate `collect-secrets` action in `npm-publish.yml` can collect non-eligible
+source evidence. It runs the same pinned arguments and complete working-tree and
+reachable-history coverage, without online verification, retries or suppressed
+diagnostics. It cannot pack or produce a prepared/staged/publication artifact.
+The same artifact contains schema-2 `report.json` and exactly four canonical
+`execution-<working-tree|history>-<gitleaks|trufflehog>.json` receipts.
+They retain original bounded native stream digests/byte counts, timestamps,
+literal argument flags with digest-only path slots, parser completion/count
+facts, pinned release provenance and complete source/history commitments.
+No raw scanner output, matches, snippets,
+absolute paths, private policies, local triage or owner-local evidence is uploaded.
+Raw output exists only in scanner process memory during hosted collection.
+
+This evidence is **producer-backed**, not independent replay of withheld raw
+streams. Original hosted job/checkout/bootstrap/collection/upload steps, source,
+tool pins and authenticated immutable ZIP bytes must agree. Native errors,
+signals, output loss, unsupported diagnostics, incomplete coverage and changed
+inputs cannot produce an admissible report. The report is bounded to 512 KiB;
+oversized evidence fails rather than dropping members or findings.
+
+Collection requires the exact committed file set and a verified Git rendering
+with `core.autocrlf=false`, `core.eol=lf` and committed attributes. Explicit CRLF
+and binary declarations remain authoritative; executable filters, encoding,
+`ident` and local attribute overrides are rejected. Extra ignored/untracked
+source files block rather than being excluded. Public inventory-with-mode and
+private canonical file commitments are different named formats. A private
+consumer must reconstruct each format and require actual collected bytes to
+match both its qualified source and fresh private-policy byte subject. A Windows
+Git LF materialization is not Linux execution evidence. Old differently rendered
+checkouts, policies or collection reports cannot be relabeled.
+
+A later fresh **prepare** owner dispatch may explicitly review that exact original
+report and its entire finding-ID set. Original artifact ZIP bytes, API metadata,
+owner/repository IDs, source commit/tree, collection run/job/steps and exact checkout
+bytes are verified. A capability created by this readback, not request booleans,
+supplies `scanPublicationRequest`'s optional `secretAdmission` input. Request CLI
+mode can obtain it from `request.approval.secretReview` only through the same real
+owner dispatch reader; local JSON alone is never sufficient. The external gate
+CLI uses the same reader. Neither command has an offline-success override.
+
+The only eligible locations are the three URI-userinfo rejection inputs in
+`test/helpers/npm-publication-stage-issuer.mjs:36`,
+`test/helpers/npm-publication-stage-fulcio.mjs:41`, and
+`tools/npm-publication/offline-stage/npm.cjs:44`. This is an eligibility restriction,
+not a path exemption: URI detector, line, matched-value hash, complete raw-record
+hash, exact file/blob bytes, declared Git attributes, scope, source and report must
+still match a fresh explicit review. Other detectors, Gitleaks findings, unmapped
+objects, duplicate/unused approvals and payload findings remain blocking.
+History requires a verified exported blob with one exact path in the approved
+HEAD tree; ambiguous, deleted or unverified history mappings are not admissible.
+Working-tree and history findings require separate IDs even when values match.
+TruffleHog 3.97.1's URI detector reports the pathless URL in `Raw` and the
+complete URL in `RawV2`. A disagreement is eligible only for the three pinned
+fixture blob/path/line pairs, with exact byte lengths and hashes for both
+representations. The complete value must be one uniquely quoted source literal,
+not a matching prefix. The verified tool/version, exact URI/PLAIN filesystem
+record shape, `SecretParts` and redacted representation must agree. No URL
+normalization or percent decoding is performed. Unknown fields, added credential
+material, changed pairs and other disagreements remain blocked. Missing/empty
+or equal `RawV2` retains the existing correlation path; malformed non-string
+values do not become an absent field.
+
+These checks establish source-finding eligibility only. They do not approve a
+false positive, change raw findings/183/counts, authenticate a local report or
+reuse consent from another report. The complete parsed-record hash and finding
+ID still bind both representations and every other field. Native local evidence
+whose executable reports `vcs.modified=true` does not prove official-release
+binary equivalence. Local binary pins are not substituted for the existing
+hosted release bootstrap and authenticated producer/readback requirements.
+
+Exact Git blob bytes are required unless committed `text eol=crlf` explicitly
+declares the exact CRLF checkout rendering. No arbitrary newline normalization,
+filters, encoding conversion or local attribute overrides are accepted.
+
+Admission reuses the original authenticated scan, not a later scan/report. The
+complete source inventory and every finding binding are rechecked before and
+after the scanner adapter's other gates. Policy pass is separately labeled with
+raw count, reviewed false positives and remaining findings; original raw
+`findings`/183/count and report identity remain in source and final gate evidence.
+This does not waive owner content/local-regression review, current source CI,
+native/platform checks, payload scanning, signing, staging or publication approval.
+See [owner input and replay rules](../../docs/npm-publishing.md#exact-source-secret-review).
+
+For private inspection of a downloaded redacted report:
+
+```sh
+node tools/publication-scanners/correlate.mjs --local-only \
+  --root /private/exact-checkout --report /private/report.json \
+  --output /private/new-correlation.json
+```
+
+The local output contains inventory-checked repository-relative paths/lines and
+hashes, never matched values. Its destination must be new and outside all Git
+checkouts; CI is rejected. Correlation checks exact commit/tree and finding bytes,
+but does **not** authenticate the report, assess synthetic use or issue approval.
+A different local root can be used for this inspection only; admission still
+requires the collected root and full inventory hashes. A local report approval
+cannot be promoted to a hosted, legacy, history or payload approval.
+
 ## OSV exact-lock advisory gate
 
 Only explicit approved **public package names and exact versions** leave the process.

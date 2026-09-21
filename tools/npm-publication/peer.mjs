@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
 import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { POLICY, digest, publicationTagName, sameDigests } from './policy.mjs';
 import { MATRIX, githubReaders, zipFiles } from './matrix.mjs';
 import { inspectTarball } from './tarball.mjs';
+import { SECRET_COLLECTION_JOB, assertCollectionJobSkipped } from './secret-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SOURCE_STEPS = [
@@ -34,6 +36,7 @@ function gitSource(value) {
 }
 
 export function validatePeerApproval(approval, env) {
+  validateLocalApproval(approval, { continuing: true });
   assert.ok(approval?.peerArtifact,
     'Missing approved peerArtifact. First prepare source+matrix bundle remains available; ' +
     'approve the opposite source artifact in a fresh prepare. Never create final/stage eligibility without T32.');
@@ -116,7 +119,9 @@ export function validatePeerRun({ approval, env, run, jobs }) {
 
 export function validatePeerJobs({ peer, jobs }) {
   assert.ok(Array.isArray(jobs), 'Actual peer jobs required');
-  const names = new Set(['source', 'prepare', 'stage', 'sign-bootstrap', 'publish-bootstrap', ...MATRIX.map(lane => lane.jobName)]);
+  assertCollectionJobSkipped(jobs);
+  const names = new Set(['source', 'prepare', 'stage', 'sign-bootstrap', 'publish-bootstrap',
+    SECRET_COLLECTION_JOB, ...MATRIX.map(lane => lane.jobName)]);
   const seenIds = new Set();
   const seenNames = new Set();
   for (const job of jobs) {
@@ -237,6 +242,7 @@ export function validatePeerBundle({ approval, env, metadata, archive, tagRef, t
   assert.equal(archive.readUInt16LE(end + 10), 3, 'Unexpected peer ZIP directory/member');
   assert.equal(hash(files.get('prepared.json')), peer.manifestSha256, 'Peer manifest hash mismatch');
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
+  validatePreparedLocal(prepared, approval, peer);
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);

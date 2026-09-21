@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "inventory": {
+    "files": 1942,
+    "bytes": 12362712,
+    "sha256": "27fba5e273393d9a632023432bfab65b2a423b250d81d66f4446e2d3248cecff"
+  },
+  "resolutions": [
+    { "from": "bin/npm-cli.js", "request": "../lib/cli.js", "path": "lib/cli.js" },
+    { "from": "bin/npm-cli.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "npm-registry-fetch", "path": "node_modules/npm-registry-fetch/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "minipass-fetch", "path": "node_modules/minipass-fetch/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "libnpmpublish", "path": "node_modules/libnpmpublish/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "sigstore", "path": "node_modules/sigstore/dist/index.js" },
+    { "from": "bin/npm-cli.js", "request": "@sigstore/sign", "path": "node_modules/@sigstore/sign/dist/index.js" },
+    { "from": "bin/npm-cli.js", "request": "@npmcli/config", "path": "node_modules/@npmcli/config/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "libnpmpack", "path": "node_modules/libnpmpack/lib/index.js" },
+    { "from": "bin/npm-cli.js", "request": "pacote", "path": "node_modules/pacote/lib/index.js" },
+    { "from": "lib/utils/oidc.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
+    { "from": "node_modules/npm-registry-fetch/lib/index.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
+    { "from": "node_modules/make-fetch-happen/lib/remote.js", "request": "minipass-fetch", "path": "node_modules/minipass-fetch/lib/index.js" },
+    { "from": "node_modules/libnpmpublish/lib/index.js", "request": "./publish.js", "path": "node_modules/libnpmpublish/lib/publish.js" },
+    { "from": "node_modules/libnpmpublish/lib/provenance.js", "request": "sigstore", "path": "node_modules/sigstore/dist/index.js" },
+    { "from": "node_modules/sigstore/dist/index.js", "request": "./sigstore.js", "path": "node_modules/sigstore/dist/sigstore.js" },
+    { "from": "node_modules/sigstore/dist/sigstore.js", "request": "./config.js", "path": "node_modules/sigstore/dist/config.js" },
+    { "from": "node_modules/sigstore/dist/config.js", "request": "@sigstore/sign", "path": "node_modules/@sigstore/sign/dist/index.js" },
+    { "from": "node_modules/@sigstore/sign/dist/index.js", "request": "./identity", "path": "node_modules/@sigstore/sign/dist/identity/index.js" },
+    { "from": "node_modules/@sigstore/sign/dist/identity/ci.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
+    { "from": "node_modules/@sigstore/sign/dist/external/fetch.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
+    { "from": "node_modules/@sigstore/sign/dist/external/fulcio.js", "request": "./fetch", "path": "node_modules/@sigstore/sign/dist/external/fetch.js" },
+    { "from": "node_modules/@sigstore/sign/dist/signer/fulcio/ca.js", "request": "../../external/fulcio", "path": "node_modules/@sigstore/sign/dist/external/fulcio.js" },
+    { "from": "node_modules/@sigstore/sign/dist/external/fetch.js", "request": "@gar/promise-retry", "path": "node_modules/@gar/promise-retry/lib/index.js" }
+  ]
+}

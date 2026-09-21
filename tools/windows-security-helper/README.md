@@ -217,6 +217,11 @@ hard links, and both collision points. There are no successful-path mocks.
 
 The isolated `TEST-SETUP` audit fixture requires an audit-reading oracle token
 and an existing Explorer window. Otherwise that one test explicitly skips.
+Explorer discovery first checks for a process in the current Windows session,
+before COM access or fixture policy changes. An absent process/window produces
+a structured capability reason; discovery exceptions and later worker failures
+remain failures. A skip does not establish audit-oracle coverage: that requires
+a non-skipped result on a machine with both prerequisites.
 It launches the **same Node executable** through Explorer, verifies medium
 integrity and absence of SeSecurityPrivilege, then runs the packaged helper
 directly. The elevated oracle separately verifies raw DACL/group/labels,

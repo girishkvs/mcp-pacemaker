@@ -6,6 +6,7 @@ import { digest, sameDigests } from './policy.mjs';
 import { bootstrapWorkflow, validateBootstrapContext } from './bootstrap.mjs';
 import { bootstrapEnvironment } from './run.mjs';
 import { npmProvenance, verifyProvenance } from './provenance.mjs';
+import { validateLocalManifest } from './local-regression.mjs';
 
 // Private child of run.mjs, not an owner publication command. No npm registry write is implemented.
 export async function signProvenance(contextPath, tarball, output) {
@@ -15,6 +16,11 @@ export async function signProvenance(contextPath, tarball, output) {
   validateBootstrapContext({ env, event, approval: context.approval });
   bootstrapEnvironment(env, env.HOME);
   assert.deepEqual(context.workflow, bootstrapWorkflow(env));
+  assert.ok(typeof context.manifestBase64 === 'string' &&
+    context.manifestBase64.length <= 2 * 1024 * 1024);
+  const manifest = Buffer.from(context.manifestBase64, 'base64');
+  assert.equal(manifest.toString('base64'), context.manifestBase64);
+  validateLocalManifest(manifest, context.approval);
   for (const path of [contextPath, tarball]) {
     const stat = lstatSync(path);
     assert.ok(stat.isFile() &&
