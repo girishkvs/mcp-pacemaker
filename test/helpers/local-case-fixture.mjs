@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname, win32 } from 'node:path';
 import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
@@ -17,7 +17,7 @@ import { AUDIT_DIAGNOSTIC, AUDIT_MODE, AUDIT_TEST_NAME, AUDIT_WORKER_TIMEOUT_MS 
 // Producer-complete SYNTHETIC unit receipts. No subprocess, SDK, Git, npm or network is executed.
 export class LocalCaseFixture {
   constructor(t, version = '2.0.1') {
-    this.base = mkdtempSync(join(tmpdir(), 'case-unit-'));
+    this.base = realpathSync.native(mkdtempSync(join(tmpdir(), 'case-unit-')));
     t.after(() => rmSync(this.base, { recursive: true, force: true }));
     this.root = join(this.base, 'source');
     this.directory = join(this.base, 'receipts');

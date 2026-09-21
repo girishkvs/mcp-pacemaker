@@ -9,7 +9,7 @@ export class PackagedCheckoutFixture {
   constructor(t, source, attributes = readFileSync(join(source, '.gitattributes'))) {
     this.source = source;
     this.base = realpathSync.native(mkdtempSync(join(tmpdir(), 'canonical-package-')));
-    t.after(() => rmSync(this.base, { recursive: true, force: true, maxRetries: 3 }));
+    t.after(() => rmSync(this.base, { recursive: true, force: true }));
     this.root = join(this.base, 'seed');
     this.empty = join(this.base, 'empty');
     mkdirSync(this.root);
@@ -67,6 +67,7 @@ export class PackagedCheckoutFixture {
       '-c', `core.hooksPath=${this.empty}`, '-c', `init.templateDir=${this.empty}`,
       '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', 'core.attributesFile=',
       '-c', 'core.fsmonitor=false', '-c', 'credential.helper=', '-c', 'commit.gpgsign=false',
+      '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
       '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
       '-c', 'user.name=SYNTHETIC UNIT FIXTURE', '-c', 'user.email=synthetic@example.invalid', ...args];
     const started = Date.now();

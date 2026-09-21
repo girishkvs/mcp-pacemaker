@@ -14,6 +14,37 @@ import {
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const MIT = normalizeText(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8'));
 
+test('canonical package checkout: disposable Git commands suppress automatic maintenance', t => {
+  class TracedFixture extends PackagedCheckoutFixture {
+    git(args, root = this.root) {
+      this.env.GIT_TRACE2_EVENT = path.join(this.base, 'git-trace.jsonl');
+      return super.git(args, root);
+    }
+  }
+
+  const fixture = new TracedFixture(t, ROOT);
+  fixture.git(['config', 'maintenance.auto', 'true']);
+  fixture.git(['config', 'gc.auto', '1']);
+  assert.equal(fixture.git(['config', '--get', 'maintenance.auto']).toString().trim(), 'false');
+  assert.equal(fixture.git(['config', '--get', 'gc.auto']).toString().trim(), '0');
+  fixture.write('maintenance-control.txt', 'SYNTHETIC UNIT MAINTENANCE CONTROL\n');
+  fixture.git(['add', '--', 'maintenance-control.txt']);
+  fixture.git(['commit', '--quiet', '-m', 'Synthetic maintenance control']);
+  const frozen = fixture.checkout('lf-input', 'false', 'lf');
+  const checkout = fixture.checkout('windows', 'false', 'crlf');
+  assert.deepEqual(fixture.mismatches(frozen, checkout), []);
+  fixture.controls(frozen, checkout);
+  const events = fs.readFileSync(path.join(fixture.base, 'git-trace.jsonl'), 'utf8')
+    .trim().split('\n').map(line => JSON.parse(line));
+  for (const command of ['commit', 'clone', 'checkout']) {
+    assert.ok(events.some(event => event.event === 'start' &&
+      event.argv.includes(command)), `Real Git trace must include ${command}`);
+  }
+  const automatic = events.filter(event => event.event === 'child_start' &&
+    ['maintenance', 'gc'].includes(event.argv[1]));
+  assert.deepEqual(automatic.map(event => event.argv), [], 'Disposable repositories must not launch automatic maintenance');
+});
+
 for (const autocrlf of ['false', 'true']) {
   test(`canonical package checkout: complete packed inventory matches LF input with autocrlf=${autocrlf}`, t => {
     const fixture = new PackagedCheckoutFixture(t, ROOT);

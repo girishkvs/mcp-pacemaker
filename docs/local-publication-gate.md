@@ -160,6 +160,14 @@ source suites on Node 20, 22, and 24. It does not change test concurrency, short
 the selected suite, increase application deadlines, or retry failures. UI and
 publisher operations use the separately pinned Node 24.21.0 runtime.
 
+The source-suite child receives `CI=true` and an owned temporary-directory alias
+inside the guest work directory. This covers CI-dependent behavior and temporary
+path aliases locally. Fixtures must resolve directories they create; external
+linked inputs remain rejected. Tests for local-only operations must scope and
+restore their own local environment and separately verify CI rejection. These
+conditions do not supply GitHub identity, credentials, or authenticated hosted
+evidence, and do not change the environment of the other gate commands.
+
 ## Isolation and evidence
 
 The launcher creates uniquely owned Hyper-V containers with no network, host
