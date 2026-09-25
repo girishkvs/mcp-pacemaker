@@ -1,0 +1,57 @@
+{
+  "lucide-react@0.462.0": {
+    "license": "ISC",
+    "files": {
+      "LICENSE": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
+    },
+    "supplemental": [
+      {
+        "file": "upstream/feather-LICENSE.txt",
+        "sha256": "308028e93fcf84972523cdf6e616f73168546b4953895f516d01287f16fe7bee",
+        "sourceUrl": "https://raw.githubusercontent.com/feathericons/feather/1b002399e8758fb2bccea4d07312dc9e0f43dcb8/LICENSE",
+        "reason": "Lucide's LICENSE identifies Feather MIT portions. Its bundled terminal icon retains the polyline and line in this upstream revision; this is a license source, not a claim that the Feather npm package is installed."
+      }
+    ]
+  },
+  "react@18.3.1": {
+    "license": "MIT",
+    "files": {
+      "LICENSE": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
+    }
+  },
+  "react-dom@18.3.1": {
+    "license": "MIT",
+    "files": {
+      "LICENSE": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
+    }
+  },
+  "scheduler@0.23.2": {
+    "license": "MIT",
+    "files": {
+      "LICENSE": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
+    }
+  },
+  "tailwindcss@3.4.19": {
+    "license": "MIT",
+    "files": {
+      "LICENSE": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
+      "lib/css/LICENSE": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
+      "lib/value-parser/LICENSE": "3687447039151857a6ba378db062172c7f33d4aa70a615c87a43a9c50e990485",
+      "src/css/LICENSE": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
+      "src/value-parser/LICENSE": "3687447039151857a6ba378db062172c7f33d4aa70a615c87a43a9c50e990485"
+    },
+    "include": ["LICENSE", "lib/css/LICENSE"]
+  },
+  "vite@7.3.6": {
+    "license": "MIT",
+    "files": {
+      "LICENSE.md": "a77a1c089806b39ad339535bdf3677f636c91d96693e8ad7b11fe733f650ea64"
+    },
+    "sections": {
+      "LICENSE.md": [
+        "# Vite core license",
+        "## @rollup/plugin-alias, @rollup/plugin-commonjs, @rollup/plugin-dynamic-import-vars, @rollup/pluginutils"
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "bin/npm-cli.js": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+  "lib/cli.js": "67666f06479f9b0bbc01412c198caadd4287d34d5ed74a02871ea78f186451e7",
+  "lib/cli/entry.js": "667a44c1fa8795fdbba8ad843736ca7f8f24e64511985e9a7060b002123560c6",
+  "lib/commands/publish.js": "a1b91f9172fd17527865a16381bebddf0aa8b9a61feb545f951118a8a69bd138",
+  "lib/commands/stage/publish.js": "c2fc55789ad3ff18afdb659ff19807504ac95f51211996ea0ece1d9339d26a6f",
+  "lib/utils/oidc.js": "2ece1890fe0b89a21f0024a29cc7630d4fa5faa27ca8625f682dc85aa5df2daa",
+  "node_modules/libnpmpublish/lib/publish.js": "d051395d98b4142a17e6705878bac25535f1072221257cd9c6e3b3bbc085e22d",
+  "node_modules/libnpmpublish/lib/provenance.js": "ee9b1bc8e3f636fbaf5138a3e183ce3c6d42bb5dd57ab004578e534dd08da46b",
+  "node_modules/npm-registry-fetch/lib/index.js": "9757d6aa767884be9e566ebfeaca76c94d80bbea854b41a42ce8648feb2fca42",
+  "node_modules/make-fetch-happen/lib/index.js": "c6fa07e324498f7bbd05e98892790186556bf55c6265d0c07f45900a6941a57c",
+  "node_modules/make-fetch-happen/lib/fetch.js": "7d57bfd656a6ae2a53738fb3f25365d074d9cb7364794005bc70317ff2bf81e8",
+  "node_modules/make-fetch-happen/lib/remote.js": "4902d89e949dae492557b734ddb4609ca283e97f4720d1bfc489b5306891fb0e",
+  "node_modules/make-fetch-happen/lib/options.js": "b067a3566cf03d9a4cc77478efb88c2b3d8cc4081a311b2ae9ea67a500bf3c0e",
+  "node_modules/@npmcli/config/lib/index.js": "b8e89c4676517854440d623687b45de68fa8901080e619a7ac8477de754836c1"
+}

@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Resolve native directory watcher paths before watching logs and test control files,
+  avoiding Windows short-path watcher crashes without changing the selected files.
+
+### Changed
+
+- Prepare 2.0.1 for a separate npm publication, with exact-version guidance from the current
+  major's maintained channel. Channel rollback and backend adoption are not automatic upgrades.
+- Document durable service replacement, explicit legacy maintenance, platform prerequisites,
+  and the difference between npm provenance and Windows executable signing.
+
+### Added
+
+- Source-bound, manual npm preparation/staging tooling, bundled third-party notices, and
+  fresh-consumer package checks.
+- Explicit patch compatibility pairs alongside the unchanged 1.3.0/2.0.0 historical pair;
+  maintenance-branch CI and Node 24 coverage.
+
 ## [2.0.0] - 2026-09-12
 
 ### Breaking

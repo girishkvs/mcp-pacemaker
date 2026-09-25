@@ -1,0 +1,597 @@
+{
+  "schemaVersion": 1,
+  "scope": "Rollup rendered modules and generated CSS; not a legal certification",
+  "producers": [
+    {
+      "name": "@vitejs/plugin-react",
+      "version": "5.2.0"
+    },
+    {
+      "name": "autoprefixer",
+      "version": "10.5.4"
+    },
+    {
+      "name": "postcss",
+      "version": "8.5.26"
+    },
+    {
+      "name": "rollup",
+      "version": "4.62.2"
+    },
+    {
+      "name": "tailwindcss",
+      "version": "3.4.19"
+    },
+    {
+      "name": "vite",
+      "version": "7.3.6"
+    }
+  ],
+  "producerLockSha256": "3946d2db15350b7ad8f815710004243dd1116682e9cdcb880beac27baed92244",
+  "projectLicenseSha256": "590ad9c29ee5580f83b9c05e403ca259d89e8366d1ed4c7207aa5e0a07afbf79",
+  "noticesSha256": "11abb641d5175ce3817909603274fd0675b222ed53fae98d3513fd3f25eb56fc",
+  "chunks": [
+    {
+      "file": "assets/index-CgPruWYi.js",
+      "modules": [
+        {
+          "id": "commonjs:node_modules/react-dom/cjs/react-dom.production.min.js?commonjs-exports",
+          "package": "react-dom@18.3.1",
+          "generated": true,
+          "renderedLength": 33
+        },
+        {
+          "id": "commonjs:node_modules/react-dom/client.js?commonjs-es-import",
+          "package": "react-dom@18.3.1",
+          "generated": true,
+          "renderedLength": 106
+        },
+        {
+          "id": "commonjs:node_modules/react-dom/client.js?commonjs-exports",
+          "package": "react-dom@18.3.1",
+          "generated": true,
+          "renderedLength": 16
+        },
+        {
+          "id": "commonjs:node_modules/react-dom/index.js?commonjs-module",
+          "package": "react-dom@18.3.1",
+          "generated": true,
+          "renderedLength": 29
+        },
+        {
+          "id": "commonjs:node_modules/react/cjs/react-jsx-runtime.production.min.js?commonjs-exports",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 40
+        },
+        {
+          "id": "commonjs:node_modules/react/cjs/react.production.min.js?commonjs-exports",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 30
+        },
+        {
+          "id": "commonjs:node_modules/react/index.js?commonjs-es-import",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 100
+        },
+        {
+          "id": "commonjs:node_modules/react/index.js?commonjs-module",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 26
+        },
+        {
+          "id": "commonjs:node_modules/react/jsx-runtime.js?commonjs-es-import",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 44
+        },
+        {
+          "id": "commonjs:node_modules/react/jsx-runtime.js?commonjs-module",
+          "package": "react@18.3.1",
+          "generated": true,
+          "renderedLength": 31
+        },
+        {
+          "id": "commonjs:node_modules/scheduler/cjs/scheduler.production.min.js?commonjs-exports",
+          "package": "scheduler@0.23.2",
+          "generated": true,
+          "renderedLength": 34
+        },
+        {
+          "id": "commonjs:node_modules/scheduler/index.js?commonjs-module",
+          "package": "scheduler@0.23.2",
+          "generated": true,
+          "renderedLength": 30
+        },
+        {
+          "id": "commonjsHelpers.js",
+          "package": "vite@7.3.6",
+          "generated": true,
+          "renderedLength": 140
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/Icon.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 899
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/createLucideIcon.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 538
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/defaultAttributes.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 404
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/icons/activity.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 413
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/icons/refresh-cw.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 499
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/icons/server.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 546
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/icons/terminal.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 357
+        },
+        {
+          "id": "node_modules/lucide-react/dist/esm/shared/src/utils.js",
+          "package": "lucide-react@0.462.0",
+          "renderedLength": 464
+        },
+        {
+          "id": "node_modules/react-dom/cjs/react-dom.production.min.js",
+          "package": "react-dom@18.3.1",
+          "renderedLength": 133838
+        },
+        {
+          "id": "node_modules/react-dom/client.js",
+          "package": "react-dom@18.3.1",
+          "renderedLength": 242
+        },
+        {
+          "id": "node_modules/react-dom/index.js",
+          "package": "react-dom@18.3.1",
+          "renderedLength": 524
+        },
+        {
+          "id": "node_modules/react/cjs/react-jsx-runtime.production.min.js",
+          "package": "react@18.3.1",
+          "renderedLength": 1201
+        },
+        {
+          "id": "node_modules/react/cjs/react.production.min.js",
+          "package": "react@18.3.1",
+          "renderedLength": 7672
+        },
+        {
+          "id": "node_modules/react/index.js",
+          "package": "react@18.3.1",
+          "renderedLength": 198
+        },
+        {
+          "id": "node_modules/react/jsx-runtime.js",
+          "package": "react@18.3.1",
+          "renderedLength": 243
+        },
+        {
+          "id": "node_modules/scheduler/cjs/scheduler.production.min.js",
+          "package": "scheduler@0.23.2",
+          "renderedLength": 4616
+        },
+        {
+          "id": "node_modules/scheduler/index.js",
+          "package": "scheduler@0.23.2",
+          "renderedLength": 230
+        },
+        {
+          "id": "src/App.tsx",
+          "package": null,
+          "renderedLength": 4969
+        },
+        {
+          "id": "src/components/HealthPage.tsx",
+          "package": null,
+          "renderedLength": 2258
+        },
+        {
+          "id": "src/components/LogDrawer.tsx",
+          "package": null,
+          "renderedLength": 2090
+        },
+        {
+          "id": "src/components/PoolingBatchStatus.tsx",
+          "package": null,
+          "renderedLength": 8665
+        },
+        {
+          "id": "src/components/PoolingControls.tsx",
+          "package": null,
+          "renderedLength": 4206
+        },
+        {
+          "id": "src/components/PrewarmingPage.tsx",
+          "package": null,
+          "renderedLength": 4648
+        },
+        {
+          "id": "src/components/ServerCard.tsx",
+          "package": null,
+          "renderedLength": 10179
+        },
+        {
+          "id": "src/components/Sparkline.tsx",
+          "package": null,
+          "renderedLength": 743
+        },
+        {
+          "id": "src/hooks/useEventSource.ts",
+          "package": null,
+          "renderedLength": 1174
+        },
+        {
+          "id": "src/hooks/useLogStream.ts",
+          "package": null,
+          "renderedLength": 510
+        },
+        {
+          "id": "src/hooks/usePoolingActions.ts",
+          "package": null,
+          "renderedLength": 13946
+        },
+        {
+          "id": "src/hooks/useReqHistory.ts",
+          "package": null,
+          "renderedLength": 621
+        },
+        {
+          "id": "src/lib/api.ts",
+          "package": null,
+          "renderedLength": 4418
+        },
+        {
+          "id": "src/lib/snapshotOrder.ts",
+          "package": null,
+          "renderedLength": 1671
+        },
+        {
+          "id": "src/main.tsx",
+          "package": null,
+          "renderedLength": 183
+        },
+        {
+          "id": "vite/modulepreload-polyfill.js",
+          "package": "vite@7.3.6",
+          "generated": true,
+          "renderedLength": 1168
+        }
+      ]
+    }
+  ],
+  "generated": [
+    {
+      "id": "node_modules/tailwindcss/lib/css/preflight.css",
+      "package": "tailwindcss@3.4.19",
+      "kind": "tailwind-preflight",
+      "evidence": "emitted CSS selectors"
+    }
+  ],
+  "sources": [
+    {
+      "path": "node_modules/lucide-react/dist/esm/Icon.js",
+      "sha256": "74b176e331da170fbf5f63ac936961845328ec5a695d6d1125c7b6ac34a27084"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/createLucideIcon.js",
+      "sha256": "25e138377719bad4c458e5b8a1a0b2b35c62e251cbd420d6fed4d9b78a6bfe5e"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/defaultAttributes.js",
+      "sha256": "43f2024f224e6f159c894751fc8df36de7a62dfe2e85f65e1374142a3a2dc5a6"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/icons/activity.js",
+      "sha256": "bf8d7f61c109203d680cfbb033b34e0fc20deecfe9b026906e5e6afaeb68cdd5"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/icons/refresh-cw.js",
+      "sha256": "025bd8368c92ab9eef4c28bef9e61b4b3c3adb7a83e5c76410c9070594166deb"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/icons/server.js",
+      "sha256": "91846aa413c1f3751e5a2b771777199326093c83e2965c6359ca9e77e09da1d4"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/icons/terminal.js",
+      "sha256": "e22a606df06495b8eb0607bbeeb695d9b327734d16f035e48f60155dd741b6b1"
+    },
+    {
+      "path": "node_modules/lucide-react/dist/esm/shared/src/utils.js",
+      "sha256": "5ead613f763752fd679173e12e5941464d421f869e39b4051a025134772519ff"
+    },
+    {
+      "path": "node_modules/react-dom/cjs/react-dom.production.min.js",
+      "sha256": "cbf7fe6b9726ee65f8bcd5715289cc5161c8dacf74d0b8aaa0d29412516f5f47"
+    },
+    {
+      "path": "node_modules/react-dom/client.js",
+      "sha256": "a510041dfc40d69b3aa574e5e111864186c711fbeb3db41aa2f27196b27c429f"
+    },
+    {
+      "path": "node_modules/react-dom/index.js",
+      "sha256": "f26fcb81b5d1dc32c6edea34645c75b60d259916293d3208c8be48ac33e882e4"
+    },
+    {
+      "path": "node_modules/react/cjs/react-jsx-runtime.production.min.js",
+      "sha256": "76e3364c46895ed2c4a8d5cc332e5e4ef31d6f732d35b1e56826dc5895245452"
+    },
+    {
+      "path": "node_modules/react/cjs/react.production.min.js",
+      "sha256": "4b35e378f469c4f492c7514bb106b5833746dbbae80496bd4aa9acc6e9ac4b42"
+    },
+    {
+      "path": "node_modules/react/index.js",
+      "sha256": "a216c390bf956cbb906c66d29fdb2e2ad6999464a5ca83e476533a6f25ad0ef3"
+    },
+    {
+      "path": "node_modules/react/jsx-runtime.js",
+      "sha256": "28170e60f2ff0bc045bc7d175f5849e86f68dd02d76d7255369420718b30295a"
+    },
+    {
+      "path": "node_modules/scheduler/cjs/scheduler.production.min.js",
+      "sha256": "f6cb8cf42696980c702f6b879417ab8bd489660485eb012b46f67e92e18a78ee"
+    },
+    {
+      "path": "node_modules/scheduler/index.js",
+      "sha256": "b413b3aac7bd209fd82cbe2241fda1467558daaef830744f45ed8396fac9185e"
+    },
+    {
+      "path": "node_modules/tailwindcss/lib/css/preflight.css",
+      "sha256": "1d85e5cc0262f68a4f1313c4754a61c7ff56da4cc24866e76bcde9d4e467feac"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "c8561a31164fce209a83937215fb0a40aac88162553dc2c8894dca44b1276b88"
+    },
+    {
+      "path": "src/components/HealthPage.tsx",
+      "sha256": "3a1c81b6f01ff7171fb6f3347b96718feecf9ed451bddf6d6f0e11e18bd736c7"
+    },
+    {
+      "path": "src/components/LogDrawer.tsx",
+      "sha256": "73566b320bcc4fd75f748722cfe4e31b7c4dd4fc8a39cc92d48ae707012bf4c1"
+    },
+    {
+      "path": "src/components/PoolingBatchStatus.tsx",
+      "sha256": "90d3c67d5cbea3f93caa13942fe2b6817204fcefc52d16d6958ae6b038632c5d"
+    },
+    {
+      "path": "src/components/PoolingControls.tsx",
+      "sha256": "cc4fb5f8b2c6d8a5aa5eccd3dbd377104d3306dd9297f5678a5478fa0cac9371"
+    },
+    {
+      "path": "src/components/PrewarmingPage.tsx",
+      "sha256": "b84063a5277f3b5207aac084920b1d44f96f3cc954cb3fa8d53a53c03895b5fb"
+    },
+    {
+      "path": "src/components/ServerCard.tsx",
+      "sha256": "aa857be561ec2964d76acff594e84be5866fbd107725aba5da98795de9dfb7c0"
+    },
+    {
+      "path": "src/components/Sparkline.tsx",
+      "sha256": "3455e3fda76aad81f7090979a709644bc2aa8e45cf8b4c01d4b6937a796e9a09"
+    },
+    {
+      "path": "src/hooks/useEventSource.ts",
+      "sha256": "3e1b44869dc2268de32c9952a2c6afc30dad37c68bdcd88b6fa3a44db395f20c"
+    },
+    {
+      "path": "src/hooks/useLogStream.ts",
+      "sha256": "c81f16b7131669cf79fbcfc077f105df5437239b52f1358f088c68d60b627dfe"
+    },
+    {
+      "path": "src/hooks/usePoolingActions.ts",
+      "sha256": "f6defd0aa834eff8dd72f4bcb633db5b86dd9bc8042069cba67920a8f8ff4345"
+    },
+    {
+      "path": "src/hooks/useReqHistory.ts",
+      "sha256": "691eba01331548a09b8baa026e8cceee9d7fd3081484d7a5fa1e579f1383d85b"
+    },
+    {
+      "path": "src/index.css",
+      "sha256": "bc95d7b1d366906702bdb2837f942390771967e718d6eff9773bb6c915badbc5"
+    },
+    {
+      "path": "src/lib/api.ts",
+      "sha256": "2c0532a8820a75a9ff0b4729f80d15ed1679ee3e2237cbef6644ac94b2442007"
+    },
+    {
+      "path": "src/lib/snapshotOrder.ts",
+      "sha256": "e3419e0ee52683fee4c488921c09fc1fdec6b056b64b7184464b0695143a609c"
+    },
+    {
+      "path": "src/main.tsx",
+      "sha256": "2ed12a1457cd60b31c0f44f3ea59b8bbc2ddd4a49add3165228d093878fb7c24"
+    }
+  ],
+  "packages": [
+    {
+      "name": "lucide-react",
+      "version": "0.462.0",
+      "license": "ISC",
+      "lockPath": "node_modules/lucide-react",
+      "licenses": [
+        {
+          "file": "LICENSE",
+          "sha256": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc",
+          "text": "ISC License\n\nCopyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.\n\nPermission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\nWITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\nMERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\nANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\nWHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\nACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\nOR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n"
+        },
+        {
+          "file": "upstream/feather-LICENSE.txt",
+          "sha256": "308028e93fcf84972523cdf6e616f73168546b4953895f516d01287f16fe7bee",
+          "sourceUrl": "https://raw.githubusercontent.com/feathericons/feather/1b002399e8758fb2bccea4d07312dc9e0f43dcb8/LICENSE",
+          "reason": "Lucide's LICENSE identifies Feather MIT portions. Its bundled terminal icon retains the polyline and line in this upstream revision; this is a license source, not a claim that the Feather npm package is installed.",
+          "text": "The MIT License (MIT)\n\nCopyright (c) 2013-2023 Cole Bemis\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": [
+        "/**\n * @license lucide-react v0.462.0 - ISC\n *\n * This source code is licensed under the ISC license.\n * See the LICENSE file in the root directory of this source tree.\n */"
+      ]
+    },
+    {
+      "name": "react",
+      "version": "18.3.1",
+      "license": "MIT",
+      "lockPath": "node_modules/react",
+      "licenses": [
+        {
+          "file": "LICENSE",
+          "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+          "text": "MIT License\n\nCopyright (c) Facebook, Inc. and its affiliates.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": [
+        "/**\n * @license React\n * react-jsx-runtime.production.min.js\n *\n * Copyright (c) Facebook, Inc. and its affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n */",
+        "/**\n * @license React\n * react.production.min.js\n *\n * Copyright (c) Facebook, Inc. and its affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n */"
+      ]
+    },
+    {
+      "name": "react-dom",
+      "version": "18.3.1",
+      "license": "MIT",
+      "lockPath": "node_modules/react-dom",
+      "licenses": [
+        {
+          "file": "LICENSE",
+          "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+          "text": "MIT License\n\nCopyright (c) Facebook, Inc. and its affiliates.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": [
+        "/**\n * @license React\n * react-dom.production.min.js\n *\n * Copyright (c) Facebook, Inc. and its affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n */"
+      ]
+    },
+    {
+      "name": "scheduler",
+      "version": "0.23.2",
+      "license": "MIT",
+      "lockPath": "node_modules/scheduler",
+      "licenses": [
+        {
+          "file": "LICENSE",
+          "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+          "text": "MIT License\n\nCopyright (c) Facebook, Inc. and its affiliates.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": [
+        "/**\n * @license React\n * scheduler.production.min.js\n *\n * Copyright (c) Facebook, Inc. and its affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n */"
+      ]
+    },
+    {
+      "name": "tailwindcss",
+      "version": "3.4.19",
+      "license": "MIT",
+      "lockPath": "node_modules/tailwindcss",
+      "licenses": [
+        {
+          "file": "LICENSE",
+          "sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
+          "text": "MIT License\n\nCopyright (c) Tailwind Labs, Inc.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        },
+        {
+          "file": "lib/css/LICENSE",
+          "sha256": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
+          "text": "MIT License\n\nCopyright (c) Nicolas Gallagher\nCopyright (c) Jonathan Neal\nCopyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)\nCopyright (c) Adam Wathan\nCopyright (c) Jonathan Reinink\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": []
+    },
+    {
+      "name": "vite",
+      "version": "7.3.6",
+      "license": "MIT",
+      "lockPath": "node_modules/vite",
+      "licenses": [
+        {
+          "file": "LICENSE.md",
+          "section": "# Vite core license",
+          "sourceSha256": "a77a1c089806b39ad339535bdf3677f636c91d96693e8ad7b11fe733f650ea64",
+          "sha256": "e373c2e74cd342b9e74d0b8813a8fddf3c9788515669a79c2ac238195673d38b",
+          "text": "# Vite core license\nVite is released under the MIT license:\n\nMIT License\n\nCopyright (c) 2019-present, VoidZero Inc. and Vite contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        },
+        {
+          "file": "LICENSE.md",
+          "section": "## @rollup/plugin-alias, @rollup/plugin-commonjs, @rollup/plugin-dynamic-import-vars, @rollup/pluginutils",
+          "sourceSha256": "a77a1c089806b39ad339535bdf3677f636c91d96693e8ad7b11fe733f650ea64",
+          "sha256": "06cf118fa0b4f74c8c537d7f5d511ec8ba9fffb75c74fa5ec91753ef5d089658",
+          "text": "## @rollup/plugin-alias, @rollup/plugin-commonjs, @rollup/plugin-dynamic-import-vars, @rollup/pluginutils\nLicense: MIT\nBy: Johannes Stein\nRepository: https://github.com/rollup/plugins\n\nLicense: MIT\nBy: Rich Harris\nRepository: https://github.com/rollup/plugins\n\nLicense: MIT\nBy: LarsDenBakker\nRepository: https://github.com/rollup/plugins\n\nLicense: MIT\nBy: Rich Harris\nRepository: https://github.com/rollup/plugins\n\n> The MIT License (MIT)\n> \n> Copyright (c) 2019 RollupJS Plugin Contributors (https://github.com/rollup/plugins/graphs/contributors)\n> \n> Permission is hereby granted, free of charge, to any person obtaining a copy\n> of this software and associated documentation files (the \"Software\"), to deal\n> in the Software without restriction, including without limitation the rights\n> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n> copies of the Software, and to permit persons to whom the Software is\n> furnished to do so, subject to the following conditions:\n> \n> The above copyright notice and this permission notice shall be included in\n> all copies or substantial portions of the Software.\n> \n> THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\n> THE SOFTWARE.\n\n---------------------------------------\n"
+        }
+      ],
+      "comments": []
+    }
+  ],
+  "runtimeNotices": [
+    {
+      "name": "yoga-layout",
+      "version": "3.2.1",
+      "license": "MIT",
+      "distribution": "separately-installed",
+      "lockPath": "node_modules/yoga-layout",
+      "resolution": {
+        "version": "3.2.1",
+        "license": "MIT",
+        "resolved": "https://registry.npmjs.org/yoga-layout/-/yoga-layout-3.2.1.tgz",
+        "integrity": "sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ=="
+      },
+      "upstreamCommit": "042f5013152eb81c1552dec945b88f7b95ca350f",
+      "upstreamPackagePath": "javascript",
+      "upstreamPackageJsonSha256": "c7d9a452135020d9bd6906e5952f5731b8b3d4ad3de15532004fe2aa66da1c7c",
+      "upstreamSourceSha256": {
+        "src/index.ts": "08c9f17b043f37b3816d516e2d88d6650d15d29a81d9dd3b1675648a4a45c7a1",
+        "src/load.ts": "c5656438fc842e10cfdb12bf314ed89da3e5f8366479900190ba292b8eaae3bd",
+        "src/wrapAssembly.ts": "e063db4e80e7cc381a17c5c12306fdb753ba96d6f9dbf95bb07a98241cf81fe5",
+        "src/generated/YGEnums.ts": "bc7ef97509d5572e0a2db12e14a830c5da5d916c17d09977c7d257f6144b650b"
+      },
+      "licenses": [
+        {
+          "file": "upstream/yoga-LICENSE.txt",
+          "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+          "sourceUrl": "https://raw.githubusercontent.com/facebook/yoga/042f5013152eb81c1552dec945b88f7b95ca350f/LICENSE",
+          "reason": "Supplement for the separately npm-installed runtime package, whose published source refers to this upstream LICENSE. This package is not bundled into the dashboard.",
+          "text": "MIT License\n\nCopyright (c) Facebook, Inc. and its affiliates.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ],
+      "comments": [
+        "/**\n * Copyright (c) Meta Platforms, Inc. and affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n *\n * @format\n */",
+        "/**\n * Copyright (c) Meta Platforms, Inc. and affiliates.\n *\n * This source code is licensed under the MIT license found in the\n * LICENSE file in the root directory of this source tree.\n */"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "assets/index-CaLPg0c-.css",
+      "sha256": "2c1e1814f4ff96369e13f0a605eab41d84c99182156fc256bd83bfd7719abd20"
+    },
+    {
+      "file": "assets/index-CgPruWYi.js",
+      "sha256": "4aed07c744802b58cb7b90256f0d88094069487a8182ae8de3047837f2be6198"
+    },
+    {
+      "file": "index.html",
+      "sha256": "28f57669b7d32f4892aa99c3c58a6579f6b8ca7ec03ba74f15564fed1c43d6e6"
+    }
+  ]
+}

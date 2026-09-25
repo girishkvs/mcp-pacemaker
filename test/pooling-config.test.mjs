@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import childProcess from 'node:child_process';
+import { PoolingFiles } from '../bin/pooling-files.mjs';
+import { SyntheticIdentity, FileReplacement } from './helpers/pooling-identity-fixture.mjs';
 import {
   PoolingConfigStore, PoolingConfigError, MAX_MIN_WARM, MAX_CONFIG_BYTES,
 } from '../bin/pooling-config.mjs';
@@ -94,6 +96,48 @@ test('snapshot is private, hashes exact bytes and never opts in', (t) => {
   assert.equal(f.store.snapshot().servers.echo.sharing, undefined);
   assert.deepEqual(Object.keys(f.store), []);
   f.unchanged(text);
+});
+
+for (const field of ['dev', 'ino']) {
+  test(`lossless file identity rejects aliased ${field} between path and handle`, (t) => {
+    const f = new Fixture(t);
+    new SyntheticIdentity(t, f.path, field, true);
+    f.error(() => f.store.snapshot(), 409, 'REVISION_CONFLICT');
+    t.mock.restoreAll();
+    f.unchanged();
+  });
+
+  test(`lossless file identity retains exact ${field} in descriptor comparisons`, (t) => {
+    const f = new Fixture(t);
+    const files = new PoolingFiles(f.path);
+    const descriptor = files.inspect(f.path);
+    const before = 24488322978684223n;
+    const after = 24488322978684225n;
+    assert.notEqual(before, after);
+    assert.equal(Number(before), Number(after));
+    const parts = descriptor.identity.split(':');
+    const index = field === 'dev' ? 0 : 1;
+    parts[index] = before.toString(16);
+    const expected = { ...descriptor, identity: parts.join(':') };
+    parts[index] = after.toString(16);
+    t.mock.method(files, 'inspect', () => ({ ...descriptor, identity: parts.join(':') }));
+    f.error(() => files.verify(f.path, expected), 409, 'REVISION_CONFLICT');
+    f.unchanged();
+  });
+}
+
+test('a same-content file replacement after native staging still conflicts', (t) => {
+  const f = new Fixture(t);
+  const replacement = new FileReplacement(f.path);
+  const originalStage = PoolingFiles.prototype.stage;
+  t.mock.method(PoolingFiles.prototype, 'stage', function (...args) {
+    const result = originalStage.apply(this, args);
+    replacement.replace();
+    return result;
+  });
+  f.error(() => f.apply(), 409, 'REVISION_CONFLICT');
+  replacement.verify();
+  assert.equal(fs.existsSync(f.previous), false);
 });
 
 test('compatibility apply/undo restore full preimages and return their existing receipt shape', (t) => {

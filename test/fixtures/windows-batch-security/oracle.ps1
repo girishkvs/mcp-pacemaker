@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-Creates isolated security fixtures and verifies native operations under Explorer's ordinary token.
+Creates isolated security fixtures and verifies native operations under an ordinary token.
 .DESCRIPTION
-TEST-SETUP only. Requires a full audit-reading oracle token and an existing Explorer window.
+TEST-SETUP only. Requires a full audit-reading oracle token and the selected worker context.
 All policy changes and child output are confined to the supplied empty fixture directory.
 .PARAMETER Root
 Empty mcp-batch-audit-oracle-* directory owned by the calling test.
@@ -10,6 +10,8 @@ Empty mcp-batch-audit-oracle-* directory owned by the calling test.
 Packaged production helper executable to run and load for native descriptor inspection.
 .PARAMETER Node
 Exact Node executable used by the calling test.
+.PARAMETER WorkerMode
+Explorer uses an existing ordinary desktop token; RestrictedToken creates an owned medium-integrity worker.
 .OUTPUTS
 One JSON report, or an explicit unavailable reason when the oracle prerequisites are absent.
 .EXAMPLE
@@ -19,7 +21,8 @@ One JSON report, or an explicit unavailable reason when the oracle prerequisites
 param(
     [Parameter(Mandatory)][string]$Root,
     [Parameter(Mandatory)][string]$Helper,
-    [Parameter(Mandatory)][string]$Node
+    [Parameter(Mandatory)][string]$Node,
+    [ValidateSet('Explorer', 'RestrictedToken')][string]$WorkerMode = 'Explorer'
 )
 
 Set-StrictMode -Version Latest
@@ -45,13 +48,20 @@ catch [UnauthorizedAccessException] {
     exit 0
 }
 
-$Shell = New-Object -ComObject Shell.Application
-$Explorer = @($Shell.Windows()) |
-    Where-Object { $_.FullName -and [IO.Path]::GetFileName($_.FullName) -ieq 'explorer.exe' } |
-    Select-Object -First 1
-if ($null -eq $Explorer) {
-    '{"unavailable":"TEST-SETUP existing ordinary Explorer context unavailable"}'
-    exit 0
+$RestrictedWorker = $null
+$Explorer = $null
+if ($WorkerMode -eq 'RestrictedToken') {
+    Add-Type -Path (Join-Path $PSScriptRoot 'RestrictedWorker.cs')
+    $RestrictedWorker = New-Object RestrictedWorker
+}
+else {
+    . (Join-Path $PSScriptRoot 'explorer-context.ps1')
+    $Context = Get-OracleExplorerContext
+    if ($null -ne $Context.Report) {
+        $Context.Report | ConvertTo-Json -Depth 4 -Compress
+        exit 0
+    }
+    $Explorer = $Context.Explorer
 }
 
 [Reflection.Assembly]::LoadFrom($Helper) | Out-Null
@@ -265,7 +275,20 @@ Set-PrivateDirectory -Path $DifferentParent -BroaderRead $true
 $Policy.SetLabel($DifferentParent, 'S:(ML;OICI;NW;;;LW)')
 $Worker = Join-Path $PSScriptRoot 'normal-worker.mjs'
 $Arguments = '"{0}" "{1}" "{2}"' -f $Worker, $Root, $Helper
-$Explorer.Document.Application.ShellExecute($Node, $Arguments, $Root, 'open', 0)
+$WorkerWatch = [Diagnostics.Stopwatch]::StartNew()
+if ($WorkerMode -eq 'RestrictedToken') {
+    $WorkerExit = $RestrictedWorker.Run($Node, $Worker, $Root, $Helper, 120000)
+    if ($WorkerExit -ne 0) {
+        $FailureFile = Join-Path $Root 'normal-failure.json'
+        if ([IO.File]::Exists($FailureFile)) {
+            throw [IO.File]::ReadAllText($FailureFile)
+        }
+        throw "Restricted audit worker exited $WorkerExit"
+    }
+}
+else {
+    $Explorer.Document.Application.ShellExecute($Node, $Arguments, $Root, 'open', 0)
+}
 $ResultPath = Join-Path $Root 'normal-result.json'
 $FailurePath = Join-Path $Root 'normal-failure.json'
 $Deadline = [DateTime]::UtcNow.AddSeconds(20)
@@ -280,6 +303,7 @@ while (-not [IO.File]::Exists($ResultPath)) {
 }
 
 $Normal = [IO.File]::ReadAllText($ResultPath) | ConvertFrom-Json
+$WorkerWatch.Stop()
 $AuditReport = $null
 foreach ($Name in $Names) {
     $Directory = Join-Path $Root $Name
@@ -323,8 +347,16 @@ foreach ($Name in $Names) {
     }
 }
 
-[ordered]@{
+$Report = [ordered]@{
     normal = $Normal
     audit = $AuditReport
     securityVerified = $true
-} | ConvertTo-Json -Depth 6 -Compress
+}
+if ($WorkerMode -eq 'RestrictedToken') {
+    $Report['worker'] = [ordered]@{
+        mode = 'restricted-token'
+        budgetMilliseconds = 120000
+        elapsedMilliseconds = $WorkerWatch.ElapsedMilliseconds
+    }
+}
+$Report | ConvertTo-Json -Depth 6 -Compress

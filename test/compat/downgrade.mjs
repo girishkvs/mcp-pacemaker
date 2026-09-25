@@ -28,11 +28,12 @@ async function legacyScope(bridge, legacy) {
   const output = await run(join(legacy, 'bin', 'windows', 'PoolingSecurityHelper.exe'), ['inspect'], {
     env: { ...bridge.env, MCP_POOL_SOURCE: bridge.config }, timeout: 10000,
   });
-  assert.match(output.trim(), /^[FP]:/, 'The actual 1.3.0 helper must report its audit visibility');
+  assert.match(output.trim(), /^[FP]:/, 'The actual legacy helper must report its audit visibility');
   return output.trim()[0];
 }
 
 export async function assertWritableDowngrade(t, fixtures) {
+  const { legacyVersion, candidateVersion } = fixtures;
   await new CompatibilityBridge().run(t, async (bridge) => {
     // Use the token's default owner and inherited security, without ACL/token changes.
     const initial = JSON.parse(bridge.original);
@@ -49,8 +50,8 @@ export async function assertWritableDowngrade(t, fixtures) {
     const legacyWriteAndUndo = async (phase, baseline) => {
       await checkAuthority();
       const scope = await legacyScope(bridge, fixtures.legacy);
-      t.diagnostic(`${phase}: actual 1.3.0 audit scope ${scope}`);
-      if (baseline) assert.equal(scope, baseline.scope, 'Legacy audit visibility changed after 2.0.0');
+      t.diagnostic(`${phase}: actual ${legacyVersion} audit scope ${scope}`);
+      if (baseline) assert.equal(scope, baseline.scope, `Legacy audit visibility changed after ${candidateVersion}`);
       const snapshot = await bridge.snapshot();
       const identity = fileState(bridge.config);
       const disabled = await bridge.mutation({ mode: 'isolated' }, false);
@@ -65,45 +66,45 @@ export async function assertWritableDowngrade(t, fixtures) {
         assert.equal((await bridge.snapshot()).prewarm.revision, snapshot.prewarm.revision);
         t.diagnostic(`${phase}: known legacy SECURITY_UNAVAILABLE refusal; bytes and identity unchanged`);
       } else {
-        assertImmediate(disabled.body, '1.3.0');
+        assertImmediate(disabled.body, legacyVersion);
         assert.equal(disabled.body.snapshot.servers.find((server) => server.name === 'alpha').sharing, 'isolated');
         const restored = await bridge.mutation({ undoId: disabled.body.undoId }, false);
         assert.equal(restored.status, 200, `${phase} Undo: ${restored.text}`);
         assert.equal(restored.body.ok, true);
-        assertSnapshot(restored.body.snapshot, '1.3.0');
+        assertSnapshot(restored.body.snapshot, legacyVersion);
         assert.equal(bridge.text(), pooledBytes);
         bridge.assertEnabled();
-        t.diagnostic(`${phase}: actual 1.3.0 write and Undo supported`);
+        t.diagnostic(`${phase}: actual ${legacyVersion} write and Undo supported`);
       }
       await checkAuthority();
       return { status: disabled.status, scope };
     };
 
-    const old = await bridge.start(fixtures.legacy, '1.3.0');
-    const baseline = await legacyWriteAndUndo('before 2.0.0');
+    const old = await bridge.start(fixtures.legacy, legacyVersion);
+    const baseline = await legacyWriteAndUndo(`before ${candidateVersion}`);
     await bridge.stop();
     await checkAuthority();
-    const current = await bridge.start(fixtures.candidate, '2.0.0');
+    const current = await bridge.start(fixtures.candidate, candidateVersion);
     assert.notEqual(current.instanceId, old.instanceId);
     assert.equal(bridge.text(), pooledBytes);
 
     const disabled = await bridge.mutation({ mode: 'isolated' });
     assert.equal(disabled.status, 202, disabled.text);
-    assertPending(disabled.body);
+    assertPending(disabled.body, candidateVersion);
     await bridge.applied(disabled.body.batchId);
     assert.equal(JSON.parse(bridge.text()).alpha.sharing, 'isolated');
     const restored = await bridge.mutation({ undoId: disabled.body.undoId });
     assert.equal(restored.status, 202, restored.text);
-    assertPending(restored.body);
+    assertPending(restored.body, candidateVersion);
     const settled = await bridge.applied(restored.body.batchId);
     assert.equal(settled.prewarm.batches.some((batch) => ['pending', 'applying'].includes(batch.status)), false);
     assert.equal(bridge.text(), pooledBytes);
 
     await bridge.stop();
     await checkAuthority();
-    const downgraded = await bridge.start(fixtures.legacy, '1.3.0');
+    const downgraded = await bridge.start(fixtures.legacy, legacyVersion);
     assert.notEqual(downgraded.instanceId, current.instanceId);
     assert.equal(bridge.text(), pooledBytes);
-    await legacyWriteAndUndo('after settled 2.0.0 and downgrade', baseline);
+    await legacyWriteAndUndo(`after settled ${candidateVersion} and downgrade`, baseline);
   });
 }

@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import {
   NativeFixture, originalBytes, editedBytes, expected,
 } from './fixtures/windows-batch-security/driver.mjs';
+import {
+  AUDIT_DIAGNOSTIC, AUDIT_MODE, AUDIT_MODE_VARIABLE, AUDIT_PROCESS_TIMEOUT_MS, AUDIT_TEST_NAME, auditReport,
+} from '../tools/npm-publication/local-audit-report.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HELPER = join(ROOT, 'bin', 'windows', 'PoolingSecurityHelper.exe');
@@ -21,6 +24,196 @@ function fixture(t) {
   fs.writeFileSync(value.source, originalBytes);
   return value;
 }
+
+function oracleUnavailable(report) {
+  assert.ok(report &&
+    typeof report === 'object', 'Invalid oracle report');
+  if (!Object.hasOwn(report, 'unavailable')) return false;
+  if (report.unavailable === 'TEST-SETUP full audit oracle token unavailable' ||
+      report.unavailable === 'TEST-SETUP full audit oracle access unavailable') {
+    assert.deepEqual(Object.keys(report), ['unavailable']);
+    return report.unavailable;
+  }
+  assert.equal(report.unavailable, 'TEST-SETUP existing ordinary Explorer context unavailable');
+  assert.deepEqual(Object.keys(report).sort(), ['capability', 'unavailable']);
+  const capability = report.capability;
+  assert.deepEqual(Object.keys(capability).sort(), ['explorerPids', 'policyChanged', 'sessionId', 'stage']);
+  assert.equal(capability.policyChanged, false);
+  assert.ok(Number.isSafeInteger(capability.sessionId) &&
+    capability.sessionId >= 0);
+  assert.ok(Array.isArray(capability.explorerPids) &&
+    capability.explorerPids.every(pid => Number.isSafeInteger(pid) && pid > 0));
+  if (capability.stage === 'explorer-process-discovery') assert.equal(capability.explorerPids.length, 0);
+  else {
+    assert.equal(capability.stage, 'explorer-window-discovery');
+    assert.ok(capability.explorerPids.length > 0);
+  }
+  return report.unavailable;
+}
+
+function verifyRestrictedCleanup(t, shell) {
+  const directory = fs.mkdtempSync(join(tmpdir(), 'mcp-batch-audit-oracle-control-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const worker = join(directory, 'normal-worker.mjs');
+  const tree = join(directory, 'tree.json');
+  const heartbeat = join(directory, 'heartbeat.json');
+  fs.writeFileSync(worker, `
+    import { spawn } from 'node:child_process';
+    import { writeFileSync } from 'node:fs';
+    const child = spawn(process.execPath, ['-e',
+      "const fs=require('node:fs');const path=process.argv[1];let count=0;setInterval(()=>{fs.writeFileSync(path+'.tmp',JSON.stringify({pid:process.pid,count:++count}),{flush:true});fs.renameSync(path+'.tmp',path)},50)",
+      ${JSON.stringify(heartbeat)}], { windowsHide: true, stdio: 'ignore' });
+    writeFileSync(${JSON.stringify(tree)}, JSON.stringify({ root: process.pid, child: child.pid }), { flush: true });
+    setInterval(() => {}, 100);
+  `, { flag: 'wx' });
+  const script = `
+    $ErrorActionPreference='Stop'
+    Add-Type -Path $env:MCP_AUDIT_CONTROL_LAUNCHER
+    $launcher=New-Object RestrictedWorker
+    try {
+      $launcher.Run($env:MCP_AUDIT_CONTROL_NODE,$env:MCP_AUDIT_CONTROL_WORKER,
+        $env:MCP_AUDIT_CONTROL_ROOT,$env:MCP_AUDIT_CONTROL_HELPER,4000)|Out-Null
+      throw 'Expected restricted worker timeout'
+    } catch {
+      if ($_.Exception.InnerException -isnot [TimeoutException]) { throw }
+    }
+    [IO.File]::WriteAllText($env:MCP_AUDIT_CONTROL_WORKER,'process.exit(17)')
+    $code=$launcher.Run($env:MCP_AUDIT_CONTROL_NODE,$env:MCP_AUDIT_CONTROL_WORKER,
+      $env:MCP_AUDIT_CONTROL_ROOT,$env:MCP_AUDIT_CONTROL_HELPER,4000)
+    if ($code -ne 17) { throw 'Worker exit code was lost' }
+    '{"timeout":true,"nonzeroExit":17}'
+  `;
+  const result = spawnSync(shell, [
+    '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+  ], {
+    encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024,
+    env: { ...process.env, MCP_AUDIT_CONTROL_LAUNCHER: join(FIXTURES, 'RestrictedWorker.cs'),
+      MCP_AUDIT_CONTROL_NODE: process.execPath, MCP_AUDIT_CONTROL_WORKER: worker,
+      MCP_AUDIT_CONTROL_ROOT: directory, MCP_AUDIT_CONTROL_HELPER: HELPER },
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { timeout: true, nonzeroExit: 17 });
+  const pids = JSON.parse(fs.readFileSync(tree, 'utf8'));
+  const progress = JSON.parse(fs.readFileSync(heartbeat, 'utf8'));
+  assert.ok(Number.isSafeInteger(pids.root) &&
+    Number.isSafeInteger(pids.child) &&
+    pids.root > 0 &&
+    pids.child > 0 &&
+    pids.root !== pids.child);
+  assert.equal(progress.pid, pids.child);
+  assert.ok(progress.count >= 2, 'Owned descendant did not make progress before timeout');
+  for (const pid of [pids.root, pids.child]) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+}
+
+test('oracle unavailable reports require known pre-policy capability evidence', () => {
+  const valid = {
+    unavailable: 'TEST-SETUP existing ordinary Explorer context unavailable',
+    capability: { stage: 'explorer-process-discovery', sessionId: 0, explorerPids: [], policyChanged: false },
+  };
+  assert.equal(oracleUnavailable(valid), valid.unavailable);
+  assert.equal(oracleUnavailable({ normal: {} }), false);
+  for (const mutate of [
+    report => { report.unavailable = 'worker failed'; },
+    report => { delete report.capability; },
+    report => { report.capability.policyChanged = true; },
+    report => { report.capability.stage = 'worker'; },
+    report => { report.capability.explorerPids = [42]; },
+    report => { report.capability.sessionId = -1; },
+  ]) {
+    const report = structuredClone(valid);
+    mutate(report);
+    assert.throws(() => oracleUnavailable(report));
+  }
+});
+
+test('oracle Explorer capability controls never activate a real shell or suppress discovery and worker errors', WINDOWS, () => {
+  const shell = join(process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const prefix = `
+    $ErrorActionPreference = 'Stop'
+    . $env:MCP_TEST_EXPLORER_CONTEXT
+    $Find = { [pscustomobject]@{Id=42;SessionId=7} }
+  `;
+  const cases = [
+    {
+      script: '$c=Get-OracleExplorerContext -SessionId 7 -FindProcesses { @() } -CreateShell { throw "Must not create shell" }; $c.Report|ConvertTo-Json -Depth 4 -Compress',
+      unavailable: true,
+    },
+    {
+      script: '$c=Get-OracleExplorerContext -SessionId 8 -FindProcesses $Find -CreateShell { throw "Must not create shell" }; $c.Report|ConvertTo-Json -Depth 4 -Compress',
+      unavailable: true,
+    },
+    {
+      script: `$c=Get-OracleExplorerContext -SessionId 7 -FindProcesses $Find -CreateShell {
+        $s=New-Object PSObject; $s|Add-Member ScriptMethod Windows { @() }; $s
+      }; $c.Report|ConvertTo-Json -Depth 4 -Compress`,
+      unavailable: true,
+    },
+    ...[-2147023888, -2147467259].map(hresult => ({
+      script: `Get-OracleExplorerContext -SessionId 7 -FindProcesses $Find -CreateShell {
+        throw [Runtime.InteropServices.COMException]::new('Owned discovery failure', ${hresult})
+      }`,
+      error: 'Owned discovery failure',
+    })),
+    ...['SessionId', 'Id'].map(property => ({
+      script: `$p=[pscustomobject]@{Id=42;SessionId=7}
+        $p|Add-Member -Force ScriptProperty ${property} { throw 'Owned ${property} getter failure' }
+        $c=Get-OracleExplorerContext -SessionId 7 -FindProcesses { $p } -CreateShell {
+          $s=New-Object PSObject; $s|Add-Member ScriptMethod Windows { @() }; $s
+        }; $c.Report|ConvertTo-Json -Depth 4 -Compress`,
+      error: `Owned ${property} getter failure`,
+    })),
+    {
+      script: `$c=Get-OracleExplorerContext -SessionId 7 -FindProcesses $Find -CreateShell {
+        $s=New-Object PSObject
+        $s|Add-Member ScriptMethod Windows {
+          $e=New-Object PSObject
+          $e|Add-Member ScriptProperty FullName { throw 'Owned FullName getter failure' }; $e
+        }; $s
+      }; $c.Report|ConvertTo-Json -Depth 4 -Compress`,
+      error: 'Owned FullName getter failure',
+    },
+    {
+      script: `Get-OracleExplorerContext -SessionId 7 -FindProcesses $Find -CreateShell {
+        $s=New-Object PSObject; $s|Add-Member ScriptMethod Windows { throw 'Owned Windows method failure' }; $s
+      }`,
+      error: 'Owned Windows method failure',
+    },
+    {
+      script: `$c=Get-OracleExplorerContext -SessionId 7 -FindProcesses $Find -CreateShell {
+        $s=New-Object PSObject
+        $s|Add-Member ScriptMethod Windows {
+          $e=[pscustomobject]@{FullName='C:\\Windows\\explorer.exe'}
+          $e|Add-Member ScriptMethod ShellExecute {
+            throw [Runtime.InteropServices.COMException]::new('Owned post-discovery failure', -2147023888)
+          }; $e
+        }; $s
+      }
+      if ($null -ne $c.Report) { throw 'Unexpected unavailable report' }
+      $c.Explorer.ShellExecute()`,
+      error: 'Owned post-discovery failure',
+    },
+  ];
+  for (const item of cases) {
+    const script = `try { ${prefix}${item.script} }
+      catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }`;
+    const result = spawnSync(shell, [
+      '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+    ], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000,
+      env: { ...process.env, MCP_TEST_EXPLORER_CONTEXT: join(FIXTURES, 'explorer-context.ps1') },
+    });
+    assert.equal(result.error, undefined);
+    if (item.unavailable) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(typeof oracleUnavailable(JSON.parse(result.stdout)), 'string');
+    } else {
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout.trim(), '');
+      assert.ok(result.stderr.includes(item.error), result.stderr);
+    }
+  }
+});
 
 test('inspect-access returns a stable held-object descriptor and content revision', WINDOWS, (t) => {
   const value = fixture(t);
@@ -196,7 +389,11 @@ test('final-component file reparse points never expose or mutate their target', 
   assert.equal(fs.existsSync(value.previous), false);
 });
 
-test('TEST-SETUP full audit oracle verifies ordinary-token staging and retained original policy', WINDOWS, (t) => {
+test(AUDIT_TEST_NAME, WINDOWS, (t) => {
+  const mode = process.env[AUDIT_MODE_VARIABLE];
+  assert.ok(mode === undefined ||
+    mode === AUDIT_MODE, 'Unsupported audit worker mode');
+  const required = mode === AUDIT_MODE;
   const directory = fs.mkdtempSync(join(tmpdir(), 'mcp-batch-audit-oracle-'));
   const shell = join(process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   t.after(() => {
@@ -212,16 +409,21 @@ test('TEST-SETUP full audit oracle verifies ordinary-token staging and retained 
     }
     fs.rmSync(directory, { recursive: true, force: true });
   });
+  if (required) verifyRestrictedCleanup(t, shell);
   const result = spawnSync(shell, [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', join(FIXTURES, 'oracle.ps1'),
     '-Root', directory, '-Helper', HELPER, '-Node', process.execPath,
-  ], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    ...(required ? ['-WorkerMode', 'RestrictedToken'] : []),
+  ], { encoding: 'utf8', windowsHide: true, timeout: required ? AUDIT_PROCESS_TIMEOUT_MS : 30000 });
   assert.equal(result.error, undefined);
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout);
-  if (report.unavailable) {
-    t.skip(report.unavailable);
+  const unavailable = oracleUnavailable(report);
+  if (unavailable) {
+    assert.equal(required, false, 'Required ordinary-token audit cannot be skipped');
+    t.diagnostic(JSON.stringify(report));
+    t.skip(unavailable);
     return;
   }
   assert.equal(report.normal.medium, true);
@@ -234,4 +436,9 @@ test('TEST-SETUP full audit oracle verifies ordinary-token staging and retained 
   assert.equal(report.audit.candidateInherited, 1);
   assert.equal(report.audit.previousExact, true);
   assert.equal(report.securityVerified, true);
+  if (required) {
+    report.worker.cleanupVerified = true;
+    auditReport(report, process.version);
+    t.diagnostic(`${AUDIT_DIAGNOSTIC}${JSON.stringify(report)}`);
+  }
 });

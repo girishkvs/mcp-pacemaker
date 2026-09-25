@@ -35,6 +35,18 @@ Tests are `node:test` only, no framework. Each test file that starts a bridge ow
 ports, because files run in parallel; the current allocation is listed at the top of
 `test/auth-token.test.mjs`. Pick unused ones for a new file.
 
+Before submitting, run the complete `npm test` command with its normal file concurrency.
+Focused or serialized runs help diagnose failures but do not replace that run. Record the
+exact Node and npm versions, OS, architecture, and command; matching only the Node major is
+not enough to reproduce a CI failure.
+
+Filesystem coverage must include native POSIX absolute paths, macOS temporary-directory
+aliases, and Windows 8.3 temporary paths as well as canonical paths. Preserve those inputs
+when reproducing a failure instead of normalizing the whole test environment. Canonicalize
+owned scratch roots and native watcher inputs at their boundaries; keep rejecting unexpected
+links, replaced directories, and files outside the approved inventory. A Windows-only pass
+does not establish Linux or macOS correctness; the hosted platform matrix remains required.
+
 Windows configuration-write coverage must exercise the normal interactive startup token,
 not only a test process inheriting an elevated runner. Validate both the actual token context
 and successful staging/activation. Security-oracle fixtures may use already-authorized test
@@ -66,7 +78,7 @@ sleeping a fixed interval.
 ## Real-version compatibility gates
 
 These are separate, mandatory CI gates, not substitutes for `npm test`. The root CI job runs
-CLI/API pairs on Windows, Linux and macOS with Node 20 and 22. The existing Linux/Node 22 UI
+CLI/API pairs on Windows, Linux and macOS with Node 20, 22 and 24. The Linux/Node 22 UI
 job runs one Chromium browser matrix after building the dashboard.
 
 ```bash
@@ -91,15 +103,36 @@ instead of installing bundled Chromium. CI uses bundled Chromium, not that overr
 Both standalone test commands **fail** when preparation is missing or candidate bytes have
 changed. Clean and prepare again after changing package files, built assets, or Node major.
 
-Scope is **only 1.3.0 and 2.0.0**. Preparation archives immutable published commit
-`2d525f4ced01b978a5aeb83aef69145e96cced05` for 1.3.0. If a shallow checkout lacks it, the tool
-fetches that exact SHA read-only into a separate temporary Git repository; it never follows
-a tag or modifies checkout refs. Git, tar, Node and npm must be available. The candidate is
-created by `npm pack --ignore-scripts`, extracted, and installed with the candidate's exact
-source lockfile via `npm ci --omit=dev --ignore-scripts`. Legacy dependencies use its own
-unchanged lockfile and the same install command. Registry URLs must remain public; npm's
-normal integrity-checked cache can be reused. The prepared manifest records source/packed
-file hashes, tarball hash, legacy reference and Node major.
+Scope is explicitly **1.3.0, 1.3.1, 2.0.0 and 2.0.1**, not arbitrary compatible-looking versions.
+The same harness runs in both maintained branches:
+
+| Preparation | Selected legacy / current pair |
+|---|---|
+| Default in the 2.0.1 checkout | Immutable 1.3.0 / packed 2.0.1 |
+| Default in the 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
+| `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.1 / packed 2.0.1 |
+
+Run both API and browser gates for the explicit patch pair before publishing either complete
+dual-major release set. The two default CI pairs alone do not establish that combined result.
+Run `compat:clean` before selecting another pair.
+
+Publication artifact gates add `--candidate-tarball <absolute.tgz> --candidate-sha256 <digest>`.
+This supplies the checkout's own candidate role without repacking it, including the legacy
+role when invoked from 1.3.1. The archive must match every package input and the supplied digest;
+historical mode cannot substitute it. The manifest also records the exact npm CLI version.
+
+Release sources are pinned to `2d525f4ced01b978a5aeb83aef69145e96cced05` (1.3.0) and
+`db4812a1cbfb8546c814a656397b9a48ccf0f32c` (2.0.0). Missing commits are fetched read-only by
+exact SHA into an owned temporary repository, never through a moving tag or into checkout refs.
+Git archive uses canonical Git line endings and the committed attributes. Local candidates
+are packed with lifecycle scripts disabled and compared against their actual source files.
+
+Each selected package uses its own unchanged producer lock via `npm ci --omit=dev --ignore-scripts`.
+This is producer-locked compatibility, not fresh consumer resolution. The manifest records the
+selection mode, exact versions and release references, per-role archive/file hashes, source
+inputs and Node major. Editing either candidate invalidates prepared fixtures. No patch is
+relabeled as the original historical bytes. Git, tar, Node and npm must be available.
 
 For local restores through an approved registry, preparation honors the caller's resolved
 `npm_config_registry` and `npm_config_replace_registry_host` settings (and npm cache).
@@ -129,30 +162,43 @@ the original failure. Run cleanup before another root `npm ci`, which removes th
 
 | Pair/case | Required result |
 |---|---|
-| 2.0.0 CLI/API and built UI → 1.3.0 backend | Legacy HTTP 200 enable and Undo; original config bytes restored |
-| 1.3.0 CLI/API and built UI → 2.0.0 backend, fresh nonce | Protocol HTTP 409, no queued write or config change |
-| Already-open 1.3.0 tab through an actual bridge restart | Old nonce gets HTTP 401; refresh loads 2.0.0 and can stage/cancel |
-| 2.0.0 CLI and UI → 2.0.0 backend | Queued save, Cancel, actual application and whole-batch Undo |
-| Settled 1.3.0 → 2.0.0 → 1.3.0 configuration | 2.0.0 edits/Undo and both restarts preserve the expected active bytes |
-| Actual 1.3.0 writes before and after that roundtrip, unchanged authority | Supported write/Undo must remain supported; known Windows audit-unavailable refusal must remain HTTP 403 with no change |
+| Selected 2.x CLI/API and built UI to selected 1.x backend | Legacy HTTP 200 enable and Undo; original config bytes restored |
+| Selected 1.x CLI/API and built UI to selected 2.x backend, fresh nonce | Protocol HTTP 409, no queued write or config change |
+| Already-open selected 1.x tab through an actual bridge restart | Old nonce gets HTTP 401; refresh loads the selected 2.x assets and can stage/cancel |
+| Selected 2.x CLI and UI to selected 2.x backend | Queued save, Cancel, actual application and whole-batch Undo |
+| Settled selected 1.x / 2.x / 1.x configuration | Edits/Undo and both restarts preserve the expected active bytes |
+| Actual selected 1.x writes before and after that roundtrip, unchanged authority | Supported write/Undo must remain supported; known Windows audit-unavailable refusal must remain HTTP 403 with no change |
 
 **Test-only UI asset serving:** the two mixed UI/backend cases serve exact old/new built
 `ui/dist` files through Playwright, substituting only the current nonce in the HTML. All
 API, admin mutation, SSE and MCP requests go to the real backend, without response mocks.
 Nested JS assets are included. The old-tab upgrade case does not substitute assets: it stops
-the actual 1.3.0 process and starts the packed 2.0.0 process on the same port before refresh.
+the actual selected 1.x process and starts the selected 2.x process on the same port before refresh.
 
-No other minor-version compatibility is claimed. Writable downgrade is checked on a fresh
+No other version compatibility is claimed. Writable downgrade is checked on a fresh
 synthetic config with default ownership and inherited security. The test does not change
 tokens, elevate, or set ACLs. It checks unchanged caller authority and, on Windows, the actual
-1.3.0 helper's full/partial audit visibility. Caller-context hashes are not direct measurements
+selected 1.x helper's full/partial audit visibility. Caller-context hashes are not direct measurements
 of individual bridge tokens. Only the legacy HTTP 403 audit-unavailable
 condition is accepted as unsupported; unexpected errors and any new HTTP 500 fail the gate.
-The Windows 2.0.0 writer retains a source owner matching the caller user or token default
+The Windows 2.x writer retains a source owner matching the caller user or token default
 owner; other owners still use checked transfer, and source write access remains required.
 These gates do not test a downgrade with an unresolved transaction, installer/service
 replacement, arbitrary Windows ACLs or authority changes, or all host integrations; their
 separate tests and operational checks still apply.
+
+## npm consumer validation
+
+`npm run consumer:check -- --tarball <absolute-file> --sha256 <digest> --version <version> --name mcp-pacemaker`
+installs the exact packed candidate into an owned disposable consumer project without a copied
+producer lock, records the resolved graph, checks a separate global-prefix command shim, and
+starts the real packaged bridge against synthetic servers and private state. It checks the
+packaged UI assets and CLI status, then removes only its owned fixtures.
+
+Run it with normal npm install-script policy and again with `--ignore-scripts`. It never uses
+the user's global prefix, host configuration, live bridge, or npm credentials. It honors the
+resolved caller registry/cache and offline setting without a mirror fallback. Registry
+signatures and provenance are separate post-publication checks, not inferred from this smoke test.
 
 ## Changing how a host is wired
 

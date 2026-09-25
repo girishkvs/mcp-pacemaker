@@ -9,9 +9,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { killBridge } from './helpers/kill-bridge.mjs';
+import { PoolingTraceFixture } from './helpers/pooling-trace-fixture.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const PORT = 8878;
+const PORT = Number(process.env.MCP_POOLING_BATCH_API_TEST_PORT || 8878);
 
 class BatchBridge {
   constructor(t) {
@@ -23,11 +24,13 @@ class BatchBridge {
     };
     this.original = JSON.stringify({ alpha: definition, beta: definition }, null, 2) + '\n';
     writeFileSync(this.config, this.original);
+    this.trace = new PoolingTraceFixture(t, this.dir, 'batch');
     this.child = spawn(process.execPath, [join(ROOT, 'bin', 'mcp-bridge.mjs'),
       '--port', String(PORT), '--config', this.config], {
       stdio: ['ignore', 'ignore', 'pipe'],
       env: {
-        ...process.env, MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0',
+        ...process.env, MCP_POOLING_TRACE_DIR: this.trace.directory ?? '',
+        MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0',
         MCP_IDLE_TIMEOUT_MS: '0', MCP_RESUME: '0', MCP_HEALTH_INTERVAL_MS: '0',
       },
     });
@@ -35,8 +38,10 @@ class BatchBridge {
     this.child.stderr.on('data', (bytes) => { this.stderr = (this.stderr + bytes).slice(-4000); });
     this.exited = once(this.child, 'exit');
     t.after(async () => {
+      await this.trace.settle(this.child);
       killBridge(this.child);
       await this.exited;
+      this.trace.finish();
       rmSync(this.dir, { recursive: true, force: true });
     });
   }

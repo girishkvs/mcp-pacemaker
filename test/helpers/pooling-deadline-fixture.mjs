@@ -63,7 +63,9 @@ class ExecutionClock {
 }
 
 export class DeadlineFixture {
-  constructor(t, stage, { controlledClock = false, guardMs = FIXTURE_DEADLOCK_MS } = {}) {
+  constructor(t, stage, {
+    controlledClock = false, guardMs = FIXTURE_DEADLOCK_MS, startupDelayMs = 0,
+  } = {}) {
     this.directory = fs.mkdtempSync(join(tmpdir(), 'pooling-deadline-'));
     this.config = join(this.directory, 'servers.json');
     this.stage = stage;
@@ -84,7 +86,8 @@ export class DeadlineFixture {
       constructor(filename, options) {
         super(filename, {
           ...options, execArgv: ['--import', hooks],
-          workerData: testClock ? { ...options.workerData, poolingTestClock: testClock } : options.workerData,
+          workerData: { ...options.workerData, poolingTestClock: testClock,
+            poolingTestStartupDelayMs: startupDelayMs },
         });
         workers.add(this);
         this.once('exit', () => workers.delete(this));
@@ -138,6 +141,13 @@ export class DeadlineFixture {
 
   release() {
     fs.writeFileSync(join(this.directory, 'release'), 'release');
+  }
+
+  async ready() {
+    // A rejected invalid request acknowledges loaded worker code without invoking
+    // a native helper, staging a batch, or changing the config.
+    await assert.rejects(this.writer.apply({}), { code: 'INVALID_REQUEST' });
+    this.record('worker-ready');
   }
 
   abandon(controller) {
@@ -259,7 +269,9 @@ export class DeadlineFixture {
   }
 
   advanceBridgeClock(milliseconds) {
-    fs.writeFileSync(join(this.directory, 'advance-clock'), String(milliseconds));
+    const next = join(this.directory, 'advance-clock-next');
+    fs.writeFileSync(next, String(milliseconds), { flag: 'wx' });
+    fs.renameSync(next, join(this.directory, 'advance-clock'));
   }
 
   async stageForReload() {

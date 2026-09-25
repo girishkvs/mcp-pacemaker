@@ -9,13 +9,21 @@
 *.md    text eol=lf
 *.yml   text eol=lf
 
+# Published root metadata must not inherit the host's default line endings.
+/LICENSE text eol=lf
+/THIRD_PARTY_NOTICES.txt text eol=lf
+
 # Windows scripts use CRLF.
 *.ps1   text eol=crlf
 *.vbs   text eol=crlf
 
+# Use the HTML line endings that produced the committed dashboard bytes.
+ui/index.html text eol=crlf
+
 # Built dashboard assets are shipped exactly as produced (no line-ending conversion).
 ui/dist/** -text
 bin/windows/*.exe binary
+bin/windows/src/*.cs text eol=lf
 
 # Images are binary — never line-ending converted.
 *.png   binary

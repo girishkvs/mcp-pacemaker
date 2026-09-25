@@ -90,7 +90,7 @@ export class PoolingCheckpoint {
         return;
       }
       try {
-        watcher = fs.watch(this.directory, (_event, filename) => {
+        watcher = fs.watch(fs.realpathSync.native(this.directory), (_event, filename) => {
           if (filename === null ||
               filename.toString() === 'entered') observe();
         });

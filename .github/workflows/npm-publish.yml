@@ -1,0 +1,477 @@
+name: Prepare, sign or publish bootstrap, or stage npm candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Prepare is non-mutating; every signing/publication action requires separate exact approval
+        type: choice
+        options: [collect-secrets, prepare, sign-bootstrap, publish-bootstrap, stage]
+        default: prepare
+        required: true
+      approval:
+        description: Credential-free approval JSON (docs/npm-publishing.md)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publication-mcp-pacemaker
+  cancel-in-progress: false
+
+jobs:
+  secret-collection:
+    if: inputs.action == 'collect-secrets'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require supported hosted runner before any credentials can be requested
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install pinned publication scanners
+        run: node tools/npm-publication/install-scanners.mjs
+      - name: Collect redacted source secret evidence only
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/run.mjs collect-secrets
+      - name: Retain non-eligible secret collection
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-secret-collection-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-secret-collection/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  source:
+    if: inputs.action == 'prepare'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.artifact.outputs.artifact-id }}
+      artifact-digest: ${{ steps.artifact.outputs.artifact-digest }}
+      prepared-sha256: ${{ steps.source.outputs.prepared-sha256 }}
+      tarball-sha256: ${{ steps.source.outputs.tarball-sha256 }}
+      tarball-sha512: ${{ steps.source.outputs.tarball-sha512 }}
+      tarball-integrity: ${{ steps.source.outputs.tarball-integrity }}
+    steps:
+      - name: Require supported hosted runner before any credentials can be requested
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install reviewed npm in an isolated temporary prefix
+        run: node tools/npm-publication/install-toolchain.mjs
+      - name: Install pinned publication scanners
+        run: node tools/npm-publication/install-scanners.mjs
+      - name: Validate source, run required gates, and pack exactly once
+        id: source
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/run.mjs prepare
+      - name: Retain canonical source bundle without repacking
+        id: artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-prepared-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-publication-prepared/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  consumers:
+    if: inputs.action == 'prepare'
+    needs: source
+    name: consumer (${{ matrix.platform }}, ${{ matrix.npm }})
+    runs-on: ${{ matrix.image }}
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, image: ubuntu-24.04, node: '22.23.2', npm: '11.6.1' }
+          - { platform: linux, image: ubuntu-24.04, node: '24.21.0', npm: '12.0.2' }
+          - { platform: win32, image: windows-2025, node: '22.23.2', npm: '11.6.1' }
+          - { platform: win32, image: windows-2025, node: '24.21.0', npm: '12.0.2' }
+          - { platform: darwin, image: macos-15, node: '22.23.2', npm: '11.6.1' }
+          - { platform: darwin, image: macos-15, node: '24.21.0', npm: '12.0.2' }
+    env:
+      MATRIX_PLATFORM: ${{ matrix.platform }}
+      MATRIX_NODE: ${{ matrix.node }}
+      MATRIX_NPM: ${{ matrix.npm }}
+      PREPARED_MANIFEST_SHA256: ${{ needs.source.outputs.prepared-sha256 }}
+      PREPARED_ARTIFACT_ID: ${{ needs.source.outputs.artifact-id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.source.outputs.artifact-digest }}
+      PREPARED_TARBALL_SHA256: ${{ needs.source.outputs.tarball-sha256 }}
+      PREPARED_TARBALL_SHA512: ${{ needs.source.outputs.tarball-sha512 }}
+      PREPARED_TARBALL_INTEGRITY: ${{ needs.source.outputs.tarball-integrity }}
+    steps:
+      - name: Require supported hosted runner
+        shell: bash
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          case "$MATRIX_PLATFORM:$RUNNER_OS:$RUNNER_ARCH" in
+            linux:Linux:X64|linux:Linux:ARM64|win32:Windows:X64|win32:Windows:ARM64|darwin:macOS:X64|darwin:macOS:ARM64) ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          artifact-ids: ${{ needs.source.outputs.artifact-id }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/npm-prepared
+          merge-multiple: true
+      - name: Install only the pinned consumer npm in an isolated prefix
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/install-consumer-toolchain.mjs
+      # Both script modes capture license bytes before each fresh install is removed.
+      - name: Verify source transfer and run real consumers
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/matrix.mjs run
+      # Schema 2 embeds hash-bound exact-version license evidence in the original report.
+      - name: Upload one consumer report
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-consumer-${{ github.run_id }}-1-${{ matrix.platform }}-${{ matrix.npm }}
+          path: ${{ runner.temp }}/npm-consumer-report/report.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  prepare:
+    if: inputs.action == 'prepare'
+    needs: [source, consumers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PREPARED_MANIFEST_SHA256: ${{ needs.source.outputs.prepared-sha256 }}
+      PREPARED_ARTIFACT_ID: ${{ needs.source.outputs.artifact-id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.source.outputs.artifact-digest }}
+      PREPARED_TARBALL_SHA256: ${{ needs.source.outputs.tarball-sha256 }}
+      PREPARED_TARBALL_SHA512: ${{ needs.source.outputs.tarball-sha512 }}
+      PREPARED_TARBALL_INTEGRITY: ${{ needs.source.outputs.tarball-integrity }}
+    steps:
+      - name: Require supported hosted runner
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install reviewed finalizer npm
+        run: node tools/npm-publication/install-toolchain.mjs
+      - name: Install pinned publication scanners
+        run: node tools/npm-publication/install-scanners.mjs
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          artifact-ids: ${{ needs.source.outputs.artifact-id }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/npm-prepared
+          merge-multiple: true
+      - name: Select exactly six successful current-run artifacts by immutable ID
+        id: matrix
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/matrix.mjs select
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          artifact-ids: ${{ steps.matrix.outputs.matrix-artifact-ids }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/npm-consumer-reports
+          merge-multiple: false
+      - name: Verify all platform reports and finalize candidate gates
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/run.mjs finalize
+      - name: Retain exact tested bytes and final approval manifest
+        id: artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-candidate-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-publication/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  sign-bootstrap:
+    if: inputs.action == 'sign-bootstrap'
+    runs-on: ubuntu-24.04
+    environment: npm-publish
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      id-token: write
+    steps:
+      - name: Reject unsupported runner before any signing request
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install reviewed signing library without registry credentials
+        run: node tools/npm-publication/install-toolchain.mjs
+      - name: Sign and verify exact bootstrap bytes once
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/run.mjs sign-bootstrap
+      - name: Export verified bootstrap bundle
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-bootstrap-signed-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-bootstrap-signed/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Preserve signing ledger, including unknown outcomes
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-bootstrap-ledger-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-bootstrap-ledger/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  publish-bootstrap:
+    if: inputs.action == 'publish-bootstrap'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: npm-publish
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+    steps:
+      - name: Reject unsupported owner bootstrap before any registry or auth operation
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+          test -z "$ACTIONS_ID_TOKEN_REQUEST_URL"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install reviewed owner SDK before acquiring an owner credential
+        run: node tools/npm-publication/install-toolchain.mjs
+      - name: Verify exact signed candidate and start isolated owner bootstrap
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ulimit -c 0
+          node tools/npm-publication/publish-bootstrap.mjs start
+      - name: Wait for encrypted owner login challenge
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/publish-bootstrap.mjs wait login
+      - name: Export encrypted owner login challenge
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-owner-auth-${{ github.run_id }}-1-login
+          path: ${{ runner.temp }}/npm-owner-bootstrap/challenges/challenge-1.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Wait for encrypted publication 2FA challenge or confirmed completion
+        id: publication-challenge
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/publish-bootstrap.mjs wait publication
+      - name: Export encrypted publication 2FA challenge
+        if: steps.publication-challenge.outputs.ready == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-owner-auth-${{ github.run_id }}-1-publication-2fa
+          path: ${{ runner.temp }}/npm-owner-bootstrap/challenges/challenge-2.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Wait for owner publication readback and session revocation
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/publish-bootstrap.mjs wait completion
+      - name: Stop job-owned background processes and finish session cleanup
+        if: always()
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/publish-bootstrap.mjs cleanup
+      - name: Recheck original source and signing evidence after owner revocation
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/npm-publication/post-publication.mjs prepare
+      - name: Anonymously verify published signatures provenance and fresh registry consumer
+        timeout-minutes: 14
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/post-publication.mjs verify
+      - name: Export post-publication acceptance or failure receipt
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-post-publication-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-owner-bootstrap/ledger/post-publication.json
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
+      - name: Retain owner publication ledger even for unknown outcomes
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-owner-bootstrap-ledger-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/npm-owner-bootstrap/ledger/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0
+
+  stage:
+    if: inputs.action == 'stage'
+    runs-on: ubuntu-24.04
+    environment: npm-publish
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      id-token: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Reject unsupported runner before requesting OIDC or staging
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$ACTUAL_RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Check source and exact prepare artifact identity
+        id: transfer
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/run.mjs transfer
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          artifact-ids: ${{ steps.transfer.outputs.artifact-id }}
+          run-id: ${{ steps.transfer.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/npm-candidate
+          merge-multiple: true
+      - name: Install reviewed npm without saved publishing credentials
+        run: node tools/npm-publication/install-toolchain.mjs
+      - name: Recheck approval and stage exact bytes once using OIDC
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: node tools/npm-publication/run.mjs stage
+      - name: Preserve stage ID or unknown-outcome ledger even on failure
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-stage-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/npm-publication/
+          if-no-files-found: warn
+          retention-days: 30
