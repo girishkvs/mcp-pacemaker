@@ -2,12 +2,19 @@
 
 ## Supported versions
 
-Fixes land on the latest released minor version only.
+Install the newest patch in the selected maintained line. Compatibility fixtures for older
+releases preserve their historical behavior; they do not make those releases supported.
 
 | Version | Supported |
 | ------- | --------- |
-| Latest released 1.x minor | yes |
-| Earlier releases | no |
+| Newest 2.x patch | Current security and compatibility maintenance |
+| Newest 1.3.x patch, starting with 1.3.1 | Legacy security and compatibility fixes through March 31, 2027 |
+| 1.0.x-1.2.x, 1.3.0, and superseded patches | No |
+
+The legacy line does not receive 2.x batching or new features. Its `legacy` npm channel is an
+explicit opt-in, not the default for new users. After the legacy support window, migrate to
+the current line. Node 20 compatibility is not a promise to fix vulnerabilities in an
+end-of-life Node runtime; use a maintained Node release.
 
 ## Reporting a vulnerability
 

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { Writable } from 'node:stream';
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { appendFileSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -438,6 +439,31 @@ test('follow waits with one explicit diagnostic, then observes creation', async 
   await run.stdout.includes('created\n');
   await fixture.stop(run);
   assert.equal(run.stdout.text, line);
+});
+
+test('follow passes a canonical directory to the native watcher through an alias', async (t) => {
+  const fixture = new LogsFixture(t);
+  const alias = join(fixture.root, 'directory-alias');
+  symlinkSync(fixture.root, alias, 'junction');
+  const originalWatch = fs.watch;
+  let watchedPath;
+  const watcher = t.mock.method(fs, 'watch', (path, ...args) => {
+    watchedPath = path;
+    assert.equal(path, fs.realpathSync.native(path));
+    return originalWatch(path, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    watcher.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const run = fixture.follow({ config: join(alias, 'alternate.json') });
+  await Promise.race([run.idle(), run.done]);
+  assert.equal(watchedPath, fs.realpathSync.native(fixture.root));
+  writeFileSync(fixture.log, fixture.header('alpha', 'created through alias'));
+  await run.stdout.includes('created through alias');
+  await fixture.stop(run);
+  assert.equal(run.stdout.text, fixture.header('alpha', 'created through alias'));
 });
 
 test('follow waits when the config directory itself does not exist', async (t) => {

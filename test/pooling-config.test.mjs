@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import childProcess, { spawnSync } from 'node:child_process';
+import { SyntheticIdentity, FileReplacement } from './helpers/pooling-identity-fixture.mjs';
 import {
   PoolingConfigStore, PoolingConfigError, MAX_MIN_WARM,
   MAX_UNDO_ENTRIES, MAX_UNDO_BYTES, MAX_CONFIG_BYTES,
@@ -695,18 +696,117 @@ test('permission-copy failure writes no source data and leaves no temporary file
 
 test('a same-content file replacement during staging still conflicts', (t) => {
   const fixture = new Fixture(t);
-  const replacement = join(fixture.dir, 'editor.json');
-  fs.writeFileSync(replacement, BASE);
+  const replacement = new FileReplacement(fixture.path);
   const originalSync = fs.fsyncSync;
-  let replaced = false;
   t.mock.method(fs, 'fsyncSync', (fd) => {
     originalSync(fd);
-    if (!replaced) {
-      fs.renameSync(replacement, fixture.path);
-      replaced = true;
-    }
+    if (!replacement.replaced) replacement.replace();
   });
   fixture.error(() => fixture.apply(), 409, 'REVISION_CONFLICT');
+  replacement.verify();
+  fixture.unchanged();
+});
+
+test('a same-content file replacement after backup publication still conflicts', (t) => {
+  const fixture = new Fixture(t);
+  const replacement = new FileReplacement(fixture.path);
+  const originalRename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (source, destination) => {
+    originalRename(source, destination);
+    if (destination === `${fixture.path}.bak`) replacement.replace();
+  });
+  fixture.error(() => fixture.apply(), 409, 'REVISION_CONFLICT');
+  replacement.verify();
+  assert.equal(fs.readFileSync(`${fixture.path}.bak`, 'utf8'), BASE);
+  fixture.clean();
+});
+
+for (const field of ['dev', 'ino']) {
+  test(`lossless file identity rejects aliased ${field} between path and handle`, (t) => {
+    const fixture = new Fixture(t);
+    new SyntheticIdentity(t, fixture.path, field, true);
+    fixture.error(() => fixture.store.snapshot(), 409, 'REVISION_CONFLICT');
+    t.mock.restoreAll();
+    fixture.unchanged();
+  });
+
+  for (const action of ['apply', 'undo']) {
+    for (const phase of ['before-backup', 'after-backup']) {
+      test(`lossless file identity rejects aliased ${field} on ${action} at ${phase}`, (t) => {
+        const fixture = new Fixture(t);
+        const applied = action === 'undo' ? fixture.apply() : undefined;
+        const before = fixture.bytes();
+        const backup = `${fixture.path}.bak`;
+        const previous = fs.existsSync(backup) ? fs.readFileSync(backup) : undefined;
+        const identity = new SyntheticIdentity(t, fixture.path, field);
+        const originalSync = fs.fsyncSync;
+        const originalRename = fs.renameSync;
+        if (phase === 'before-backup') {
+          t.mock.method(fs, 'fsyncSync', (fd) => {
+            originalSync(fd);
+            identity.changed = true;
+          });
+        } else {
+          t.mock.method(fs, 'renameSync', (source, destination) => {
+            originalRename(source, destination);
+            if (destination === backup) identity.changed = true;
+          });
+        }
+        fixture.error(() => action === 'apply' ? fixture.apply() : fixture.undo(applied),
+          409, 'REVISION_CONFLICT');
+        assert.equal(identity.changed, true, 'the selected preflight must be reached');
+        t.mock.restoreAll();
+        assert.deepEqual(fixture.bytes(), before);
+        const expectedBackup = phase === 'after-backup' ? before : previous;
+        if (expectedBackup) assert.deepEqual(fs.readFileSync(backup), expectedBackup);
+        else assert.equal(fs.existsSync(backup), false);
+        fixture.clean();
+      });
+    }
+  }
+}
+
+test('lossless file identity retains submillisecond Windows metadata security checks', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = new Fixture(t);
+  const originalOpen = fs.openSync;
+  const originalStat = fs.fstatSync;
+  const originalSync = fs.fsyncSync;
+  const originalSpawn = childProcess.spawnSync;
+  let staged = false;
+  let rechecked = false;
+  let sourceFd;
+  t.mock.method(fs, 'openSync', (path, ...args) => {
+    const fd = originalOpen(path, ...args);
+    if (path === fixture.path) sourceFd = fd;
+    return fd;
+  });
+  t.mock.method(fs, 'fsyncSync', (fd) => {
+    originalSync(fd);
+    staged = true;
+  });
+  t.mock.method(fs, 'fstatSync', (fd, options) => {
+    const stat = originalStat(fd, options);
+    if (fd === sourceFd) {
+      stat.ctimeMs = options?.bigint ? 1000n : 1000;
+      stat.ctimeNs = 1000000000n + (staged ? 1n : 0n);
+    }
+    return stat;
+  });
+  t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    const result = originalSpawn(command, args, options);
+    if (args[0] === 'inspect' &&
+        staged) {
+      assert.equal(result.status, 0);
+      rechecked = true;
+      return { ...result, stdout: `P:${result.stdout.trim().slice(2)}` };
+    }
+    return result;
+  });
+  fixture.error(() => fixture.apply(), 409, 'REVISION_CONFLICT');
+  assert.equal(rechecked, true);
+  t.mock.restoreAll();
   fixture.unchanged();
 });
 
@@ -728,14 +828,14 @@ for (const action of ['apply', 'undo']) {
       originalSync(fd);
       if (refreshed) return;
       refreshed = true;
-      const before = fs.statSync(fixture.path);
+      const before = fs.statSync(fixture.path, { bigint: true });
       fixture.windowsCommand(`
 $ErrorActionPreference = 'Stop'
 [System.IO.File]::SetLastAccessTimeUtc($env:MCP_POOL_SOURCE, [DateTime]::UtcNow)
 `);
-      const after = fs.statSync(fixture.path);
-      assert.notEqual(after.ctimeMs, before.ctimeMs, 'the real filesystem must report the metadata change');
-      for (const key of ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeMs']) {
+      const after = fs.statSync(fixture.path, { bigint: true });
+      assert.notEqual(after.ctimeNs, before.ctimeNs, 'the real filesystem must report the metadata change');
+      for (const key of ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeNs']) {
         assert.equal(after[key], before[key], `${key} must remain unchanged`);
       }
       assert.deepEqual(fixture.bytes(), original);
@@ -936,13 +1036,51 @@ if ($LASTEXITCODE -ne 0) { throw "Fixture integrity update failed: $output" }
   fixture.unchanged();
 });
 
-for (const fields of [['ctimeMs'], ['mode'], ['uid', 'gid']]) {
+test('lossless file identity preserves numeric POSIX permission API arguments', {
+  skip: process.platform === 'win32',
+}, (t) => {
+  const fixture = new Fixture(t);
+  const native = { ...fs };
+  const created = new Set();
+  let owners = 0;
+  let modes = 0;
+  t.mock.method(fs, 'openSync', (path, flags, ...args) => {
+    const fd = native.openSync(path, flags, ...args);
+    if (flags === 'wx') created.add(fd);
+    else created.delete(fd);
+    return fd;
+  });
+  t.mock.method(fs, 'fstatSync', (fd, options) => {
+    const stat = native.fstatSync(fd, options);
+    if (created.has(fd)) stat.uid += options?.bigint ? 1n : 1;
+    return stat;
+  });
+  t.mock.method(fs, 'fchownSync', (fd, uid, gid) => {
+    assert.equal(typeof uid, 'number');
+    assert.equal(typeof gid, 'number');
+    owners++;
+    return native.fchownSync(fd, uid, gid);
+  });
+  t.mock.method(fs, 'fchmodSync', (fd, mode) => {
+    assert.equal(typeof mode, 'number');
+    assert.equal(mode, 0o600);
+    modes++;
+    return native.fchmodSync(fd, mode);
+  });
+  const result = fixture.apply();
+  fixture.undo(result);
+  assert.equal(owners, 4);
+  assert.equal(modes, 4);
+  assert.equal(fixture.text(), BASE);
+});
+
+for (const fields of [['ctimeNs'], ['mode'], ['uid', 'gid']]) {
   test(`metadata conflicts report exactly ${fields.join(', ')} without weakening the guard`, {
-    skip: process.platform === 'win32' && fields.includes('ctimeMs'),
+    skip: process.platform === 'win32' && fields.includes('ctimeNs'),
   }, (t) => {
     const fixture = new Fixture(t);
     const revision = fixture.store.revision();
-    const sourceStat = fs.statSync(fixture.path);
+    const sourceStat = fs.statSync(fixture.path, { bigint: true });
     const originalStat = fs.fstatSync;
     const originalOpen = fs.openSync;
     let staging = false;
@@ -1181,7 +1319,9 @@ test('regression proofs fail when guards or byte preservation are removed in dis
     assert.equal(source.split(mutation.from).length, 2, `${mutation.name} must target exactly one source span`);
     const root = join(fixture.dir, String(index));
     fs.mkdirSync(join(root, 'bin'), { recursive: true });
-    fs.mkdirSync(join(root, 'test'));
+    fs.mkdirSync(join(root, 'test', 'helpers'), { recursive: true });
+    fs.copyFileSync(new URL('./helpers/pooling-identity-fixture.mjs', import.meta.url),
+      join(root, 'test', 'helpers', 'pooling-identity-fixture.mjs'));
     if (process.platform === 'win32') {
       fs.cpSync(new URL('../bin/windows', import.meta.url), join(root, 'bin', 'windows'), { recursive: true });
     }

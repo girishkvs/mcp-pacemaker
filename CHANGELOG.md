@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve exact positive source-CI attempts and accept bounded canonical npm repair tags.
+- Let the 1.3.1 publishing finalizer use approved immutable published 2.0.1 bytes
+  for T32 comparison without a hosted seed, fabricated preparation evidence or
+  stage authority. Candidate consumer, compatibility and publication gates remain required.
+- Resolve native directory watcher paths before watching logs and test control files,
+  avoiding Windows short-path watcher crashes without changing the selected files.
+
+### Security
+
+- Prepare 1.3.1 with a `smol-toml` minimum and locked version of 1.8.0. Bounded malformed-TOML
+  regressions cover the EOF-comment hang fixed by CVE-2026-85730 without changing legacy
+  pooling, audit-policy, or immediate-save behavior.
+
+### Changed
+
+- Resolve the explicit `legacy` npm channel for same-major, exact-version update guidance.
+  Channel rollback and adoption of an existing backend are not automatic upgrades.
+- Limit legacy maintenance to the newest 1.3.x patch through March 31, 2027; document durable
+  service replacement and platform prerequisites.
+
+### Added
+
+- Source-bound, manual npm preparation/staging tooling, bundled third-party notices, and
+  fresh-consumer package checks.
+- Exact legacy-patch/current-release compatibility gates and an explicit two-patch mode,
+  while retaining the immutable 1.3.0/2.0.0 historical pair. Add maintenance-branch and Node 24 CI.
+
 ## [1.3.0] - 2026-09-08
 
 ### Added

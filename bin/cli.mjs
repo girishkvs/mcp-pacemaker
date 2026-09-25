@@ -12,19 +12,19 @@
  *
  * Config + state live in ~/.mcp-pacemaker/ . Your client config is backed up to *.bak before any rewrite.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, realpathSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, execSync } from 'node:child_process';
 import net from 'node:net';
 import http from 'node:http';
-import https from 'node:https';
 import { Command } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { parse as parseToml } from 'smol-toml';
 import { checkServerPaths, checkReservedName } from './config-checks.mjs';
+import { assertDurableRoot, backendDescription, resumeService, servicePaths, stopManagedService } from './service-control.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -32,6 +32,7 @@ const HOME = resolve(homedir(), '.mcp-pacemaker');
 const CONFIG = resolve(HOME, 'servers.json');
 const STATE = resolve(HOME, 'state.json');
 const DEFAULT_PORT = 8791;
+const SERVICE_PATH_HELP = '\nOn Linux/macOS, the full ~/.mcp-pacemaker/service-<port>.sock path must fit in 103 UTF-8 bytes. Longer paths are rejected before setup changes, including with --no-start and --no-autostart.';
 
 const ok = (m) => console.log(`${pc.green('✓')} ${m}`);
 // warnCount lets `doctor` report warnings in its summary instead of claiming "all good".
@@ -278,9 +279,15 @@ function cmdPlan(args) {
 }
 
 async function cmdInstall(args) {
+  const port = parseInt(args.port || DEFAULT_PORT, 10);
+  servicePaths(CONFIG, port);
+  if (args.autostart !== false) assertDurableRoot(realpathSync(process.execPath));
+  if (args.autostart !== false ||
+      args.start !== false) {
+    assertDurableRoot(realpathSync(ROOT));
+  }
   const client = defaultClient(args.client);
   const host = getHost(client);
-  const port = parseInt(args.port || DEFAULT_PORT, 10);
   // P5: never wire a host to a port held by a foreign (non-pacemaker) service.
   if ((await probePort(port)) === 'foreign') { err(`port ${port} is held by a non-pacemaker service — wiring here would hijack it. Re-run with --port <free port>.`); process.exit(1); }
   if (!existsSync(CONFIG)) { err(`no ${CONFIG} — run "mcp-pacemaker import" first`); process.exit(1); }
@@ -305,8 +312,8 @@ async function cmdInstall(args) {
   }
   ok(`wired ${serverNames.length} server(s) in ${client} -> bridge on :${port}`);
   if (args.autostart !== false) {
-    try { registerAutostart(port); ok('registered OS auto-start'); }
-    catch (e) { warn(`auto-start registration skipped: ${e.message}`); }
+    registerAutostart(port);
+    ok('registered OS auto-start');
   } else info('skipped OS auto-start (--no-autostart)');
   if (args.start !== false) await startBridge(port); else info('skipped bridge start (--no-start)');
   const state = readState();
@@ -318,17 +325,24 @@ async function cmdInstall(args) {
 
 /* --------------------------------- init (wizard) --------------------------- */
 async function cmdInit(args) {
+  let port = parseInt(args.port || DEFAULT_PORT, 10);
+  servicePaths(CONFIG, port);
+  if (args.autostart !== false) assertDurableRoot(realpathSync(process.execPath));
+  if (args.autostart !== false ||
+      args.start !== false) {
+    assertDurableRoot(realpathSync(ROOT));
+  }
   p.intro(pc.bold('mcp-pacemaker setup'));
   const detected = detectClients();
   if (detected.length) p.log.info(`Detected host(s): ${pc.cyan(detected.map((id) => getHost(id).label).join(', '))}`);
 
-  let port = parseInt(args.port || DEFAULT_PORT, 10);
   // P5: if the chosen port is held by a foreign (non-pacemaker) service, pick another.
   while ((await probePort(port)) === 'foreign') {
     p.log.warn(`Port ${port} is in use by a non-pacemaker service.`);
     const np = await p.text({ message: 'Choose a different bridge port:', initialValue: String(port + 1), validate: (v) => (/^\d+$/.test(v) && +v > 0 && +v < 65536 ? undefined : 'enter a valid port 1-65535') });
     if (p.isCancel(np)) { p.cancel('cancelled'); process.exit(0); }
     port = parseInt(np, 10);
+    servicePaths(CONFIG, port);
   }
 
   // Which hosts to wire (default: all detected). --client accepts one id or a comma-separated list.
@@ -371,7 +385,10 @@ async function cmdInit(args) {
     try { await cmdInstall({ client: id, port, autostart: false, start: false }); }
     catch (e) { p.log.error(`${id}: ${e.message}`); }
   }
-  if (args.autostart !== false) { try { registerAutostart(port); p.log.success('registered OS auto-start'); } catch (e) { p.log.warn(`auto-start skipped: ${e.message}`); } }
+  if (args.autostart !== false) {
+    registerAutostart(port);
+    p.log.success('registered OS auto-start');
+  }
   if (args.start !== false) await startBridge(port);
 
   const reload = [...new Set(targets.map((id) => (id === 'vscode' ? 'reload VS Code' : `restart ${getHost(id).label}`)))].join(' · ');
@@ -381,13 +398,13 @@ async function cmdInit(args) {
 /* -------------------------------- upgrade ----------------------------------- */
 async function cmdUpgrade(args) {
   if (args.self) {
-    const name = readJson(resolve(ROOT, 'package.json')).name;
-    info('to update the CLI itself, run whichever matches how you installed it:');
-    console.log(`  npm i -g ${name}@latest              # from npm`);
-    console.log('  npm i -g github:girishkvs/mcp-pacemaker  # from GitHub');
-    console.log('  git -C <your-clone> pull             # from a clone');
+    const { checkForUpdate, updateGuidance } = await import('./update-check.mjs');
+    const result = await checkForUpdate(readJson(resolve(ROOT, 'package.json')), { registry: args.registry });
+    console.log(updateGuidance(result, { registry: args.registry }));
     return;
   }
+  if (args.registry !== undefined) throw new Error('--registry applies only to upgrade --self.');
+  info(`installed CLI ${pkgVersion}; upgrade rewires hosts and adopts/starts bridges. It does not replace packages or restart an adopted backend.`);
   const state = readState();
   if (!state.hosts.length) { err('no install state — run "init" or "install" first'); process.exit(1); }
   for (const h of state.hosts) {
@@ -395,37 +412,27 @@ async function cmdUpgrade(args) {
     await cmdInstall({ client: h.id, port: h.port, autostart: false, start: false });
   }
   for (const port of distinctPorts(state)) await startBridge(port);
-  ok('upgrade complete.');
+  ok('host wiring complete; running backend versions reported above. No package replacement or adopted-backend restart performed.');
 }
 
 /* ------------------------------ update-check -------------------------------- */
-function fetchNpmLatest(name) {
-  return new Promise((res) => {
-    const r = https.get(`https://registry.npmjs.org/${encodeURIComponent(name)}`, (resp) => {
-      let d = '';
-      resp.on('data', (c) => (d += c));
-      resp.on('end', () => { try { res(JSON.parse(d)['dist-tags']?.latest || null); } catch { res(null); } });
-    });
-    r.on('error', () => res(null));
-    r.setTimeout(4000, () => { r.destroy(); res(null); });
-  });
-}
 async function cmdUpdateCheck(args) {
   const pkg = readJson(resolve(ROOT, 'package.json'));
-  const latest = await fetchNpmLatest(pkg.name);
-  const result = { name: pkg.name, current: pkg.version, latest, updateAvailable: !!latest && latest !== pkg.version };
-  if (args.json) { console.log(JSON.stringify(result)); return; }
-  if (!latest) warn(`could not reach npm for ${pkg.name} (offline, or not published yet)`);
-  else if (result.updateAvailable) warn(`update available: ${pkg.version} -> ${latest}  (run "mcp-pacemaker upgrade --self")`);
-  else ok(`up to date (${pkg.version})`);
+  try {
+    const { checkForUpdate, updateGuidance } = await import('./update-check.mjs');
+    const result = await checkForUpdate(pkg, { registry: args.registry });
+    if (args.json) console.log(JSON.stringify(result));
+    else console.log(updateGuidance(result, { registry: args.registry }));
+  } catch (error) {
+    process.exitCode = 1;
+    if (args.json) console.log(JSON.stringify({ name: pkg.name, current: pkg.version, status: 'unknown', error: error.message }));
+    else err(`update status unknown: ${error.message}`);
+  }
 }
 
 /* ------------------------------ start / stop -------------------------------- */
 function supervisorInvocation(port) {
-  if (platform() === 'win32') {
-    return { cmd: 'pwsh', args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', resolve(ROOT, 'supervisor', 'supervise.ps1'), '-Port', String(port)] };
-  }
-  return { cmd: '/bin/sh', args: [resolve(ROOT, 'supervisor', 'supervise.sh'), String(port)] };
+  return { cmd: process.execPath, args: [resolve(ROOT, 'supervisor', 'supervise.mjs'), '--port', String(port), '--config', CONFIG] };
 }
 // P5: is anything listening on the port, and if so is it ours?
 function portInUse(port) {
@@ -444,35 +451,45 @@ async function probePort(port) {
 async function startBridge(port) {
   // P5: adopt an existing pacemaker bridge; refuse to collide with a foreign service.
   const cls = await probePort(port);
-  if (cls === 'pacemaker') { ok(`bridge already running on :${port} — adopted (not starting a second).`); return; }
-  if (cls === 'foreign') { err(`port ${port} is held by a non-pacemaker service — not starting. Use --port <free port>, or migrate that service.`); return; }
-  const { cmd, args } = supervisorInvocation(port);
-  try {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
-    child.unref();
-    ok(`started bridge supervisor (port ${port})`);
-  } catch (e) { err(`failed to start supervisor: ${e.message}`); }
-}
-async function stopBridge(port) {
-  if (port) {
-    if ((await probePort(port)) !== 'pacemaker') { warn(`no pacemaker bridge on :${port}`); return; }
-    try {
-      if (platform() === 'win32') execFileSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'supervise\\.ps1.*\\b${port}\\b|mcp-bridge\\.mjs.*\\b${port}\\b' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }; Get-NetTCPConnection -LocalPort ${port} -State Listen -EA SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -EA SilentlyContinue }`], { stdio: 'ignore' });
-      else execSync(`kill $(lsof -ti tcp:${port}) 2>/dev/null || true`, { stdio: 'ignore' });
-      ok(`stopped bridge on :${port}`);
-    } catch { warn(`could not stop bridge on :${port}`); }
+  if (cls === 'pacemaker') {
+    await reportBackend(port, 'adopted (not starting a second or restarting it)');
     return;
   }
+  if (cls === 'foreign') throw new Error(`port ${port} is held by a non-pacemaker service — not starting. Use --port <free port>.`);
+  assertDurableRoot(realpathSync(ROOT));
+  resumeService(CONFIG, port);
+  const { cmd, args } = supervisorInvocation(port);
+  const child = spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  await new Promise((resolveSpawn, reject) => {
+    child.once('error', reject);
+    child.once('spawn', resolveSpawn);
+  });
   try {
-    if (platform() === 'win32') {
-      execFileSync('powershell', ['-NoProfile', '-Command',
-        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'mcp-bridge.mjs|supervise.ps1' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }"], { stdio: 'ignore' });
-    } else {
-      try { execFileSync('pkill', ['-f', 'mcp-bridge.mjs'], { stdio: 'ignore' }); } catch { /* none */ }
-      try { execFileSync('pkill', ['-f', 'supervise.sh'], { stdio: 'ignore' }); } catch { /* none */ }
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      if ((await probePort(port)) === 'pacemaker') {
+        await reportBackend(port, 'reachable after start request; verify this is the intended backend');
+        return;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     }
-    ok('stopped all bridges');
-  } catch { warn('no running bridge found'); }
+    throw new Error(`Backend startup on :${port} was not verified. Inspect the matching supervisor and logs before retrying or replacing its root.`);
+  } finally {
+    child.unref();
+  }
+}
+async function stopBridge(port) {
+  if (port !== undefined) {
+    const stopped = await stopManagedService({ root: ROOT, config: CONFIG, port });
+    if (await portInUse(port)) {
+      throw new Error(`Managed supervisor stopped, but :${port} is still in use. Another listener was not touched; replacement is not verified.`);
+    }
+    ok(`stopped managed supervisor ${stopped.supervisorId} and its bridge on :${port}; autostart held until an explicit start`);
+    info(`root: ${stopped.root}; config: ${stopped.config}. Other services using this root must also be stopped before replacement.`);
+    return;
+  }
+  const ports = distinctPorts(readState());
+  for (const selected of ports.length ? ports : [DEFAULT_PORT]) await stopBridge(selected);
 }
 
 // Start one bridge (--port) or all distinct-port bridges recorded in state.
@@ -487,6 +504,8 @@ async function cmdStart(opts) {
 /* -------------------------------- autostart --------------------------------- */
 const AUTOSTART_ID = 'io.github.girishkvs.mcp-pacemaker';
 function registerAutostart(port) {
+  assertDurableRoot(realpathSync(ROOT));
+  assertDurableRoot(realpathSync(process.execPath));
   const plat = platform();
   const { cmd, args } = supervisorInvocation(port);
   if (plat === 'win32') {
@@ -499,7 +518,7 @@ function registerAutostart(port) {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>${AUTOSTART_ID}.${port}</string>
-  <key>ProgramArguments</key><array>${[cmd, ...args].map((a) => `<string>${a}</string>`).join('')}</array>
+  <key>ProgramArguments</key><array>${[cmd, ...args].map((a) => `<string>${a.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</string>`).join('')}</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
 </dict></plist>\n`;
@@ -517,7 +536,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=${cmd} ${args.join(' ')}
+ExecStart=${[cmd, ...args].map((a) => `"${a.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`).join(' ')}
 Restart=on-failure
 
 [Install]
@@ -545,6 +564,19 @@ function unregisterAutostart(port) {
 }
 
 /* --------------------------------- status ----------------------------------- */
+async function reportBackend(port, action) {
+  const response = await httpGet(`http://127.0.0.1:${port}/api/status`);
+  let backend;
+  if (response?.status === 200) {
+    try { backend = JSON.parse(response.body); }
+    catch { throw new Error(`Backend :${port} returned invalid status; version is unknown.`); }
+  }
+  if (backend?.service !== 'mcp-pacemaker') {
+    throw new Error(`Backend :${port} identity/version could not be verified; no upgrade is claimed.`);
+  }
+  info(`:${port}: ${backendDescription(pkgVersion, backend, action)}`);
+}
+
 function httpGet(url) {
   return new Promise((res) => {
     const r = http.get(url, (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => res({ status: resp.statusCode, body: d })); });
@@ -553,6 +585,7 @@ function httpGet(url) {
   });
 }
 async function cmdStatus() {
+  info(`installed CLI ${pkgVersion} (${ROOT})`);
   const state = readState();
   const ports = state.hosts.length ? distinctPorts(state) : [DEFAULT_PORT];
   for (const port of ports) {
@@ -561,6 +594,7 @@ async function cmdStatus() {
       let j = null; try { j = JSON.parse(s.body); } catch { /* noop */ }
       if (j && j.service === 'mcp-pacemaker') {
         ok(`bridge UP on :${port} — ${j.servers.length} server(s), ${j.sessions} active session(s)`);
+        await reportBackend(port, 'observed; status does not replace or restart it');
         const api = await httpGet(`http://127.0.0.1:${port}/api/status`);
         if (api && api.status === 200) {
           try {
@@ -730,7 +764,7 @@ function cmdDashboard() {
 }
 
 /* ---------------------------------- main (commander) ------------------------ */
-const pkgVersion = (() => { try { return readJson(resolve(ROOT, 'package.json')).version; } catch { return '0.0.0'; } })();
+const pkgVersion = readJson(resolve(ROOT, 'package.json')).version;
 const program = new Command();
 program
   .name('mcp-pacemaker')
@@ -739,6 +773,7 @@ program
 
 program.command('init')
   .description('Interactive setup: detect all MCP hosts (editors + CLIs), import, wire, autostart, start')
+  .addHelpText('after', SERVICE_PATH_HELP)
   .option('--client <client>', 'wire only this host, or a comma-separated list (default: all detected)')
   .option('--from <host>', 'source host to import servers.json from')
   .option('--port <n>', 'bridge port', String(DEFAULT_PORT))
@@ -762,6 +797,7 @@ program.command('plan')
 
 program.command('install')
   .description('Back up + wire a host -> bridge, register auto-start, start the bridge')
+  .addHelpText('after', SERVICE_PATH_HELP)
   .option('--client <client>', 'host id (vscode|cursor|claude|copilot-cli|gemini|codex|claude-code)')
   .option('--port <n>', 'bridge port', String(DEFAULT_PORT))
   .option('--no-autostart', 'do not register OS auto-start')
@@ -816,13 +852,15 @@ program.command('emit')
   .action(cmdEmit);
 
 program.command('upgrade')
-  .description('Re-wire client from servers.json; --self shows how to update the CLI')
-  .option('--self', 'show how to update the CLI itself')
+  .description('Re-wire hosts and adopt/start bridges; --self prints guidance only')
+  .option('--self', 'resolve the same-major channel and print exact-version guidance (no update)')
+  .option('--registry <url>', 'approved npm registry override for --self (otherwise use npm configuration)')
   .action(cmdUpgrade);
 
 program.command('update-check')
-  .description('Check npm for a newer version')
+  .description('Validate the installed major’s npm channel (legacy for 1.x, latest for 2.x)')
   .option('--json', 'machine-readable output')
+  .option('--registry <url>', 'approved npm registry override (otherwise use npm configuration)')
   .action(cmdUpdateCheck);
 
 program.command('start')
@@ -831,9 +869,9 @@ program.command('start')
   .action(cmdStart);
 
 program.command('stop')
-  .description('Stop bridge(s): --port for one, else all')
+  .description('Stop matching managed supervisors and hold autostart: --port for one, else wired ports')
   .option('--port <n>', 'specific bridge port')
-  .action((opts) => stopBridge(opts.port ? parseInt(opts.port, 10) : undefined));
+  .action((opts) => stopBridge(opts.port === undefined ? undefined : Number(opts.port)));
 program.command('uninstall').description('Stop bridge, remove auto-start, restore client config').action(cmdUninstall);
 
 // Bare `mcp-pacemaker`: show status if installed, else run the setup wizard.
