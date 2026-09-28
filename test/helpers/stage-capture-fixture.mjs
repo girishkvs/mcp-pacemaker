@@ -42,7 +42,7 @@ export function stageCaptureFixture(record, bundle) {
     repository: { id: 789, full_name: POLICY.repository },
     head_repository: { id: 789, full_name: POLICY.repository },
     actor: { login: POLICY.owner }, triggering_actor: { login: POLICY.owner } };
-  const jobs = [{ name: 'stage', status: 'completed', conclusion: 'success',
+  const jobs = [{ name: 'stage', run_attempt: 1, status: 'completed', conclusion: 'success',
     head_sha: saved.source.commit, run_id: Number(runId), labels: ['ubuntu-24.04'] }];
   const metadata = { id: Number(artifactId), name: `npm-stage-ledger-${runId}-1`, expired: false,
     digest: `sha256:${sha256(archive)}`, workflow_run: { id: Number(runId), head_sha: saved.source.commit,

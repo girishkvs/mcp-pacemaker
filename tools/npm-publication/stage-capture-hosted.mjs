@@ -58,6 +58,7 @@ export async function readAuthenticatedStageCapture({
     const matches = jobs.filter(job => job.name === name);
     assert.equal(matches.length, 1, 'Missing or ambiguous actual stage run job');
     const job = matches[0];
+    assert.equal(job.run_attempt, 1, 'Original stage job attempt must be numeric 1');
     assert.equal(job.status, 'completed');
     assert.equal(job.conclusion, 'success');
     assert.equal(job.head_sha, record.source.commit);

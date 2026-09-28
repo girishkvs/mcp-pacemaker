@@ -1,6 +1,13 @@
 # mcp-pacemaker
 
-**Keep your MCP servers alive across editor restarts, reboots, and token expiry.** The long-running bridge is dependency-free; a small CLI (commander · clack · picocolors) handles setup.
+**A local process supervisor and transport bridge for your MCP servers.** Manage server
+lifetime outside your editor or CLI, with opt-in pre-warming and compatible session sharing.
+The long-running bridge has no third-party runtime dependencies; the setup CLI and dashboards
+have their own dependencies.
+
+[Install from npm](https://www.npmjs.com/package/mcp-pacemaker) ·
+[Report a problem](https://github.com/girishkvs/mcp-pacemaker/issues) ·
+[Release notes](https://github.com/girishkvs/mcp-pacemaker/releases)
 
 MCP hosts — editors (VS Code, Cursor, Claude Desktop) **and** CLIs (Claude Code, Copilot CLI,
 Codex, Gemini) — run stdio MCP servers as child processes. When the host restarts, crashes, or
@@ -23,7 +30,11 @@ This README describes **1.3.x legacy behavior**. New installations should use th
 [2.0.x documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v2.0.1/README.md).
 See the [support policy](SECURITY.md#supported-versions) for the legacy maintenance window.
 
-Compatibility gates distinguish immutable **1.3.0 / 2.0.0** from the **1.3.1 / 2.0.1** candidates.
+Use a maintained **Node.js 22 or 24** release; see [installation requirements](#install)
+before setup. `2.0.1` is available from the official npm package linked above.
+
+The compatibility checks cover **1.3.0 / 2.0.0** and the **1.3.1 / 2.0.1** patch pair.
+This describes tested version pairs, not npm publication status.
 A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
 2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending
 or interrupted transactions with 2.x. See the [real-version gates](CONTRIBUTING.md#real-version-compatibility-gates)
@@ -31,27 +42,45 @@ for exact pairs; other minor versions are not covered.
 
 ```bash
 # Current line for new installations:
-npm i -g github:girishkvs/mcp-pacemaker#v2.0.1
-# To choose the legacy behavior described below instead:
-# npm i -g github:girishkvs/mcp-pacemaker#v1.3.1
+npm install -g mcp-pacemaker@2.0.1
+mcp-pacemaker --version
+```
+
+The version check prints `2.0.1` and does not run setup. Before setup, have a readable
+JSON host configuration containing server definitions, or prepare
+[`~/.mcp-pacemaker/servers.json`](#serversjson). Import sources are `vscode`, `cursor`,
+`claude` (Claude Desktop), `copilot-cli` and `gemini`. Codex and Claude Code are wiring
+destinations, not supported import sources.
+
+Then start interactive setup:
+
+```bash
 mcp-pacemaker init
 ```
 
-That one command does the whole setup:
+`init` does the setup:
 
 1. **detects** every MCP host you have installed — editors and CLIs,
-2. **imports** the servers already configured in them into `~/.mcp-pacemaker/servers.json`,
-3. **rewrites** each host's config to point at the bridge (backing every file up first),
+2. **imports one source host** into `~/.mcp-pacemaker/servers.json`, or reuses that file if it already exists,
+3. asks for confirmation, then **wires** the selected hosts to the bridge,
 4. **registers** OS auto-start so the bridge returns after a reboot,
 5. **starts** the bridge and prints what it wired.
 
-Nothing is written before you see it: `mcp-pacemaker plan --client <host>` shows the exact
-changes, every config write leaves a `.bak`, and `mcp-pacemaker uninstall` restores them.
+**Setup changes local configuration and auto-start.** Importing can create or update
+`~/.mcp-pacemaker/servers.json` before the wiring confirmation. To inspect host changes,
+use the manual import/plan steps below before running `install`. Existing JSON/TOML host
+files get a `.bak` before replacement; Claude Code is configured through its native CLI.
+Keep your own protected configuration backup, especially before repeating setup.
+
+`--from` selects the import source; `--client` selects wiring destinations. For example,
+`mcp-pacemaker init --from vscode --client codex` imports VS Code's server definitions and
+wires Codex. Without `--from`, setup prefers the first detected JSON host when importing;
+it does not merge every detected host. Omit `--yes` when you want the confirmation prompt.
 
 After setup, bare `mcp-pacemaker` reports status:
 
 ```bash
-mcp-pacemaker            # status: bridges, wired hosts, servers
+mcp-pacemaker status     # status without entering first-run setup
 mcp-pacemaker top        # live terminal dashboard
 mcp-pacemaker doctor     # diagnose config, reachability, wiring
 ```
@@ -59,12 +88,12 @@ mcp-pacemaker doctor     # diagnose config, reachability, wiring
 <details>
 <summary>Prefer to drive it yourself? The same steps, one at a time</summary>
 
-Every command takes any host id — `vscode`, `cursor`, `claude`, `claude-code`, `copilot-cli`,
-`codex`, `gemini` (see [Supported hosts](#supported-hosts)). `--from` / `--client` below are
-just examples; substitute whichever you use.
+`plan`, `install` and `emit` accept any [supported host](#supported-hosts) as a wiring target.
+`import --from` accepts the five JSON import sources listed above. Run import first unless
+you already have `servers.json`; `plan` needs that file.
 
 ```bash
-mcp-pacemaker import  --from <host>            # build servers.json from an existing host
+mcp-pacemaker import  --from <source>          # write servers.json from one JSON host config
 mcp-pacemaker plan    --client <host>          # dry run: show what install would change
 mcp-pacemaker install --client <host>          # wire one host (--port N gives it its own bridge)
 mcp-pacemaker start                            # start the bridge
@@ -84,23 +113,32 @@ them in.
 
 </details>
 
-## Why not just use supergateway / mcp-proxy?
+## Which process-sharing mode?
 
-Those are great, mature stdio↔SSE bridges. `mcp-pacemaker` targets a different problem —
-*durable local hosting on a dev workstation* — and adds things they don't:
+Sharing a bridge does not automatically share a server process.
 
-| | supergateway | mcp-proxy | **mcp-pacemaker** |
-|---|---|---|---|
-| stdio → SSE | ✅ | ✅ | ✅ |
-| Streamable HTTP | ✅ | ✅ | ✅ |
-| Dependencies | npm tree | PyPI tree | **bridge: zero** · tiny setup CLI |
-| Process supervision | ❌ | ❌ | ✅ |
-| OS auto-start (logon / unlock / boot) | ❌ | ❌ | ✅ (Windows / macOS / Linux) |
-| Dynamic per-request token (from a CLI, auto-refresh) | ❌ (static) | ❌ (static/OAuth2) | ✅ |
-| Sessions survive the bridge restarting | ❌ | ❌ | ✅ |
-| Scheduled recycle for interactively-authenticated servers | ❌ | ❌ | ✅ |
-| One-command import + client wiring | ❌ | ❌ | ✅ |
-| Web + terminal dashboard, HTTP API | ❌ | ❌ | ✅ |
+| Mode | Process behavior | Use when |
+|---|---|---|
+| `isolated` (default) | One child per session | The server needs per-client workspace, account or conversation state |
+| `pool` (opt-in) | Pre-started, uninitialized children; each is assigned exclusively to one session | Startup is slow but sessions must remain separate |
+| `shared` (opt-in) | One initialized child for compatible sessions | Tools are stateless, inputs are explicit and the credential context is common |
+
+Shared clients must send identical initialization parameters, including `clientInfo`, and
+empty client capabilities. It is not automatic cross-editor sharing. See
+[shared-mode limits](#shared-mode) before enabling it.
+
+## Choosing a transport tool
+
+Documentation checked September 27, 2026; this is a use-case guide, not a feature benchmark.
+
+| Tool | Consider it when |
+|---|---|
+| [Supergateway](https://github.com/supercorp-ai/supergateway) | You want command-line conversion between stdio and HTTP/SSE/WebSocket transports |
+| [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | You want a Python-based adapter between local stdio clients/servers and remote MCP transports |
+| **mcp-pacemaker** | You want workstation process supervision, host wiring, auto-start, lifecycle diagnostics and explicit isolation/pooling/sharing policies |
+
+These projects have overlapping capabilities. Reconnecting to a fresh server is not recovery
+of arbitrary application state, and a transport bridge is not a sandbox for untrusted tools.
 
 ## Supported hosts
 
@@ -128,26 +166,26 @@ Use a maintained **Node.js 22 or 24** release. Node 20 remains a compatibility t
 end-of-life, not a recommended secure runtime. The bridge has no npm runtime dependencies;
 the setup CLI and dashboard have their own dependencies.
 
-GitHub and npm publication are separate. Until the npm release is announced from
-[this repository](https://github.com/girishkvs/mcp-pacemaker/releases), use the pinned GitHub
-release. Do not assume that an npm package with a matching name is this project.
+Install the released package from [npm](https://www.npmjs.com/package/mcp-pacemaker).
+Its repository link should point to
+[`girishkvs/mcp-pacemaker`](https://github.com/girishkvs/mcp-pacemaker).
+For new installations, use the current line rather than this branch's legacy save behavior:
 
 ```bash
-npm i -g github:girishkvs/mcp-pacemaker#v2.0.1
-# Deliberate legacy installation instead:
-npm i -g github:girishkvs/mcp-pacemaker#v1.3.1
+npm install -g mcp-pacemaker@2.0.1
+mcp-pacemaker --version
 ```
 
-After npm publication, `mcp-pacemaker@latest` selects the current 2.x line and
-`mcp-pacemaker@legacy` selects maintained 1.3.x. Verify the official listing's repository and
-maintainer before installing. For a repeatable installation, choose an exact released version:
+The current line uses the `latest` npm channel; the maintenance line uses `legacy` when that
+channel has been published. Before deliberately choosing legacy behavior, check that channel
+and choose its exact published version:
 
 ```bash
-npm i -g mcp-pacemaker@2.0.1
-# Or, deliberately:
-npm i -g mcp-pacemaker@1.3.1
+npm view mcp-pacemaker dist-tags --json
 ```
 
+GitHub tags and npm publication are separate: a tag does not establish that the same
+version or channel is available on npm, or that its package bytes are identical.
 `@1` and `@2` are version ranges, not the maintained channels. They can select a version
 withdrawn from a channel. `upgrade --self` resolves the installed major's channel and prints
 an exact-version command; it never installs or downgrades anything.
@@ -175,13 +213,13 @@ cannot read the audit policy; this patch does not adopt 2.x Windows save behavio
 | `logs [--follow] [--since 2h] [--server name] [--grep text]` | Read and filter durable logs, including retained rotation |
 | `top` / `dashboard` | Live terminal UI / web dashboard |
 | `plan --client <host>` | Dry run — show exactly what `install` would change |
-| `import --from <host>` | Build `~/.mcp-pacemaker/servers.json` from an existing host |
+| `import --from <source>` | Build `~/.mcp-pacemaker/servers.json` from one supported JSON host config |
 | `install --client <host> [--port N]` | Wire one host (its own `--port` gives it its own bridge) |
 | `emit --client <host>` | Print the config entries without writing anything |
 | `start` / `stop` | Start or stop bridges (`--port` for one, else all) |
 | `upgrade [--self]` | Re-wire hosts; `--self` only prints same-major, exact-version installation guidance |
 | `update-check [--json]` | Compare the installed version with its maintained npm channel |
-| `uninstall` | Stop the bridge, remove auto-start, restore configs from `.bak` |
+| `uninstall` | Stop managed bridges, remove auto-start, restore available host-file `.bak` copies; native entries are not restored |
 
 > Package installation does not upgrade a running backend. `upgrade` rewires host configuration;
 > it does not replace package files, restart an adopted backend, or update its autostart path.
@@ -202,7 +240,10 @@ relying on an implicit socket-location fallback.
 Isolated and pooled stdio servers support HTTP+SSE (`/<name>/sse`) and Streamable HTTP
 (`/<name>/mcp`). Shared mode requires Streamable HTTP.
 
-`install` writes a `.bak` of your client config before touching it, and `uninstall` restores it.
+`install` backs up an existing JSON/TOML host file to `.bak`; repeating it replaces that backup.
+`uninstall` restores available host-file backups, leaves files without backups as-is, and
+keeps `servers.json`. Native Claude Code registrations are not backed up or automatically
+restored; record their original definitions separately and restore them through Claude Code.
 
 ### Replacing or rolling back a running installation
 
@@ -559,8 +600,14 @@ See [the shared-session contract](docs/shared-sessions.md) for limits and failur
 ## Uninstall
 
 ```bash
-npx mcp-pacemaker uninstall   # stop bridge, remove auto-start, restore client config from .bak
+mcp-pacemaker uninstall      # use the CLI from the matching installed version
 ```
+
+This stops managed bridges, removes auto-start entries and restores available host-file
+backups. It leaves files without backups and native Claude Code registrations unchanged.
+It is not scoped to one port; review [replacement and rollback](#replacing-or-rolling-back-a-running-installation)
+first if another instance must remain running. Do not fetch a different CLI with `npx`
+to remove an existing installation.
 
 ## Project
 

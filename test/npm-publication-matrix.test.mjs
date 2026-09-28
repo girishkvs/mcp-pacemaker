@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import './helpers/github-reader-contracts.mjs';
 import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { test } from 'node:test';

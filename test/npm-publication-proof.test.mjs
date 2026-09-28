@@ -9,6 +9,7 @@ import { extractTarball, inspectTarball } from '../tools/npm-publication/tarball
 import { ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { verifyStaged } from '../tools/npm-publication/verify-staged.mjs';
 import { stageCaptureFixture } from './helpers/stage-capture-fixture.mjs';
+import './helpers/owner-stage-list-checks.mjs';
 
 function fixture(version = '1.3.1', namespace = '') {
   const bytes = Buffer.from('synthetic proof fixture, not a real signed npm package');
