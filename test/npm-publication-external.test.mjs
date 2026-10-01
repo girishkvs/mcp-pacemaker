@@ -63,7 +63,7 @@ function fixture(t, temporaryParent = tmpdir()) {
   const pkg = { name: 'mcp-pacemaker', version: '2.0.1', license: 'MIT' };
   const paths = [
     'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs', 'bin/pooling-writer.mjs',
-    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
+    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs', 'bin/pooling-errors.mjs',
     'bin/pooling-execution.mjs', 'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs',
     'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs',
     'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist/index.html', 'ui/dist/assets/app.js',
@@ -617,6 +617,55 @@ test('consumer and license failures emit fixed recovery hints, never raw command
   });
   assert.equal(exact.error.reviewRequired, reviewRequired);
 });
+
+const runtimeCommonPaths = [
+  'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs',
+  'bin/pooling-writer.mjs', 'bin/pooling-config.mjs', 'bin/pooling-execution.mjs',
+  'bin/windows/PoolingSecurityHelper.exe', 'supervisor/supervise.mjs',
+  'supervisor/bridge-child.mjs', 'supervisor/supervise.sh', 'supervisor/supervise.ps1',
+  'ui/dist/index.html', 'ui/dist/assets/app.js',
+];
+const runtimeCurrentOnlyPaths = [
+  'bin/pooling-editor.mjs', 'bin/pooling-files.mjs', 'bin/pooling-errors.mjs',
+  'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs',
+];
+
+function runtimeFixture(t, version) {
+  const extractedRoot = mkdtempSync(join(realpathSync.native(tmpdir()), 'runtime-closure-unit-'));
+  t.after(() => rmSync(extractedRoot, { recursive: true }));
+  const paths = [...runtimeCommonPaths, ...(version === '2.0.1' ? runtimeCurrentOnlyPaths : [])];
+  for (const path of paths) write(extractedRoot, path, `Synthetic ${version} ${path}`);
+  const request = { version, extractedRoot, artifact: { sha256: 'a'.repeat(64) } };
+  const consumers = [{ platform: 'linux', node: 'v24.21.0', npm: '12.0.2',
+    installScripts: 'default', installedBin: true, bridgeAndUi: true, sha256: request.artifact.sha256 }];
+  return { request, consumers, paths };
+}
+
+for (const version of ['1.3.1', '2.0.1']) {
+  test(`runtime closure accepts ${version}'s own runtime layout`, t => {
+    const { request, consumers, paths } = runtimeFixture(t, version);
+    const result = verifyRuntimeClosure(request, consumers);
+    assert.deepEqual(result.files.map(file => file.path).sort(), paths.sort());
+  });
+
+  for (const path of ['bin/pooling-config.mjs', 'bin/pooling-writer.mjs', 'bin/pooling-execution.mjs']) {
+    test(`runtime closure rejects missing ${path} for ${version}`, t => {
+      const { request, consumers } = runtimeFixture(t, version);
+      rmSync(join(request.extractedRoot, path));
+      assert.throws(() => verifyRuntimeClosure(request, consumers),
+        { code: 'ENOENT', path: join(request.extractedRoot, path) });
+    });
+  }
+}
+
+for (const path of runtimeCurrentOnlyPaths) {
+  test(`current runtime closure still rejects missing ${path}`, t => {
+    const { request, consumers } = runtimeFixture(t, '2.0.1');
+    rmSync(join(request.extractedRoot, path));
+    assert.throws(() => verifyRuntimeClosure(request, consumers),
+      { code: 'ENOENT', path: join(request.extractedRoot, path) });
+  });
+}
 
 test('runtime closure needs the actual lazy writer, not only a version result', t => {
   const f = fixture(t);

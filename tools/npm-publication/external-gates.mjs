@@ -333,12 +333,12 @@ export function verifyWindowsExecution(request, nativeIdentity) {
 export function verifyRuntimeClosure(request, consumers) {
   const required = [
     'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs', 'bin/pooling-writer.mjs',
-    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
+    'bin/pooling-config.mjs', 'bin/pooling-execution.mjs',
     'bin/windows', 'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs',
     'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist',
   ];
-  if (request.version === '2.0.1') required.push('bin/pooling-execution.mjs', 'bin/pooling-batches.mjs',
-    'bin/pooling-batch-scheduler.mjs');
+  if (request.version === '2.0.1') required.push('bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
+    'bin/pooling-errors.mjs', 'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs');
   const files = required.flatMap(path => filesUnder(request.extractedRoot, path));
   assert.ok(files.some(file => file.path === 'ui/dist/index.html'));
   assert.ok(files.some(file => /^ui\/dist\/assets\/.+\.js$/.test(file.path)));

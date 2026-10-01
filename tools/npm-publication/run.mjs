@@ -10,7 +10,7 @@ import {
 } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
-import { githubReaders, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
+import { githubReaders, readGithubPages, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
 import { downloadPeer, validatePeerApproval } from './peer.mjs';
 import { validateLocalApproval, validateLocalManifest, validatePreparedLocal } from './local-regression.mjs';
 import { LocalSourceReader, validateSourceSubject } from './local-source.mjs';
@@ -104,14 +104,9 @@ async function github(path) {
 }
 
 async function jobs(runId, attempt) {
-  const all = [];
-  for (let page = 1; page <= 20; page++) {
-    const result = await github(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
-    all.push(...result.jobs);
-    if (all.length === result.total_count) return all;
-    assert.ok(result.jobs.length > 0, 'Incomplete CI job pagination');
-  }
-  throw new Error('Unexpected CI job count');
+  return readGithubPages(
+    page => github(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`),
+    'jobs', { incompleteMessage: 'Incomplete CI job pagination', countMessage: 'Unexpected CI job count' });
 }
 
 async function sourceAndCi(approval, { continuing = false, collectionProof = false } = {}) {

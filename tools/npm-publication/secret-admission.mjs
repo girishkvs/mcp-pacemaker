@@ -11,6 +11,7 @@ import {
 } from './secret-report.mjs';
 
 const admissions = new WeakMap();
+const SKIPPED_CONSUMER_JOB_NAME = 'consumer (${{ matrix.platform }}, ${{ matrix.npm }})';
 
 export async function verifyCollectionSource(report, root, tools = {}, readSource = readReviewSource) {
   return workspace(async temp => {
@@ -37,11 +38,13 @@ export function validateCollectionJobs(jobs, approval, report) {
   const inactive = ['source', 'prepare', 'stage',
     ...(approval.version === '2.0.1' ? ['sign-bootstrap', 'publish-bootstrap'] : [])];
   const names = jobs.map(job => job.name).sort();
+  // GitHub retains the declared name when a matrix job is skipped before expansion.
   assert.ok(JSON.stringify(names) === JSON.stringify([...inactive, 'consumers', SECRET_COLLECTION_JOB].sort()) ||
+    JSON.stringify(names) === JSON.stringify([...inactive, SKIPPED_CONSUMER_JOB_NAME, SECRET_COLLECTION_JOB].sort()) ||
     JSON.stringify(names) === JSON.stringify([...inactive, ...MATRIX.map(item => item.jobName), SECRET_COLLECTION_JOB].sort()),
   'Incomplete original collection topology');
   const allowed = new Set(['source', 'prepare', 'consumers', 'stage', 'sign-bootstrap', 'publish-bootstrap',
-    SECRET_COLLECTION_JOB, ...MATRIX.map(item => item.jobName)]);
+    SECRET_COLLECTION_JOB, SKIPPED_CONSUMER_JOB_NAME, ...MATRIX.map(item => item.jobName)]);
   const seen = new Set();
   const ids = new Set();
   let collection;
@@ -85,15 +88,19 @@ export function validateCollectionJobs(jobs, approval, report) {
   const collect = collection.steps.find(step => step.name === SECRET_COLLECTION_STEPS[0]);
   const install = collection.steps.find(step => step.name === 'Install pinned publication scanners');
   const start = Date.parse(collect.started_at); const end = Date.parse(collect.completed_at);
+  const secondResolution = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(collect.completed_at);
+  // A whole-second API completion includes that second, not the following one.
+  const evidenceEndExclusive = end + (secondResolution ? 1000 : 1);
   assert.ok(Date.parse(collection.started_at) <= Date.parse(install.completed_at) &&
     Date.parse(install.completed_at) <= start && start <= end &&
     end <= Date.parse(collection.completed_at));
   assert.ok(Date.parse(report.producerEvidence.ci.completedAt) <= Date.parse(collection.started_at) &&
-    Date.parse(report.completedAt) >= start && Date.parse(report.completedAt) <= end);
+    Date.parse(report.completedAt) >= start && Date.parse(report.completedAt) < evidenceEndExclusive);
   assert.equal(secretId(report.producerEvidence.ci.runId), secretId(approval.ciRunId));
   assert.equal(report.producerEvidence.ci.attempt, approval.ciAttempt);
   for (const { record } of report.producerEvidence.receipts) {
-    assert.ok(Date.parse(record.native.startedAt) >= start && Date.parse(record.native.completedAt) <= end);
+    assert.ok(Date.parse(record.native.startedAt) >= start &&
+      Date.parse(record.native.completedAt) < evidenceEndExclusive);
   }
   for (const name of SECRET_COLLECTION_STEPS) {
     const steps = collection.steps?.filter(step => step.name === name);

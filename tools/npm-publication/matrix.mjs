@@ -207,6 +207,27 @@ function localFiles(directory, prefix = '') {
   return files;
 }
 
+export async function readGithubPages(readPage, key, {
+  incompleteMessage = 'Incomplete GitHub pagination',
+  countMessage = 'Unexpected GitHub result count',
+} = {}) {
+  const all = [];
+  let total;
+  for (let page = 1; page <= 20; page++) {
+    const result = await readPage(page);
+    assert.ok(Array.isArray(result?.[key]));
+    assert.ok(Number.isSafeInteger(result.total_count) &&
+      result.total_count >= 0, 'Invalid GitHub total_count');
+    if (total === undefined) total = result.total_count;
+    assert.equal(result.total_count, total, 'GitHub total_count changed during pagination');
+    assert.ok(all.length + result[key].length <= total, 'GitHub pagination exceeds total_count');
+    all.push(...result[key]);
+    if (all.length === total) return all;
+    assert.ok(result[key].length > 0, incompleteMessage);
+  }
+  throw new Error(countMessage);
+}
+
 export function githubReaders(env, { fetcher = fetch } = {}) {
   const api = async path => {
     assert.ok(env.GITHUB_TOKEN, 'Read-only artifact/job token required');
@@ -222,17 +243,8 @@ export function githubReaders(env, { fetcher = fetch } = {}) {
     assert.equal(response.status, 200, 'GitHub read failed; no fallback');
     return response.json();
   };
-  const pages = async (path, key) => {
-    const all = [];
-    for (let page = 1; page <= 20; page++) {
-      const result = await get(`${path}?per_page=100&page=${page}`);
-      assert.ok(Array.isArray(result[key]));
-      all.push(...result[key]);
-      if (all.length === result.total_count) return all;
-      assert.ok(result[key].length > 0, 'Incomplete GitHub pagination');
-    }
-    throw new Error('Unexpected GitHub result count');
-  };
+  const pages = (path, key) => readGithubPages(
+    page => get(`${path}?per_page=100&page=${page}`), key);
   return {
     readJson: get,
     readArtifactMetadata: artifactId => get(`actions/artifacts/${id(artifactId)}`),

@@ -384,7 +384,7 @@ const hostedFixture = () => {
     repository: { id: 789, full_name: 'girishkvs/mcp-pacemaker' },
     head_repository: { id: 789, full_name: 'girishkvs/mcp-pacemaker' },
     actor: { login: 'girishkvs' }, triggering_actor: { login: 'girishkvs' } };
-  const jobs = [{ name: 'stage', status: 'completed', conclusion: 'success',
+  const jobs = [{ name: 'stage', run_attempt: 1, status: 'completed', conclusion: 'success',
     head_sha: record.source.commit, run_id: 123, labels: ['ubuntu-24.04'] }];
   const metadata = { id: 456, name: 'npm-stage-ledger-123-1', expired: false,
     workflow_run: { id: 123, head_sha: record.source.commit, repository_id: 789, head_repository_id: 789 } };

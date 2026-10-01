@@ -161,7 +161,11 @@ time, not a newly invented approval.
 
 The original owner-only, same-source collection run must have a successful
 `secret-collection` job and its complete pinned checkout/bootstrap/collection/upload
-step sequence; every other job must be skipped. Its original ZIP digest,
+step sequence; every other job must be skipped. When GitHub skips the consumer matrix
+before expansion, its API job name remains the exact declared
+`consumer (${{ matrix.platform }}, ${{ matrix.npm }})`. That name is accepted only
+for the skipped job with no steps; partial matrices, mixed job-name forms and
+executed consumer jobs remain rejected. Its original ZIP digest,
 metadata, repository/owner IDs and exact five canonical bounded members are checked through the existing authenticated artifact
 readers. No raw scanner output, private policy, local triage or owner-local
 evidence is uploaded. Only counts, exits, hashes and digest-only source/finding
@@ -174,6 +178,11 @@ digest-only path slots, full stream byte counts/hashes, timings, completion/coun
 facts and pinned bootstrap provenance. Native execution and collection-step
 times must follow the same exact successful source CI. Reachable history
 counts/types/bytes and bundle/corpus commitments remain required.
+
+GitHub job-step completion timestamps without a fractional part have second
+precision. Report and native-receipt completion may fall within that same second,
+but never into the next one. Fractional completion timestamps retain their exact
+millisecond boundary, and execution before the step start remains rejected.
 
 Qualified source and fresh private source-policy inputs must use the exact
 collected bytes, materialized by actual Git with `core.autocrlf=false`,
@@ -271,6 +280,12 @@ bytes. Finalization verifies **actual GitHub API ZIP bytes**, archive digests,
 exact files, source/manifest hashes, and job/artifact/consumer receipts. Download
 action warnings or caller-supplied success JSON do not replace these checks.
 Source, locks and candidate bytes must remain unchanged.
+
+GitHub jobs/artifacts pagination requires a nonnegative safe-integer `total_count`
+on every page. The first total is pinned: changed totals, overshoot, empty
+continuations and more than 20 pages are rejected. This also applies to source-CI
+job reads; required-name and duplicate checks still run on the complete result.
+Modeled HTTP regression fixtures exercise these checks, not hosted authentication.
 
 Record each artifact ID, archive SHA256, run ID/attempt, manifest SHA256 and
 tarball SHA256/SHA512/SRI. A source bundle is not a final candidate. Stage transfer
@@ -465,6 +480,11 @@ This is owner-supplied evidence, not an OIDC-authenticated inspection of npm tru
 or pending stages. Only record `none` after an owner-authenticated stage list and
 the owner release ledger establish no conflicting/pending submission. Approval
 and readback expire after one hour; slow runs may need a new approval.
+
+Use a fresh guarded `owner-stage-list.mjs` receipt and a successful guard exit,
+not a standalone flattened npm list array, before manually setting
+`ownerPreflight.pending.status` to `"none"`. The owner ledger and explicit
+approval steps remain required; the helper does not perform or authorize a mutation.
 
 Private-content review is a separate explicit owner attestation of source,
 reachable history/authors and tarball, bound to the same source commit and all
@@ -667,7 +687,10 @@ source/job/command bindings and evidence. The lower-level
 not archive authenticity or license approval. Do not use it alone as a gate.
 
 `runtime-closure` separately checks extracted runtime paths and actual consumer
-installed-bin/bridge/UI evidence.
+installed-bin/bridge/UI evidence. Both patches require the shared pooling writer
+and execution module. Only 2.0.1 requires the separate pooling editor, files,
+errors, batches and batch scheduler modules; 1.3.1 keeps its editor/file logic
+inside `pooling-config.mjs`.
 
 ### Scanner installation
 
@@ -752,10 +775,44 @@ separately approved temporary local session. GitHub OIDC stage credentials
 cannot perform these owner operations:
 
 ```text
-npm stage list mcp-pacemaker --json
+node tools/npm-publication/owner-stage-list.mjs "<absolute physical npm12 CLI>" "<new private observation directory>"
 npm stage view <exact-stage-id> --json
 npm stage download <exact-stage-id> --json
 ```
+
+Run the guarded list command with Node 24.21.0 and the same physical reviewed
+npm 12.0.2 CLI, in the already-approved owner session and with its existing npm
+authentication/configuration. Use a new private output directory; an old receipt
+is never reused. Bare `npm stage list` output such as `[]` is not admissible
+evidence that no pending stages exist.
+
+Require exit code `0` and the fresh `receipt.json`. Its hash is printed after
+successful child completion, complete envelope/output validation, checked
+persistence and private scratch cleanup. A printed path alone is not success.
+Confirm `total: 0` and `pendingAssessment: "none"` before manually recording
+pending-none alongside the existing owner release ledger and freshness and
+unresolved-outcome checks. A nonempty result is `requires-owner-review`, not a
+matching-stage decision; continue the existing exact stage-view/download review
+for those IDs. The receipt is read evidence only: it authenticates neither the
+owner nor mutation approval, and never edits `ownerPreflight` automatically.
+
+Receipts retain projected stage IDs/package names, bounded observation metadata,
+and hashes/byte counts of native output and decoded HTTP entity bodies. Other
+response fields and raw stdout/stderr are omitted; projections are not original
+wire bytes. The guard rejects redirects, retries/cache fallback, unexpected
+bodies/endpoints, incomplete or changing totals, and duplicate IDs. Limits are
+128 KiB per response, 512 KiB cumulative responses, 256 KiB stdout, 64 KiB stderr,
+1 MiB receipt and 30 seconds overall. Timeout, nonzero child exit, output mismatch,
+or persistence/cleanup failure means there is no accepted empty-list observation.
+
+Portable guard tests run through `test/npm-publication-proof.test.mjs`, which
+imports `test/helpers/owner-stage-list-checks.mjs` once. On Windows, the test-only
+`OWNER_LIST_TEST_CLI` setting enables the real npm CLI cases with Node 24.21.0
+and a physical npm 12.0.2 CLI. The owned-process fixture uses existing Python 3
+(`OWNER_LIST_TEST_PYTHON` if it is not on PATH). Node 20/22 run the portable checks
+with the native SDK cases explicitly skipped; native SDK fixture execution on
+other operating systems is not qualified. These settings are not needed for
+real owner reads.
 
 These commands are **not run by this workflow**. The view JSON's real fields
 include `id`, `packageName`, `version`, `tag`, `shasum`; SHA1 alone is insufficient.
@@ -776,7 +833,9 @@ node tools/npm-publication/verify-staged.mjs stage-record.json stage-view.json
 
 The verifier first fetches the original run/jobs/artifact through GitHub, validates
 the actual archive digest, and requires the exact capture, bundle and original
-stage records from that archive. Local hashes or `authenticated: true` cannot
+stage records from that archive. Both the run and matched stage job must report
+numeric `run_attempt: 1`; requesting the attempt-1 API URL is not a substitute.
+Local hashes or `authenticated: true` cannot
 replace this read. A reconciled ledger points back to that original artifact;
 verify the original `stage-1.json`, not a newly relabelled record.
 

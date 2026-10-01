@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require a complete, bounded owner stage-list observation before recording no
+  pending stages; keep owner authentication, ledger review and approval separate.
+- Require a stable, safe `total_count` on every GitHub jobs/artifacts page and
+  reject count drift or overshoot before admitting incomplete publication evidence.
+- Require the original stage job's numeric attempt `1` when verifying captured
+  stage evidence; the requested API attempt alone does not establish it.
+- Check each patch's actual runtime layout during npm publication. Legacy 1.3.1
+  does not require 2.0-only editor/file modules, while shared execution and the
+  current line's error module remain required.
+- Accept GitHub's exact unexpanded consumer-matrix job name during source-secret
+  collection validation, while still requiring skipped status and no executed steps.
+- Compare collected report and native-receipt completion against the precision
+  of GitHub's step timestamp without admitting execution in the next second.
 - Preserve exact positive source-CI attempts and accept bounded canonical npm repair tags.
 - Let the 1.3.1 publishing finalizer use approved immutable published 2.0.1 bytes
   for T32 comparison without a hosted seed, fabricated preparation evidence or
