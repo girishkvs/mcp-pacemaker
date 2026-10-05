@@ -268,6 +268,26 @@ No exemptions are supplied by this tool. Review metadata is not echoed; input ha
 public finding coordinates are recorded. This gate does not prove safe manifest ranges,
 consumer behavior, licenses, notices, cryptographic provenance or registry signatures.
 
+The existing generic `exemptionsPath` contract is separate from the narrowly
+reviewed **2.0.2 producer-UI** build exception documented in
+[npm publishing](../../docs/npm-publishing.md#temporary-202-producer-ui-risk-acceptance).
+The publication source adapter supplies an explicit `producerContext` with phase,
+release version and `producer-ui` scope. The shared evaluator also requires the
+exact physical UI-lock bytes/hash, braces 3.0.3, the exact advisory, and the
+approval/expiry window ending **2026-10-12T00:00:00Z**. It is never forwarded as
+a global exemption or applied to root/fresh-consumer graphs. A coordinate shared
+with the root graph cannot use this exception. Both locks are rehashed after
+queries and expiry is checked again before accepting the result.
+
+OSV raw findings remain in `findings`, including ID and modified timestamp; only
+the eligible finding is labeled `reviewed-exemption` and carries public
+`riskAcceptance` details. `rawFindingCount`, `remainingFindings`, graph hashes,
+raw-response SHA256 and bytes are retained. A policy pass with this exception
+is **RISK-ACCEPTED**, not advisory-free. Native npm audit uses the same review and
+retains exit1/five high entries; unknown/extra findings, changed reports, execution
+failures or expired review are not accepted. No CLI flag or ambient variable
+enables the release-specific exception for other scopes.
+
 ## Separate private-content policy and owner review
 
 ```sh
@@ -294,7 +314,7 @@ tarball, including formats/history this literal gate cannot certify.
 - `scanSource({ root, tools? })`
 - `scanArtifact({ root, tools?, artifactSha256? })`
 - `scanAdvisories({ locks?: [{ path, scope }], consumers?: [...], publicPackages?, publicPackagesPath?,
-  exemptionsPath?, localArtifact? })`, scopes `producer-root`, `producer-ui`, `fresh-consumer`
+  exemptionsPath?, localArtifact?, producerContext? })`, scopes `producer-root`, `producer-ui`, `fresh-consumer`
 - `scanPrivateContent({ root, policyPath?, binding: { commit, artifactSha256? }, source? })`
 - `scanPublicationRequest({ request, tools?, policyPath?, publicPackages?, publicPackagesPath?,
   exemptionsPath? })`

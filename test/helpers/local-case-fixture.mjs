@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { gzipSync } from 'node:zlib';
 import { CURRENT_REF, LEGACY_REF } from '../../tools/compatibility/fixtures.mjs';
 import { digest } from '../../tools/npm-publication/policy.mjs';
+import { releaseRole } from '../../tools/npm-publication/local-regression.mjs';
 import { inspectTarball } from '../../tools/npm-publication/tarball.mjs';
 import { renderNotices, verifyArtifacts, sha256 } from '../../tools/third-party-notices/inventory.mjs';
 import { captureConsumerLicenseEvidence } from '../../tools/npm-consumer/license-evidence.mjs';
@@ -37,7 +38,7 @@ export class LocalCaseFixture {
       securityVerified: true,
       worker: { mode: AUDIT_MODE, budgetMilliseconds: AUDIT_WORKER_TIMEOUT_MS, elapsedMilliseconds: 40000, cleanupVerified: true },
     };
-    this.sourceTap = version === '2.0.1'
+    this.sourceTap = releaseRole(version) === 'current'
       ? this.tap.replace('ok 1 - synthetic unit', `ok 1 - ${AUDIT_TEST_NAME}\n# ${AUDIT_DIAGNOSTIC}${JSON.stringify(audit)}`)
       : this.tap;
   }
@@ -82,7 +83,7 @@ export class LocalCaseFixture {
   }
 
   native(cwd, commit) {
-    const baseline = this.version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
+    const baseline = releaseRole(this.version) === 'legacy' ? LEGACY_REF : CURRENT_REF;
     const build = 'tools/windows-security-helper/build.ps1';
     this.git(cwd, ['rev-parse', 'HEAD'], `${commit}\n`);
     this.git(cwd, ['cat-file', '-e', `${baseline}^{commit}`]);
@@ -183,7 +184,7 @@ export class LocalCaseFixture {
       'test/unit.test.mjs', 'ui/dist/index.html', 'ui/src/main.js']) this.write(path, 'synthetic fixture; never executed\n');
     this.write('LICENSE', this.license);
     const ui = { version: this.version, scripts: { typecheck: 'tsc --noEmit', build: 'vite build' } };
-    if (this.version === '2.0.1') {
+    if (releaseRole(this.version) === 'current') {
       ui.scripts.test = 'node --test test/unit.test.mjs';
       this.write('ui/test/unit.test.mjs', 'synthetic UI fixture; never executed\n');
     }
@@ -209,16 +210,16 @@ export class LocalCaseFixture {
       artifacts: [{ file: 'index.html', sha256: sha256(readFileSync(join(this.root, 'ui/dist/index.html'))) }] });
     const native = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
       'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs', 'bin/windows/src/PoolingSecurityReader.cs',
-      ...(this.version === '2.0.1' ? ['bin/windows/src/PoolingNativeFiles.cs'] : []),
+      ...(releaseRole(this.version) === 'current' ? ['bin/windows/src/PoolingNativeFiles.cs'] : []),
       'tools/windows-security-helper/build.ps1'];
     for (const path of native) {
       const bytes = Buffer.from(`synthetic native fixture ${path}\n`);
       this.nativeBlobs.set(path, bytes);
       this.write(path, path.endsWith('.ps1') ? bytes.toString().replaceAll('\n', '\r\n') : bytes);
     }
+    for (const path of STAGE_PROOF_FILES) this.write(path, `Synthetic offline-proof source fixture: ${path}\n`);
     this.write('tools/npm-publication/owner-sdk.mjs', `export const PROFILE_SOURCE_SHA256 = '${'a'.repeat(64)}';\n`);
     this.write('tools/npm-publication/provenance.mjs', `export const PROVENANCE_SOURCE_SHA256 = '${'b'.repeat(64)}';\n`);
-    for (const path of STAGE_PROOF_FILES) this.write(path, `Synthetic offline-proof source fixture: ${path}\n`);
     this.names = this.files();
     this.gate = { schemaVersion: 4, kind: 'local-publication-regression', status: 'passed', releaseReady: false,
       publicationCandidate: false, originalPreserved: true, version: this.version, platform: 'win32',
@@ -248,11 +249,11 @@ export class LocalCaseFixture {
       this.command('Complete source suite', ['--test', '--test-reporter=tap', 'test/unit.test.mjs'], cwd, this.sourceTap, false, 'C:\\node.exe');
       checks.sourceTests = { ...this.totals };
       this.command('UI typecheck', ['node_modules/typescript/bin/tsc', '--noEmit'], `${cwd}\\ui`);
-      if (this.version === '2.0.1') {
+      if (releaseRole(this.version) === 'current') {
         this.command('UI tests', ['--test', '--test-reporter=tap', 'test/unit.test.mjs'], `${cwd}\\ui`, this.tap);
         checks.uiTests = { ...this.totals };
       } else checks.uiTests = { status: 'not-defined', executed: false,
-        reason: 'Legacy 1.3.1 defines neither a UI test script nor a ui/test directory' };
+        reason: `Legacy ${this.version} defines neither a UI test script nor a ui/test directory` };
       this.snapshot(cwd);
       const packedNames = this.names.filter(path => ['package.json', 'README.md', 'CHANGELOG.md', 'LICENSE',
         'THIRD_PARTY_NOTICES.txt'].includes(path) || path.startsWith('bin/') ||
@@ -273,7 +274,7 @@ export class LocalCaseFixture {
       checks.extractedFiles = inspection.files.map(({ path, sha256 }) => ({ path, sha256 }));
       checks.notices = verifyArtifacts(this.root);
       checks.sdk = { status: 'passed', kind: 'fresh-child-offline-sdk-load', node: 'v24.21.0', npm: '12.0.2',
-        version: this.version, ...(this.version === '1.3.1' ? { contract: 'legacy-staged-signature',
+        version: this.version, ...(releaseRole(this.version) === 'legacy' ? { contract: 'legacy-staged-signature',
           module: 'verify-staged.mjs', verifier: 'sigstore@5.0.0 (npm@12.0.2)' } : {
           contract: 'owner-sdk-and-provenance', profileSourceSha256: 'a'.repeat(64), provenanceSourceSha256: 'b'.repeat(64) }),
         networkAttempts: 0, subprocessAttempts: 0, authenticated: false, published: false,

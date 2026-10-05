@@ -7,10 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Target release: **2.0.2**. This candidate has not yet been published.
+
 ### Fixed
 
-- Resolve native directory watcher paths before watching logs and test control files,
+- Replace the old GitHub-install quick start in the npm package documentation with
+  npm-first installation, exact-version commands, prerequisites and setup boundaries.
+- Preserve npm package-type permissions in isolated consumer checks instead of silently
+  reverting directory, file, Git, or remote dependency restrictions to npm defaults.
+- Resolve native directory watcher paths in publication and compatibility test helpers,
   avoiding Windows short-path watcher crashes without changing the selected files.
+
+### Changed
+
+- Make the manual npm publisher reusable for explicitly selected stable 1.x/2.x
+  versions, with immutable published comparison peers and no active bootstrap actions.
+- Keep the existing GitHub source-CI, collection/review, preparation, OIDC staging,
+  verification and separately approved owner-publication route for the selected release.
+
+### Security
+
+- Record a temporary **2.0.2-only producer-UI build risk acceptance** for
+  [braces 3.0.3 / GHSA-vfj7-8cjw-p6xm (CVE-2026-93687)](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm),
+  approved October 5, 2026 and expiring **2026-10-12T00:00:00Z**. It is bound to
+  the exact reviewed UI lock; raw native audit/OSV findings remain visible.
+  This is not a patch or a clean advisory result, and does not cover root/runtime
+  or fresh-consumer dependencies. Remediation and exception removal are required
+  before expiry or the next release. See the
+  [exact scope, mitigations and follow-up](docs/npm-publishing.md#temporary-202-producer-ui-risk-acceptance).
+
+## [2.0.1]
 
 ### Changed
 

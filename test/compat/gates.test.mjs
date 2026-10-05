@@ -61,11 +61,11 @@ test('explicit peer preparation covers only the approved patch pair in either di
 });
 
 test('unapproved candidate or peer versions fail instead of weakening version assertions', () => {
-  for (const version of ['1.3.0', '2.0.0', '1.3.2', '2.0.2', '2.0.1-preview', '3.0.0']) {
-    assert.throws(() => fixturePlan(version), /Unsupported candidate version/);
+  for (const version of ['0.3.0', '2.00.0', '2.0.1-preview', '3.0.0']) {
+    assert.throws(() => fixturePlan(version), /supported/);
   }
-  for (const peerVersion of ['1.3.0', '1.3.2', '2.0.1', '1.3.1-preview', '']) {
-    assert.throws(() => fixturePlan('2.0.1', { peerVersion }), /opposite-major patch/);
+  for (const peerVersion of ['2.0.2', '2.0.1', '1.3.1-preview', '']) {
+    assert.throws(() => fixturePlan('2.0.1', { peerVersion }));
   }
   assert.throws(() => fixturePlan('2.0.1', { historical: true, peerVersion: '1.3.1' }),
     /Historical fixtures cannot contain a patch/);
@@ -336,8 +336,16 @@ for (const aliased of [false, true]) {
     }
     const helper = join(isolatedRoot, 'tools', 'compatibility', 'fixtures.mjs');
     mkdirSync(join(isolatedRoot, 'tools', 'compatibility'), { recursive: true });
+    mkdirSync(join(isolatedRoot, 'tools', 'npm-publication'), { recursive: true });
     mkdirSync(join(isolatedRoot, 'node_modules', '.cache'), { recursive: true });
     writeFileSync(helper, readFileSync(join(ROOT, 'tools', 'compatibility', 'fixtures.mjs')));
+    writeFileSync(join(isolatedRoot, 'tools', 'npm-publication', 'local-regression.mjs'),
+      readFileSync(join(ROOT, 'tools', 'npm-publication', 'local-regression.mjs')));
+    mkdirSync(join(isolatedRoot, 'tools', 'publication-scanners'), { recursive: true });
+    for (const name of ['advisories.mjs', 'core.mjs']) {
+      writeFileSync(join(isolatedRoot, 'tools', 'publication-scanners', name),
+        readFileSync(join(ROOT, 'tools', 'publication-scanners', name)));
+    }
     local = await import(pathToFileURL(helper).href);
     assert.equal(local.MANIFEST, join(realpathSync(isolatedRoot), 'node_modules', '.cache', 'pacemaker-compat.json'));
     const owned = local.ownedFixtureManifest();

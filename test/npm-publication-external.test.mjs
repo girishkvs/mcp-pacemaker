@@ -23,6 +23,8 @@ import { captureConsumerLicenseEvidence } from '../tools/npm-consumer/license-ev
 import {
   assertHostedScannerContext, installScanners, releaseExecutable, retainScannerProvenance, SCANNER_RELEASES,
 } from '../tools/npm-publication/install-scanners.mjs';
+import { scanPublicationRequest } from '../tools/publication-scanners/publication.mjs';
+import { UI_BUILD_RISK_REVIEW } from '../tools/publication-scanners/advisories.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 test('scanner bootstrap retains exact create-only safe provenance for the original collector', t => {
@@ -150,6 +152,40 @@ async function scanner({ request, policyPath, publicPackages }) {
     }])),
   };
 }
+
+test('Existing external source aggregation carries actual scoped OSV risk evidence to the gate', async t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-06T00:00:00Z'));
+  const f = fixture(t);
+  const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
+  write(f.sourceRoot, 'ui/package-lock.json', lockBytes);
+  write(f.sourceRoot, 'package-lock.json', { lockfileVersion: 3, packages: {
+    '': {}, 'node_modules/picocolors': { version: '1.1.1', resolved: 'https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz' },
+  } });
+  const names = [...new Set(['picocolors', ...Object.keys(JSON.parse(lockBytes).packages)
+    .filter(Boolean).map(path => path.split('node_modules/').at(-1))])];
+  const request = { ...f.request, version: '2.0.2', publicPackages: names };
+  const report = await aggregateExternalGates(request, {
+    run: gitRunner(f),
+    scanPublication: async options => {
+      const ordinary = await scanner({ ...options, publicPackages: ['fixture-public'] });
+      const risk = await scanPublicationRequest({
+        request: { ...options.request, requiredGates: ['producer-advisories'] }, publicPackages: names,
+        bindingReader: async () => ({ syntheticSourceBinding: true }),
+        fetchImpl: async (_url, init) => new Response(JSON.stringify({ results: JSON.parse(init.body).queries
+          .map(item => item.package.name === 'braces' ? { vulns: [{ id: UI_BUILD_RISK_REVIEW.id,
+            modified: '2026-10-02T22:45:04Z' }] } : {}) }), { headers: { 'Content-Type': 'application/json' } }),
+      });
+      ordinary.gates['producer-advisories'] = risk.gates['producer-advisories'];
+      ordinary.scannerDetails = risk.scannerDetails;
+      return ordinary;
+    },
+  });
+  assert.equal(report.status, 'pending-owner-review');
+  assert.equal(report.gates['producer-advisories'].riskAcceptance.disposition, 'RISK-ACCEPTED');
+  assert.equal(report.scannerDetails.advisories.rawFindingCount, 1);
+  assert.equal(report.scannerDetails.advisories.findings[0].status, 'reviewed-exemption');
+  assert.equal(report.gates['native-release-identity'].status, 'passed');
+});
 function commandEvidence(args, stdout = '') {
   const command = { file: resolve('synthetic-node'), args, cwd: resolve('synthetic-root') };
   return { exitCode: 0, command, commandSha256: hash(JSON.stringify(command)),
@@ -233,16 +269,21 @@ function replacementFixture(f) {
   const stdout = JSON.stringify(result);
   const args = [join(f.sourceRoot, 'tools/service-replacement/check.mjs'),
     '--legacy-tarball', join(f.root, 'legacy.tgz'), '--legacy-sha256', approvedArtifacts.legacy.sha256,
-    '--current-tarball', join(f.root, 'current.tgz'), '--current-sha256', artifact.sha256];
+    '--legacy-version', approvedArtifacts.legacy.version,
+    '--current-tarball', join(f.root, 'current.tgz'), '--current-sha256', artifact.sha256,
+    '--current-version', approvedArtifacts.current.version];
   const evidence = commandEvidence(args, stdout);
   evidence.command.cwd = f.sourceRoot;
   evidence.commandSha256 = hash(JSON.stringify(evidence.command));
   return { result, stdout, approvedArtifacts, evidence };
 }
 function artifactRequest(f) {
+  const replacement = replacementFixture(f);
+  const peer = replacement.approvedArtifacts.legacy;
   return { ...f.request, phase: 'artifact', root: f.extractedRoot, extractedRoot: f.extractedRoot,
+    approval: { ...f.request.approval, peerArtifact: { version: peer.version, sha256: peer.sha256 } },
     requiredGates: ARTIFACT_GATES, artifact, tarball: join(f.root, 'current.tgz'),
-    matrix: matrixFixture(f.nativeIdentity), replacement: replacementFixture(f),
+    matrix: matrixFixture(f.nativeIdentity), replacement,
     sourceReport: { phase: 'source', commit, nativeIdentity: f.nativeIdentity,
       gates: { 'native-release-identity': { status: 'passed' } } } };
 }
@@ -730,6 +771,32 @@ test('T32 requires supplied actual command result, four ordered replacements and
     copy.replacement.stdout = JSON.stringify(copy.replacement.result);
     copy.replacement.evidence.stdoutSha256 = hash(copy.replacement.stdout);
     assert.throws(() => verifyReplacement(copy));
+  }
+});
+
+test('SYNTHETIC T32 verification binds multiple selected versions and immutable peer pins', t => {
+  for (const current of ['2.0.2', '2.7.13']) {
+    const request = artifactRequest(fixture(t));
+    const receipt = request.replacement;
+    request.version = current;
+    receipt.approvedArtifacts.current.version = current;
+    receipt.result.artifacts.current.version = current;
+    for (const step of receipt.result.steps) {
+      if (step.from.startsWith('2.')) step.from = current;
+      if (step.to.startsWith('2.')) step.to = current;
+      step.ui.version = step.to;
+    }
+    receipt.evidence.command.args[12] = current;
+    receipt.evidence.commandSha256 = hash(JSON.stringify(receipt.evidence.command));
+    receipt.stdout = JSON.stringify(receipt.result);
+    receipt.evidence.stdoutSha256 = hash(receipt.stdout);
+    request.approval = { peerArtifact: { version: '1.3.1', sha256: receipt.approvedArtifacts.legacy.sha256 } };
+    assert.equal(verifyReplacement(request).steps.length, 4);
+    request.approval.peerArtifact.version = '1.3.2';
+    assert.throws(() => verifyReplacement(request));
+    request.approval.peerArtifact.version = '1.3.1';
+    request.approval.peerArtifact.sha256 = '0'.repeat(64);
+    assert.throws(() => verifyReplacement(request));
   }
 });
 

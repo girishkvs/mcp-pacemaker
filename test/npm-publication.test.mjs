@@ -108,12 +108,34 @@ test('Synthetic stage IDs remain runtime-only fixtures', () => {
   assert.equal(source.includes(stageId), false, 'Keep the synthetic stage ID out of source bytes');
 });
 
-test('T01/T20: only approved stable candidate versions map to fixed channels', () => {
+test('T01/T20: supported stable majors map to release channels', () => {
   assert.equal(channelFor('1.3.1'), 'legacy');
   assert.equal(channelFor('2.0.1'), 'latest');
-  for (const version of ['1.3.0', '2.0.0', '3.0.1', '2.0.1-beta.1', 'v2.0.1', '1', '1.3.1+build']) {
+  for (const version of ['1.3.2', '1.4.12', '2.0.2', '2.7.13']) {
+    assert.equal(channelFor(version), version.startsWith('1.') ? 'legacy' : 'latest');
+    assert.equal(publicationTagName(`refs/tags/npm-r27/v${version}`, version), `npm-r27/v${version}`);
+  }
+  for (const version of ['0.3.0', '3.0.1', '2.0.1-beta.1', 'v2.0.1', '1', '1.3.1+build',
+    '2.00.2', '2.1.02', '2.9007199254740992.0', '2.0.2\n']) {
     assert.throws(() => channelFor(version));
   }
+});
+
+test('reusable approval rejects string source-CI attempts', () => {
+  const a = approval();
+  a.ciAttempt = '2';
+  assert.throws(() => validateApproval(a, 'stage'), /attempt/i);
+});
+
+test('reusable approval accepts exact supported selected patch and repair generation', () => {
+  const a = approval('2.7.13');
+  a.ref = 'refs/tags/npm-r27/v2.7.13';
+  a.ciAttempt = 2;
+  assert.equal(validateApproval(a, 'stage'), 'latest');
+  for (const generation of ['0', '1', '02', '-2', '9007199254740992']) {
+    assert.throws(() => publicationTagName(`refs/tags/npm-r${generation}/v2.7.13`, a.version));
+  }
+  assert.throws(() => publicationTagName(a.ref, '2.7.14'));
 });
 
 for (const version of ['1.3.1', '2.0.1']) {
@@ -162,8 +184,8 @@ test('publication tag approval rejects alternate refs and mismatched versions', 
     'refs/tags/npm-r4/v1.3.1', 'refs/tags/npm-r4/v2.0.1-extra', 'refs/tags/npm-r4/v2.0.1/other',
     'refs/tags/npm-r4//v2.0.1', 'refs/tags/npm-r4/../v2.0.1',
     'refs/tags/npm-r5/v1.3.1', 'refs/tags/npm-r5/v2.0.1-extra', 'refs/tags/npm-r5/v2.0.1/other',
-    'refs/tags/npm-r5//v2.0.1', 'refs/tags/npm-r5/../v2.0.1', 'refs/tags/npm-r6/v2.0.1', null]) {
-    assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved/);
+    'refs/tags/npm-r5//v2.0.1', 'refs/tags/npm-r5/../v2.0.1', 'refs/tags/npm-r01/v2.0.1', null]) {
+    assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved|supported/);
   }
   assert.throws(() => publicationTagName('refs/tags/npm/v3.0.1', '3.0.1'));
 });
@@ -225,7 +247,7 @@ test('T07/T09: bootstrap is not an automated action or a fabricated stage', () =
   assert.throws(() => validateApproval(approval(), 'bootstrap'));
   const a = approval();
   delete a.ownerPreflight.expectedDistTags.latest;
-  assert.throws(() => validateApproval(a, 'stage'), /Bootstrap/);
+  assert.throws(() => validateApproval(a, 'stage'), /supported|current release/);
 });
 
 test('T08/T09: unknown ownership, absent package and missing trust block before a write', async () => {
@@ -581,37 +603,21 @@ test('T04/T06: transfer is bound to approved artifact ID/archive digest/source/p
   }
 });
 
-test('T18: workflow is manual-only, serialized, with OIDC only in protected sign/stage jobs', () => {
+test('T18: workflow is manual-only, serialized, with OIDC only in protected stage job', () => {
   const workflow = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s+(?:push|release|pull_request|schedule|workflow_run):/m);
   assert.match(workflow, /default: prepare/);
   assert.match(workflow, /group: npm-publication-mcp-pacemaker\n\s+cancel-in-progress: false/);
-  assert.equal((workflow.match(/id-token: write/g) ?? []).length, 2);
-  assert.doesNotMatch(workflow.split('\n  sign-bootstrap:')[0], /id-token/);
-  for (const key of ['sign-bootstrap', 'stage']) {
+  assert.equal((workflow.match(/id-token: write/g) ?? []).length, 1);
+  assert.doesNotMatch(workflow.split('\n  stage:')[0], /id-token/);
+  for (const key of ['stage']) {
     const job = workflow.split(`\n  ${key}:`)[1].split(/\n  [a-z][\w-]*:/)[0];
     assert.match(job, /environment: npm-publish/);
     assert.match(job, /id-token: write/);
   }
-  assert.match(workflow, /options: \[collect-secrets, prepare, sign-bootstrap, publish-bootstrap, stage\]/);
-  const ownerJob = workflow.split('\n  publish-bootstrap:')[1].split('\n  stage:')[0];
-  assert.match(ownerJob, /environment: npm-publish/);
-  assert.doesNotMatch(ownerJob, /id-token: write/);
-  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs start') < ownerJob.indexOf('publish-bootstrap.mjs wait login'));
-  assert.ok(ownerJob.indexOf('wait login') < ownerJob.indexOf('Export encrypted owner login challenge'));
-  assert.ok(ownerJob.indexOf('Export encrypted owner login challenge') < ownerJob.indexOf('wait publication'));
-  assert.match(ownerJob, /if: always\(\)[\s\S]+publish-bootstrap\.mjs cleanup/);
-  assert.match(ownerJob, /npm-owner-bootstrap-ledger/);
-  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs wait completion') < ownerJob.indexOf('publish-bootstrap.mjs cleanup'));
-  assert.ok(ownerJob.indexOf('publish-bootstrap.mjs cleanup') < ownerJob.indexOf('post-publication.mjs prepare'));
-  assert.ok(ownerJob.indexOf('post-publication.mjs prepare') < ownerJob.indexOf('post-publication.mjs verify'));
-  const anonymousStep = ownerJob.split('- name: Anonymously verify published signatures provenance and fresh registry consumer')[1]
-    .split('- name: Export post-publication acceptance or failure receipt')[0];
-  assert.match(anonymousStep, /post-publication\.mjs verify/);
-  assert.doesNotMatch(anonymousStep, /GITHUB_TOKEN|id-token|secrets\./);
-  assert.match(ownerJob, /name: npm-post-publication-\$\{\{ github\.run_id }}-1/);
-  assert.match(ownerJob, /npm-owner-bootstrap\/ledger\/post-publication\.json/);
+  assert.match(workflow, /options: \[collect-secrets, prepare, stage\]/);
+  assert.doesNotMatch(workflow, /sign-bootstrap|publish-bootstrap|owner-auth|post-publication/);
   assert.match(workflow, /environment: npm-publish/);
   assert.match(workflow, /ACTUAL_RUNNER_ENVIRONMENT: \$\{\{ runner.environment }}/);
   assert.doesNotMatch(workflow, /^ {6}\S[^\n]*\$\{\{\s*runner\./m,

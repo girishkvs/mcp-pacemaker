@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { createRequire } from 'node:module';
 import { gunzipSync } from 'node:zlib';
 import { digest, npm12Contents } from './policy.mjs';
 import { CAPTURE_LIMITS, inspectStageBody, validateCapture } from './stage-capture.mjs';
-import { exactLocalKeys, localHash, localSha } from './local-regression.mjs';
-import { treeEntries } from './local-source.mjs';
+import { exactLocalKeys, localHash, localSha, releaseRole } from './local-regression.mjs';
+import { LocalSourceReader, treeEntries } from './local-source.mjs';
 import { physical } from './local-inputs.mjs';
 const { fixture } = createRequire(import.meta.url)('./offline-stage/fixture.cjs');
 
@@ -22,13 +22,35 @@ export const STAGE_SCENARIOS = Object.freeze(['deny-control', 'oidc', 'admission
   'dual-audience', 'fulcio-success', 'fulcio-cli-307', 'fulcio-cli-308', 'fulcio-cli-503',
   'fulcio-default-307', 'fulcio-default-308', 'fulcio-default-503',
   'fulcio-malformed', 'fulcio-oversize', 'fulcio-deadline']);
-export const STAGE_PROOF_FILES = Object.freeze([
+const ORIGINAL_PROOF_MODULES = Object.freeze([
   'stage-capture.mjs', 'stage-sdk.mjs', 'stage-sdk-pins.json', 'stage-child.mjs', 'policy.mjs',
   'local-stage-check.mjs', 'stage-proof-contract.mjs', 'offline-stage/deny.cjs',
   'offline-stage/fixture.cjs', 'offline-stage/npm.cjs', 'offline-stage/oidc.cjs', 'offline-stage/control.cjs',
   'offline-stage/loader.cjs', 'stage-issuer.mjs', 'stage-loader.mjs', 'stage-sdk-loader.json', 'run.mjs',
   'offline-stage/services.cjs', 'stage-fulcio.mjs',
-].map(name => `tools/npm-publication/${name}`).concat(['test/helpers/local-regression-fixture.mjs']));
+]);
+const proofPaths = modules => modules.map(name => `tools/npm-publication/${name}`)
+  .concat(['test/helpers/local-regression-fixture.mjs']);
+export const STAGE_PROOF_FILES = Object.freeze(proofPaths([
+  ...ORIGINAL_PROOF_MODULES, 'local-regression.mjs', 'secret-report.mjs', 'peer.mjs', 'provenance.mjs',
+]).concat(['tools/publication-scanners/advisories.mjs', 'tools/publication-scanners/core.mjs']));
+// Public Git identities of the immutable published peer, not a receipt or caller-selected inventory.
+export const PUBLISHED_LEGACY_STAGE_CONTRACT = Object.freeze({
+  version: '1.3.1', head: '688b1038f88f020312230a94ff355732c34ae185',
+  tree: 'ba4b2198174a115e4282fe5351d84a1bcc948bb8',
+  members: Object.freeze([
+    '7eb6b56220b42da91a7c6f3cca4fecd117efb519', '148d4d64ab96b493de977802094c70bb5fb5ef55',
+    '272a6fcbb83991aac316aa655f56c47e67d4774a', '77f86b77711912b90b0e4c9110eccf9688cd3e85',
+    'be95105ecd04222e1246cceae8f5280b026f9980', '03ae8a943dd26249fe91c3c39e9d291d55108467',
+    '7d74ea7befe3eac178a129a85502714fad55d84c', '74bdfebc664a15e5f761cbff9d480e08001d5123',
+    '2b830e056795dca3bd9984fd9f47b8b1522aa6af', '7dbaed1775a2aa3b83c963fa1d56ff479ceaca7f',
+    '059f323595476fc17c02217d8e7345bc337c7700', 'ad6366256906add357ff88a5a9e6af36d5175233',
+    '29adf7e281cd9a25d2c9230d9bf74af1aa276d87', 'd8037803df536345b33dd8b1bfb5cb63bb145ec8',
+    '48875264dcd72bf22969de069555af199e1a631b', 'b27419973888ce58b904be39777d741d597e92f5',
+    'db7ba7c7ad337e793e780d080d1035acc2de2d2c', '9d9b4bdf6cd3f3b91bc57f19438d50b33f6d8852',
+    '1ccb686fe5289491f146ac62581dfc18e53d4fac', '7f850e2c1339e330519358422d30f6fbe7b8f1f6',
+  ].map((blob, index) => Object.freeze({ path: proofPaths(ORIGINAL_PROOF_MODULES)[index], mode: '100644', blob }))),
+});
 export const STAGE_CHILD_TIMEOUT = 60_000;
 export const stageProofExit = mode => mode.startsWith('issuer-') ? 1 : 0;
 export const DENIAL_COVERAGE = Object.freeze([
@@ -47,9 +69,30 @@ export const DENIAL_COVERAGE = Object.freeze([
   'Resolver.resolve', 'Resolver.reverse', 'PromiseResolver.resolve', 'PromiseResolver.reverse',
   'global.fetch', 'global.WebSocket',
 ]);
-export const proofFiles = root => STAGE_PROOF_FILES.map(path => ({
-  path, sha256: localHash(readFileSync(join(root, path))),
-}));
+export function sourceStageContract(source, entries) {
+  releaseRole(source.version);
+  const pinned = PUBLISHED_LEGACY_STAGE_CONTRACT;
+  if (source.head !== pinned.head) return { id: 'current-v4', paths: STAGE_PROOF_FILES };
+  assert.equal(source.version, pinned.version, 'Published peer proof role/version differs');
+  assert.equal(source.tree, pinned.tree, 'Published peer proof tree differs');
+  const members = pinned.members.map(expected => entries.find(entry => entry.path === expected.path));
+  assert.deepEqual(members, pinned.members, 'Published peer proof implementation or member differs from its Git pin');
+  return { id: `git:${pinned.head}`, paths: pinned.members.map(member => member.path) };
+}
+
+export function proofFiles(root) {
+  const gitDirectory = join(root, '.git');
+  if (existsSync(gitDirectory) &&
+      lstatSync(gitDirectory).isDirectory()) {
+    const reader = new LocalSourceReader(root);
+    if (reader.git(['rev-parse', 'HEAD']).trim() === PUBLISHED_LEGACY_STAGE_CONTRACT.head) {
+      const identity = reader.capture();
+      const contract = sourceStageContract(identity, identity.entries);
+      return contract.paths.map(path => ({ path, sha256: identity.files.find(file => file.path === path).sha256 }));
+    }
+  }
+  return STAGE_PROOF_FILES.map(path => ({ path, sha256: localHash(readFileSync(join(root, path))) }));
+}
 
 const checkoutBindings = new WeakMap();
 const checkoutAttributes = ['text', 'eol', 'filter', 'working-tree-encoding', 'ident'];
@@ -96,13 +139,17 @@ export function bindStageProofCheckout({ root, identity, readGit }) {
     }
   };
   recheck();
+  assert.equal(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version, identity.version,
+    'Stage source version differs from the actual checkout');
+  const contract = sourceStageContract(identity, entries);
+  const paths = contract.paths;
   const fields = new TextDecoder('utf-8', { fatal: true }).decode(bytes([
-    'check-attr', `--source=${identity.head}`, '-z', ...checkoutAttributes, '--', ...STAGE_PROOF_FILES,
+    'check-attr', `--source=${identity.head}`, '-z', ...checkoutAttributes, '--', ...paths,
   ])).split('\0');
   assert.equal(fields.pop(), '', 'Incomplete checkout attribute evidence');
-  assert.equal(fields.length, STAGE_PROOF_FILES.length * checkoutAttributes.length * 3);
+  assert.equal(fields.length, paths.length * checkoutAttributes.length * 3);
   let offset = 0;
-  const files = STAGE_PROOF_FILES.map(path => {
+  const files = paths.map(path => {
     const entry = identity.entries.find(value => value.path === path);
     assert.ok(entry, 'Stage proof input is not a committed source member');
     const attributes = {};
@@ -131,7 +178,7 @@ export function bindStageProofCheckout({ root, identity, readGit }) {
     return { path, sha256: localHash(checkedOut) };
   });
   recheck();
-  const handle = Object.freeze({ kind: 'verified-stage-checkout-binding' });
+  const handle = Object.freeze({ kind: 'verified-stage-checkout-binding', contractId: contract.id });
   checkoutBindings.set(handle, { root, head: identity.head, version: identity.version, files, recheck });
   return handle;
 }

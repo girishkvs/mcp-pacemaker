@@ -29,6 +29,10 @@
     { "from": "node_modules/@sigstore/sign/dist/external/fetch.js", "request": "make-fetch-happen", "path": "node_modules/make-fetch-happen/lib/index.js" },
     { "from": "node_modules/@sigstore/sign/dist/external/fulcio.js", "request": "./fetch", "path": "node_modules/@sigstore/sign/dist/external/fetch.js" },
     { "from": "node_modules/@sigstore/sign/dist/signer/fulcio/ca.js", "request": "../../external/fulcio", "path": "node_modules/@sigstore/sign/dist/external/fulcio.js" },
-    { "from": "node_modules/@sigstore/sign/dist/external/fetch.js", "request": "@gar/promise-retry", "path": "node_modules/@gar/promise-retry/lib/index.js" }
+    { "from": "node_modules/@sigstore/sign/dist/external/fetch.js", "request": "@gar/promise-retry", "path": "node_modules/@gar/promise-retry/lib/index.js" },
+    { "from": "node_modules/sigstore/dist/sigstore.js", "request": "@sigstore/tuf", "path": "node_modules/@sigstore/tuf/dist/index.js" },
+    { "from": "node_modules/@sigstore/tuf/dist/client.js", "request": "tuf-js", "path": "node_modules/tuf-js/dist/index.js" },
+    { "from": "node_modules/tuf-js/dist/updater.js", "request": "./fetcher", "path": "node_modules/tuf-js/dist/fetcher.js" },
+    { "from": "node_modules/tuf-js/dist/fetcher.js", "request": "./error", "path": "node_modules/tuf-js/dist/error.js" }
   ]
 }

@@ -16,6 +16,7 @@ const configurationNames = new Set([
   'fetch-retries', 'fetch-retry-factor', 'fetch-retry-mintimeout',
   'fetch-retry-maxtimeout', 'fetch-timeout', 'ignore-scripts',
   'min-release-age', 'min-release-age-exclude', 'allow-scripts', 'strict-dep-builds',
+  'allow-directory', 'allow-file', 'allow-git', 'allow-remote',
 ]);
 
 function policyUrl(value) {

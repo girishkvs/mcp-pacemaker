@@ -1,6 +1,7 @@
 // Guard-only tests. No bridge, supervisor, native helper or npm command is launched.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { assertPending } from './compat/bridge.mjs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,11 +14,27 @@ import {
 const digest = 'a'.repeat(64);
 const args = [
   '--legacy-tarball', 'legacy.tgz', '--legacy-sha256', digest,
+  '--legacy-version', '1.3.1',
   '--current-tarball', 'current.tgz', '--current-sha256', digest,
+  '--current-version', '2.0.1',
 ];
 const stopped = () => ({
   started: true, settled: true, stopped: true, held: true,
   bridgePids: [123], livePids: [], listenerOpen: false,
+});
+
+test('T32 batch response assertions accept selected current patches, not a fixed patch list', () => {
+  for (const version of ['2.0.2', '2.7.13']) {
+    const body = { ok: true, name: 'alpha', pending: true, revision: 'revision', undoId: 'undo', batchId: 'batch',
+      snapshot: { service: 'mcp-pacemaker', version, instanceId: 'synthetic', snapshotVersion: 1,
+        servers: [{ name: 'alpha' }], prewarm: { revision: 'revision',
+          batches: [{ id: 'batch', status: 'pending', revision: 'revision', applyAt: 123,
+            changes: [{ name: 'alpha' }] }] } } };
+    assertPending(body, version);
+    for (const wrong of ['1.3.1', '3.0.1', '2.0.2-beta.1', '2.0.99']) {
+      assert.throws(() => assertPending(body, wrong));
+    }
+  }
 });
 
 test('T32 requires two explicit exact patch artifacts and normalizes their digests', () => {
@@ -30,8 +47,8 @@ test('T32 requires two explicit exact patch artifacts and normalizes their diges
 
 for (const [name, input] of [
   ['no artifacts', []],
-  ['no current artifact', args.slice(0, 4)],
-  ['no legacy artifact', args.slice(4)],
+  ['no current artifact', args.slice(0, 6)],
+  ['no legacy artifact', args.slice(6)],
   ['missing value', ['--legacy-tarball']],
   ['option in place of value', ['--legacy-tarball', '--current-tarball']],
   ['duplicate option', [...args, '--legacy-tarball', 'other.tgz']],

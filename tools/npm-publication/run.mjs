@@ -10,8 +10,8 @@ import {
 } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
-import { githubReaders, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
-import { downloadPeer } from './peer.mjs';
+import { githubReaders, readGithubPages, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
+import { downloadPeer, validatePeerApproval } from './peer.mjs';
 import { bootstrapWorkflow, validateBootstrapContext, signBootstrapOnce } from './bootstrap.mjs';
 import { readCandidateEvidence, readRemoteSource, readProtectedEnvironment, readSigningRun,
   readAbsentRegistry } from './bootstrap-readers.mjs';
@@ -119,14 +119,9 @@ async function github(path) {
 }
 
 async function jobs(runId, attempt) {
-  const all = [];
-  for (let page = 1; page <= 20; page++) {
-    const result = await github(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
-    all.push(...result.jobs);
-    if (all.length === result.total_count) return all;
-    assert.ok(result.jobs.length > 0, 'Incomplete CI job pagination');
-  }
-  throw new Error('Unexpected CI job count');
+  return readGithubPages(
+    page => github(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`),
+    'jobs', { incompleteMessage: 'Incomplete CI job pagination', countMessage: 'Unexpected CI job count' });
 }
 
 export async function sourceAndCi(approval, { continuing = false, collectionProof = false } = {}) {
@@ -179,6 +174,7 @@ function workspace(name = 'npm-publication') {
 }
 
 async function prepare(approval) {
+  if (approval.peerArtifact !== undefined) validatePeerApproval(approval, process.env);
   const ci = await sourceAndCi(approval);
   const cli = toolchain();
   const { output, home, config } = workspace('npm-publication-prepared');
@@ -215,6 +211,7 @@ async function prepare(approval) {
   validateSource(source(approval), approval);
   assert.equal(digest(readFileSync(join(root, 'package-lock.json'))).sha256, locks.root);
   assert.equal(digest(readFileSync(join(root, 'ui/package-lock.json'))).sha256, locks.ui);
+  const sourceGateReport = json(sourceReport);
   const prepared = {
     schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version: approval.version,
     major: Number(approval.version[0]), channel: channelFor(approval.version),
@@ -224,6 +221,10 @@ async function prepare(approval) {
     ci, toolchain: { node: POLICY.node, npm: POLICY.npm }, producerLocks: locks,
     artifact: { filename: 'candidate.tgz', ...digest(bytes), files: inspection.files },
     sourceReportSha256: digest(readFileSync(sourceReport)).sha256,
+    ...(approval.version === '2.0.2' ? { producerAdvisories: {
+      source: sourceGateReport.source, checks: sourceGateReport.checks,
+      gate: sourceGateReport.gates['producer-advisories'],
+    } } : {}),
     publicPackages: approval.publicPackages,
     preparationApproval: { approver: approval.approver, approvedAt: approval.approvedAt, scope: 'prepare' },
     localRegression: approval.localRegression, localRegressionReview: approval.localRegressionReview,
@@ -235,6 +236,7 @@ async function prepare(approval) {
     },
     publicationApproval: { status: 'not-authorized' },
   };
+  validatePreparedLocal(prepared, approval, approval, sourceGateReport);
   save(join(output, 'prepared.json'), prepared);
   assert.deepEqual(readdirSync(output).sort(), ['candidate.tgz', 'prepared.json', 'source-gates.json']);
   const preparedSha256 = digest(readFileSync(join(output, 'prepared.json'))).sha256;
@@ -285,24 +287,32 @@ async function collectOriginalSecrets(approval, {
   return report;
 }
 
-async function finalize(approval) {
-  const ci = await sourceAndCi(approval, { continuing: true });
-  const input = join(resolve(process.env.RUNNER_TEMP), 'npm-prepared');
-  const { prepared, inspection, sourceArtifact } = await verifyPreparedBundle({
-    directory: input, approval, env: process.env,
-  });
+export async function finalizeInputs({
+  approval, env, preflight = sourceAndCi, verifySource = verifyPreparedBundle,
+  verifyConsumers = verifyMatrixReports, resolvePeer = downloadPeer,
+}) {
+  validatePeerApproval(approval, env);
+  const ci = await preflight(approval, { continuing: true });
+  const input = join(resolve(env.RUNNER_TEMP), 'npm-prepared');
+  const { prepared, inspection, sourceArtifact } = await verifySource({ directory: input, approval, env });
   validatePreparedLocal(prepared, approval);
   assert.deepEqual(prepared.publicPackages, approval.publicPackages);
   assert.deepEqual(prepared.ci, ci);
   assert.deepEqual(prepared.preparationApproval,
     { approver: approval.approver, approvedAt: approval.approvedAt, scope: 'prepare' });
-  const matrix = await verifyMatrixReports({
-    directory: join(resolve(process.env.RUNNER_TEMP), 'npm-consumer-reports'),
-    approval, prepared, env: process.env,
+  const matrix = await verifyConsumers({
+    directory: join(resolve(env.RUNNER_TEMP), 'npm-consumer-reports'),
+    approval, prepared, env,
   });
   // The other patch is passive comparison input, never this run's provenance subject.
-  const peer = await downloadPeer({ approval, env: process.env,
-    directory: join(resolve(process.env.RUNNER_TEMP), 'npm-publication-peer') });
+  const peer = await resolvePeer({ approval, env,
+    directory: join(resolve(env.RUNNER_TEMP), 'npm-publication-peer') });
+  return { input, prepared, inspection, sourceArtifact, matrix, peer };
+}
+
+async function finalize(approval) {
+  const { input, prepared, inspection, sourceArtifact, matrix, peer } =
+    await finalizeInputs({ approval, env: process.env });
   const cli = toolchain();
   const { output, home } = workspace();
   const env = { ...cleanNpmEnvironment(process.env, home), NPM_PUBLICATION_CLI: cli };
@@ -380,7 +390,7 @@ async function stage(approval) {
   assert.equal(String(manifest.workflow.runId), String(approval.artifact.runId));
   assert.equal(manifest.workflow.attempt, 1);
   assert.equal(String(manifest.ci.runId), String(approval.ciRunId));
-  assert.equal(manifest.ci.attempt, Number(approval.ciAttempt));
+  assert.equal(manifest.ci.attempt, approval.ciAttempt);
   assert.deepEqual(manifest.toolchain, { node: POLICY.node, npm: POLICY.npm });
   assert.deepEqual(manifest.producerLocks, {
     root: digest(readFileSync(join(root, 'package-lock.json'))).sha256,
@@ -511,9 +521,10 @@ async function signBootstrap(approval) {
 }
 
 export async function main(command) {
-  assert.ok(['collect-secrets', 'prepare', 'finalize', 'transfer', 'stage', 'sign-bootstrap'].includes(command), 'Unknown publication command');
+  assert.ok(['collect-secrets', 'prepare', 'finalize', 'transfer', 'stage'].includes(command), 'Unknown publication command');
   const event = json(process.env.GITHUB_EVENT_PATH);
   const action = event.inputs?.action;
+  assert.ok(['collect-secrets', 'prepare', 'stage'].includes(action), 'Obsolete or unsupported workflow action');
   const approval = JSON.parse(event.inputs?.approval ?? '');
   validateLocalApproval(approval, { continuing: command === 'finalize' });
   // Finalization continues the same source-approved run; it does not consume a new approval.

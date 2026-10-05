@@ -17,6 +17,7 @@ import { LocalGitConfig } from './local-git.mjs';
 import { windowsSystemEnvironment } from './local-environment.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
 import { auditEnvironment, auditEvidence } from './local-audit-report.mjs';
+import { releaseRole } from './local-regression.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -93,7 +94,7 @@ export function testTotals(stdout) {
 }
 
 export function uiTestArguments(root, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Unsupported UI test lane');
+  releaseRole(version);
   const ui = json(join(root, 'ui/package.json'));
   assert.equal(ui.version, version, 'UI version differs from source lane');
   assert.equal(ui.scripts.typecheck, 'tsc --noEmit', 'UI typecheck script changed');
@@ -101,7 +102,7 @@ export function uiTestArguments(root, version) {
   const directory = join(root, 'ui/test');
   if (!Object.hasOwn(ui.scripts, 'test') &&
       !existsSync(directory)) {
-    assert.equal(version, '1.3.1', 'The 2.0.1 UI suite is required');
+    assert.equal(releaseRole(version), 'legacy', 'The current UI suite is required');
     return null;
   }
   const selected = testArguments(ui.scripts.test);
@@ -356,7 +357,7 @@ export class LocalGate {
 
   async native(root, version) {
     const commit = this.git(['rev-parse', 'HEAD'], root);
-    const baseline = version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
+    const baseline = releaseRole(version) === 'legacy' ? LEGACY_REF : CURRENT_REF;
     this.git(['cat-file', '-e', `${baseline}^{commit}`], root);
     return verifyNativeIdentity({ sourceRoot: root, commit, version }, {
       run: (file, args, options) => {
@@ -445,7 +446,7 @@ export class LocalGate {
         this.publisher('UI typecheck', ['node_modules/typescript/bin/tsc', '--noEmit'], join(root, 'ui'));
         checks.uiTests = uiSelected === null
           ? { status: 'not-defined', executed: false,
-            reason: 'Legacy 1.3.1 defines neither a UI test script nor a ui/test directory' }
+            reason: `Legacy ${pkg.version} defines neither a UI test script nor a ui/test directory` }
           : testTotals(this.publisher('UI tests', uiSelected, join(root, 'ui')));
         assert.deepEqual(this.snapshot(root), before, 'Source/UI tests modified checkout files');
         const packed = join(this.work, 'pack');
@@ -486,7 +487,7 @@ export class LocalGate {
         assert.equal(checks.sdk.provenanceVerified, false);
         assert.equal(checks.sdk.signatureVerified, false);
         assert.equal(checks.sdk.version, pkg.version);
-        assert.equal(checks.sdk.contract, pkg.version === '1.3.1'
+        assert.equal(checks.sdk.contract, releaseRole(pkg.version) === 'legacy'
           ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
         assert.equal(checks.sdk.node, report.publisherNode);
         assert.equal(checks.sdk.npm, POLICY.npm);

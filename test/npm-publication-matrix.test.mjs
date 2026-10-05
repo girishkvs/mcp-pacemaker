@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
+import { syntheticLocalApproval, syntheticPreparedLocal, syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,6 +12,7 @@ import { exactArchive } from '../tools/npm-publication/bootstrap.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import { verifyWindowsExecution } from '../tools/npm-publication/external-gates.mjs';
 import { CURRENT_REF, LEGACY_REF } from '../tools/compatibility/fixtures.mjs';
+import { releaseRole } from '../tools/npm-publication/local-regression.mjs';
 import {
   MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, validateMatrixContext,
   verifyMatrixReports, verifyPreparedBundle, zipFiles,
@@ -88,7 +89,7 @@ function packageFixture(version = approval.version, nativeFiles) {
     'bin/windows/PoolingSecurityHelper.exe': 'fake bytes; never executed',
     'bin/windows/PoolingSecurityHelper.build.json': '{}',
     ...Object.fromEntries(['AssemblyInfo', 'PoolingNativeFiles', 'PoolingSecurityHelper', 'PoolingSecurityReader']
-      .filter(name => version === '2.0.1' || name !== 'PoolingNativeFiles')
+      .filter(name => releaseRole(version) === 'current' || name !== 'PoolingNativeFiles')
       .map(name => [`bin/windows/src/${name}.cs`, 'fixture source'])),
   };
   if (nativeFiles) {
@@ -113,7 +114,8 @@ function packageFixture(version = approval.version, nativeFiles) {
 
 class Fixture {
   constructor(t, version = approval.version, nativeFiles) {
-    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}` });
+    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}`,
+      peerArtifact: { ...approval.peerArtifact, version: version.startsWith('1.') ? '2.0.1' : '1.3.1' } });
     const approved = this.approval;
     this.dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-')));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
@@ -136,11 +138,20 @@ class Fixture {
     Object.assign(this.env, { GITHUB_REF: approved.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${approved.ref}` });
     this.event.inputs.approval = JSON.stringify(approved);
-    const sourceReport = Buffer.from('{"schemaVersion":1}\n');
+    const producer = version === '2.0.2' ? syntheticCleanProducerEvidence({
+      version, commit: approved.commit, rootLockSha256: 'd'.repeat(64), uiLockSha256: 'e'.repeat(64),
+    }) : undefined;
+    const sourceReport = Buffer.from(JSON.stringify({ schemaVersion: 1, ...(producer ? {
+      phase: 'source', source: producer.source, checks: producer.checks,
+      gates: { 'producer-advisories': producer.gate },
+    } : {}) }) + '\n');
     this.prepared = {
       schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version,
       source: { ref: approved.ref, tagObject: approved.tagObject, commit: approved.commit, tree: approved.tree },
       toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash(sourceReport),
+      ...(producer ? { producerAdvisories: producer, producerLocks: {
+        root: producer.source.rootLockSha256, ui: producer.source.uiLockSha256,
+      } } : {}),
       artifact: { filename: 'candidate.tgz', ...digest(this.package.tarball),
         files: inspectTarball(this.package.tarball, approved).files },
     };
@@ -391,7 +402,7 @@ class Fixture {
   }
 }
 
-for (const version of ['1.3.1', '2.0.1']) {
+for (const version of ['1.3.1', '2.0.1', '1.3.2', '2.0.2', '2.7.13']) {
   test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, async t => {
     const native = Object.fromEntries(Object.entries(packageFixture(version).files)
       .filter(([path]) => path.startsWith('bin/windows/')));
@@ -414,11 +425,11 @@ for (const version of ['1.3.1', '2.0.1']) {
     const f = new Fixture(t, version);
     const expected = Object.entries(f.package.files).filter(([path]) => path.startsWith('bin/windows/'))
       .map(([path, bytes]) => ({ path, sha256: hash(bytes) })).sort((a, b) => a.path.localeCompare(b.path));
-    assert.equal(expected.length, version === '1.3.1' ? 5 : 6);
-    assert.equal(expected.some(file => file.path.endsWith('/PoolingNativeFiles.cs')), version === '2.0.1');
+    assert.equal(expected.length, releaseRole(version) === 'legacy' ? 5 : 6);
+    assert.equal(expected.some(file => file.path.endsWith('/PoolingNativeFiles.cs')), releaseRole(version) === 'current');
     await f.complete();
     const matrix = await f.verify();
-    const identity = { baselineCommit: version === '1.3.1' ? LEGACY_REF : CURRENT_REF,
+    const identity = { baselineCommit: releaseRole(version) === 'legacy' ? LEGACY_REF : CURRENT_REF,
       files: [...expected, { path: 'tools/windows-security-helper/build.ps1', sha256: hash('unit script') }],
       reproducibilityBuild: 'not-executed-in-this-run' };
     const request = { version, matrix, extractedRoot: join(f.dir, 'lane2/checkout') };
@@ -481,7 +492,8 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
     ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(namespace => ({ version, namespace })))) {
-    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}` });
+    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}`,
+      peerArtifact: { ...approval.peerArtifact, version: version.startsWith('1.') ? '2.0.1' : '1.3.1' } });
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
     const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };
@@ -491,11 +503,11 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
     }, a, event));
     for (const ref of ['refs/heads/main', `refs/tags/${namespace}v${version}-other`,
-      `refs/tags/other/v${version}`, `refs/tags/npm-r6/v${version}`]) {
+      `refs/tags/other/v${version}`, `refs/tags/npm-r01/v${version}`]) {
       const invalid = { ...a, ref };
       const invalidEnv = { ...env, GITHUB_REF: ref,
         GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };
-      assert.throws(() => validateMatrixContext(invalidEnv, invalid), /exact approved/);
+      assert.throws(() => validateMatrixContext(invalidEnv, invalid), /exact approved|supported/);
     }
   }
 });
@@ -745,7 +757,15 @@ test('consumer npm installer uses Node plus known CLI, exact pins, empty config 
   }
 });
 
-test('workflow is manual, pins six lanes, transfers exact IDs and protects both OIDC jobs', () => {
+test('GitHub pagination rejects changed total counts rather than accepting a truncated run', async () => {
+  let page = 0;
+  const readers = githubReaders({ GITHUB_TOKEN: 'SYNTHETIC' }, { fetcher: async () =>
+    new Response(JSON.stringify({ total_count: page++ === 0 ? 3 : 2, jobs: [{ id: page }] })) });
+  await assert.rejects(readers.readJobs('123', 2), /total_count/);
+  assert.equal(page, 2);
+});
+
+test('workflow is manual, pins six lanes, transfers exact IDs and protects the only OIDC job', () => {
   const yaml = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
   assert.match(yaml, /workflow_dispatch:/);
   assert.doesNotMatch(yaml, /^\s+(?:push|pull_request|release|schedule):/m);
@@ -753,8 +773,9 @@ test('workflow is manual, pins six lanes, transfers exact IDs and protects both 
   for (const lane of MATRIX) {
     assert.ok(yaml.includes(`platform: ${lane.platform}, image: ${lane.image}, node: '${lane.node}', npm: '${lane.npm}'`));
   }
-  assert.equal((yaml.match(/id-token: write/g) ?? []).length, 2);
-  assert.ok(yaml.indexOf('id-token: write') > yaml.indexOf('\n  sign-bootstrap:'));
+  assert.equal((yaml.match(/id-token: write/g) ?? []).length, 1);
+  assert.ok(yaml.indexOf('id-token: write') > yaml.indexOf('\n  stage:'));
+  assert.doesNotMatch(yaml, /sign-bootstrap|publish-bootstrap/);
   assert.match(yaml, /environment: npm-publish/);
   assert.match(yaml, /needs: \[source, consumers\]/);
   assert.match(yaml, /artifact-ids: \$\{\{ steps.matrix.outputs.matrix-artifact-ids \}\}/);

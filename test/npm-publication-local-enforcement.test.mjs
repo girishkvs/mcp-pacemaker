@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  LOCAL_CONTRACT, LOCAL_NODES, LOCAL_CASES, localHash, localCommitment,
+  LOCAL_CONTRACT, LOCAL_NODES, localCases, localHash, localCommitment, releaseRole, releaseVersions,
   validateLocalRegression, validateLocalApproval, validatePreparedLocal, validateLocalManifest,
 } from '../tools/npm-publication/local-regression.mjs';
 import { treeEntries, captureSourceIdentity, validateSourceSubject } from '../tools/npm-publication/local-source.mjs';
@@ -15,20 +15,69 @@ import { evidenceTar } from '../tools/npm-publication/local-evidence.mjs';
 import { submitOnce, validateCi } from '../tools/npm-publication/policy.mjs';
 import { main as publicationMain } from '../tools/npm-publication/run.mjs';
 import { LocalCaseFixture } from './helpers/local-case-fixture.mjs';
+import { syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { physical } from '../tools/npm-publication/local-inputs.mjs';
 import './helpers/npm-publication-local-audit.mjs';
 import { CheckoutProofFixture } from './helpers/npm-publication-checkout-proof.mjs';
+import {
+  PUBLISHED_LEGACY_STAGE_CONTRACT, STAGE_PROOF_FILES, sourceStageContract, validateStageProof,
+} from '../tools/npm-publication/stage-proof-contract.mjs';
+
+test('Historical proof selection requires exact source, tree, role and every independently pinned Git member', () => {
+  const pin = PUBLISHED_LEGACY_STAGE_CONTRACT;
+  const source = { version: pin.version, head: pin.head, tree: pin.tree };
+  const selected = sourceStageContract(source, pin.members);
+  assert.equal(selected.paths.length, 20);
+  assert.equal(selected.id, `git:${pin.head}`);
+  for (const change of [
+    value => { value.version = '2.0.1'; }, value => { value.version = '1.3.2'; },
+    value => { value.tree = '0'.repeat(40); },
+  ]) {
+    const changed = structuredClone(source);
+    change(changed);
+    assert.throws(() => sourceStageContract(changed, pin.members));
+  }
+  for (const change of [
+    entries => entries.pop(),
+    entries => { entries.find(item => item.path.endsWith('stage-sdk-loader.json')).blob = '0'.repeat(40); },
+    entries => { entries.find(item => item.path.endsWith('stage-proof-contract.mjs')).blob = '0'.repeat(40); },
+    entries => { entries[0].mode = '100755'; },
+  ]) {
+    const entries = structuredClone(pin.members);
+    change(entries);
+    assert.throws(() => sourceStageContract(source, entries));
+  }
+  for (const version of ['1.3.1', '1.3.2', '2.0.2', '2.7.13']) {
+    assert.deepEqual(sourceStageContract({ ...source, head: 'a'.repeat(40), version }, pin.members),
+      { id: 'current-v4', paths: STAGE_PROOF_FILES });
+  }
+});
+
+test('Current checkout binding rejects a historical-sized, swapped or extended report inventory', t => {
+  const f = new CheckoutProofFixture(t).create();
+  const options = { root: f.root, version: f.version, sourceHead: f.identity.head, checkout: f.binding(),
+    invocation: f.invocation };
+  validateStageProof(f.report, options);
+  for (const files of [
+    f.report.files.slice(0, 20),
+    [...f.report.files, { path: 'extra.mjs', sha256: '0'.repeat(64) }],
+    PUBLISHED_LEGACY_STAGE_CONTRACT.members.map(item => ({ path: item.path, sha256: '0'.repeat(64) })),
+  ]) {
+    assert.throws(() => validateStageProof({ ...f.report, files }, options));
+  }
+});
 
 // All positive objects below are SYNTHETIC UNIT FIXTURES. None are report evidence or owner acceptance.
 class Fixtures {
-  statement() {
+  statement(version = '2.0.1') {
+    const peerVersion = releaseRole(version) === 'legacy' ? '2.0.1' : '1.3.1';
     return { schemaVersion: 1, kind: 'local-regression-integrity-checked', contract: LOCAL_CONTRACT,
       scope: 'both-release-lines-local-only', runId: '11111111-1111-4111-8111-111111111111',
       completedAt: new Date(Date.now() - 60_000).toISOString(), reportSha256: 'a'.repeat(64),
       evidenceSha256: 'b'.repeat(64), controllerSha256: 'c'.repeat(64),
       image: 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9',
       runtimes: LOCAL_NODES.map(version => ({ version, sha256: 'd'.repeat(64) })),
-      subjects: ['1.3.1', '2.0.1'].map((version, index) => ({ version,
+      subjects: releaseVersions([version, peerVersion]).map((version, index) => ({ version,
         commit: String(index + 1).repeat(40), tree: String(index + 3).repeat(40),
         treeEntriesSha256: 'e'.repeat(64), checkoutFilesSha256: 'f'.repeat(64),
         inputManifestSha256: 'a'.repeat(64) })),
@@ -41,8 +90,8 @@ class Fixtures {
   }
 
   approval(scope = 'prepare') {
-    const localRegression = this.statement();
     const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).version;
+    const localRegression = this.statement(version);
     const source = localRegression.subjects.find(item => item.version === version);
     return { schemaVersion: 1, scope, name: 'mcp-pacemaker', version, commit: source.commit, tree: source.tree,
       ref: `refs/tags/npm-r5/v${version}`, tagObject: '5'.repeat(40), approver: 'girishkvs',
@@ -73,7 +122,12 @@ class Fixtures {
   }
 
   prepared(approval) {
-    return { source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, approval[key]])),
+    const source = { version: approval.version, commit: approval.commit,
+      rootLockSha256: '1'.repeat(64), uiLockSha256: '2'.repeat(64) };
+    return { version: approval.version,
+      source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, approval[key]])),
+      producerLocks: { root: source.rootLockSha256, ui: source.uiLockSha256 },
+      producerAdvisories: syntheticCleanProducerEvidence(source),
       preparationApproval: { scope: 'prepare', approver: 'girishkvs', approvedAt: approval.approvedAt },
       localRegression: approval.localRegression, localRegressionReview: this.review(approval.localRegression) };
   }
@@ -228,7 +282,9 @@ test('SYNTHETIC prepared and candidate bindings reject old artifacts and mismatc
   stage.ownerPreflight.privateContentReview.localRegression = fixture.review(approval.localRegression);
   const bytes = Buffer.from(JSON.stringify(prepared));
   stage.artifact = { manifestSha256: localHash(bytes) };
-  validateLocalManifest(bytes, stage, { localRegression: approval.localRegression });
+  validateLocalManifest(bytes, stage, { localRegression: approval.localRegression,
+    source: prepared.producerAdvisories.source, sourceChecks: prepared.producerAdvisories.checks,
+    gates: { 'producer-advisories': prepared.producerAdvisories.gate } });
   assert.throws(() => validateLocalManifest(Buffer.from('{}'), stage));
   assert.throws(() => validateLocalManifest(bytes, stage, {}));
   const changed = structuredClone(prepared);
@@ -297,7 +353,7 @@ test('outer schema rejects actual failure shapes, controls-only, old, partial an
     status: 'passed', scope: 'both-release-lines-local-only', releaseReady: false, ciImageEquivalent: false,
     image: fixture.statement().image, runId: fixture.statement().runId,
     startedAt: new Date(Date.now() - 1000).toISOString(), completedAt: new Date().toISOString(),
-    nodes: fixture.statement().runtimes, cases: LOCAL_CASES.map(item => ({ name: item.name })) };
+    nodes: fixture.statement().runtimes, cases: localCases(['1.3.1', '2.0.1']).map(item => ({ name: item.name })) };
   // Header-only fixture, not a nine-green execution report.
   verifyLocalHeader(report);
   for (const mutate of [
@@ -344,6 +400,13 @@ test('missing root and failed/changed raw command receipts reject without execut
   writeFileSync(join(directory, 'command-1.json'), '{}');
   await assert.rejects(() => verifyRawSteps(directory, gate, directory, '2.0.1'));
 });
+
+for (const version of ['1.3.2', '2.0.2', '2.7.13']) {
+  test(`SYNTHETIC selected-version local replay: ${version}`, async t => {
+    const f = await new LocalCaseFixture(t, version).create();
+    await verifyRawSteps(f.directory, f.gate, f.root, version, { checkout: f.checkoutBinding });
+  });
+}
 
 for (const version of ['1.3.1', '2.0.1']) {
   test(`SYNTHETIC producer-complete case and independent record corruptions: ${version}`, async t => {

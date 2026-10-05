@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POLICY, digest, sameDigests, stageArguments, validateApproval, validateContext } from './policy.mjs';
+import { POLICY, channelFor, digest, sameDigests, stageArguments, validateApproval, validateContext } from './policy.mjs';
 import { validateLocalApproval } from './local-regression.mjs';
 import { captureSubject } from './stage-capture.mjs';
 import { installStageCapture } from './stage-sdk.mjs';
@@ -24,7 +24,7 @@ export function startStageChild() {
   assert.equal(subject.workflow.runId, process.env.GITHUB_RUN_ID);
   assert.deepEqual(captureSubject(subject), {
     name: approval.name, version: approval.version,
-    channel: approval.version === '1.3.1' ? 'legacy' : 'latest',
+    channel: channelFor(approval.version),
     source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, approval[key]])),
     workflow: { ref: process.env.GITHUB_WORKFLOW_REF, commit: process.env.GITHUB_WORKFLOW_SHA,
       runId: process.env.GITHUB_RUN_ID, attempt: 1 }, artifact: digest(readFileSync(tarball)),

@@ -14,6 +14,7 @@ import { inspectRuntimeLicenses, LICENSE_FAILURE_HINTS, safeLicenseDiagnostic } 
 import { inspectTarball } from './tarball.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
 import { readSecretAdmission } from './secret-admission.mjs';
+import { releaseRole, releaseVersions } from './local-regression.mjs';
 
 export const SOURCE_GATES = Object.freeze([
   'source-gitleaks', 'source-trufflehog', 'source-private-identifiers', 'producer-advisories',
@@ -36,8 +37,7 @@ const id = value => {
 };
 const equal = (left, right) => assert.deepEqual(left, right);
 const baseline = version => {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Unsupported native baseline version');
-  return version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
+  return releaseRole(version) === 'legacy' ? LEGACY_REF : CURRENT_REF;
 };
 const BUILD_SCRIPT = 'tools/windows-security-helper/build.ps1';
 const BUILD_ATTRIBUTES = Object.freeze({
@@ -149,7 +149,7 @@ export async function verifyNativeIdentity(request, { run = command } = {}) {
     const local = [...filesUnder(request.sourceRoot, 'bin/windows'),
       ...filesUnder(request.sourceRoot, 'tools/windows-security-helper/build.ps1')];
     equal(local.map(file => file.path).sort(), entries.map(file => file.path).sort());
-    equal(entries.length, request.version === '1.3.1' ? 6 : 7);
+    equal(entries.length, releaseRole(request.version) === 'legacy' ? 6 : 7);
     for (const path of ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
       'tools/windows-security-helper/build.ps1']) assert.ok(entries.some(file => file.path === path));
     let buildScript;
@@ -282,7 +282,7 @@ export function verifyWindowsExecution(request, nativeIdentity) {
   const paths = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
     'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs',
     'bin/windows/src/PoolingSecurityReader.cs'];
-  if (request.version === '2.0.1') paths.push('bin/windows/src/PoolingNativeFiles.cs');
+  if (releaseRole(request.version) === 'current') paths.push('bin/windows/src/PoolingNativeFiles.cs');
   equal(expected.map(file => file.path).sort(), paths.sort());
   equal(filesUnder(request.extractedRoot, 'bin/windows').sort((a, b) => a.path.localeCompare(b.path)), expected);
   const reports = request.matrix.nativeWindowsEvidence;
@@ -337,7 +337,7 @@ export function verifyRuntimeClosure(request, consumers) {
     'bin/windows', 'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs',
     'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist',
   ];
-  if (request.version === '2.0.1') required.push('bin/pooling-execution.mjs', 'bin/pooling-batches.mjs',
+  if (releaseRole(request.version) === 'current') required.push('bin/pooling-execution.mjs', 'bin/pooling-batches.mjs',
     'bin/pooling-batch-scheduler.mjs');
   const files = required.flatMap(path => filesUnder(request.extractedRoot, path));
   assert.ok(files.some(file => file.path === 'ui/dist/index.html'));
@@ -363,19 +363,28 @@ export function verifyReplacement(request) {
   equal(result.node, `v${CONSUMER_TOOLCHAINS[1].node.replace(/^v/, '')}`);
   equal(result.platform, 'linux');
   const approved = receipt.approvedArtifacts;
-  const ownRole = request.version === '1.3.1' ? 'legacy' : 'current';
+  const ownRole = releaseRole(request.version);
+  const [legacy, current] = releaseVersions([approved.legacy.version, approved.current.version]);
+  equal(approved[ownRole].version, request.version);
+  if (request.approval !== undefined) {
+    const peerRole = ownRole === 'legacy' ? 'current' : 'legacy';
+    equal(approved[peerRole].version, request.approval.peerArtifact.version);
+    equal(approved[peerRole].sha256, request.approval.peerArtifact.sha256);
+  }
   equal(approved[ownRole].sha256, request.artifact.sha256);
   const args = receipt.evidence.command.args;
-  equal(args.length, 9);
+  equal(args.length, 13);
   equal(resolve(args[0]), join(request.sourceRoot, 'tools/service-replacement/check.mjs'));
   equal(resolve(receipt.evidence.command.cwd), resolve(request.sourceRoot));
   assert.ok(isAbsolute(receipt.evidence.command.file));
-  for (const [index, role, version] of [[1, 'legacy', '1.3.1'], [5, 'current', '2.0.1']]) {
+  for (const [index, role, version] of [[1, 'legacy', legacy], [7, 'current', current]]) {
     equal(args[index], `--${role}-tarball`);
     assert.ok(isAbsolute(args[index + 1]));
     equal(args[index + 2], `--${role}-sha256`);
     sha(approved[role].sha256);
     equal(args[index + 3], approved[role].sha256);
+    equal(args[index + 4], `--${role}-version`);
+    equal(args[index + 5], version);
     equal(approved[role].version, version);
     equal(result.artifacts[role], { version, sha256: approved[role].sha256 });
     assert.ok(Array.isArray(approved[role].files) &&
@@ -398,8 +407,8 @@ export function verifyReplacement(request) {
   }
   equal(result.steps.length, 4);
   const sequence = [
-    ['1.3.1', '2.0.1', 'before-first-write'], ['2.0.1', '1.3.1', 'before-first-write'],
-    ['1.3.1', '2.0.1', 'after-worker-loaded'], ['2.0.1', '1.3.1', 'after-worker-loaded'],
+    [legacy, current, 'before-first-write'], [current, legacy, 'before-first-write'],
+    [legacy, current, 'after-worker-loaded'], [current, legacy, 'after-worker-loaded'],
   ];
   let previous;
   const instances = new Set();
@@ -415,7 +424,7 @@ export function verifyReplacement(request) {
     instances.add(step.instanceId);
     equal(step.heldBeforeAndAfterReplacement, true);
     equal(step.ui.version, step.to);
-    const role = step.to === '1.3.1' ? 'legacy' : 'current';
+    const role = releaseRole(step.to);
     const expected = approved[role].files.filter(file => file.path.startsWith('ui/dist/'))
       .map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => a.path.localeCompare(b.path));
     assert.ok(expected.some(file => /^ui\/dist\/assets\/.+\.js$/.test(file.path)));

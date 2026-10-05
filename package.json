@@ -1,6 +1,6 @@
 {
   "name": "mcp-pacemaker",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Keeps your MCP servers alive across editor restarts, reboots, and token expiry — pluggable auth, cross-platform auto-start, one-command setup. Zero-dependency bridge; a small CLI for setup.",
   "type": "module",
   "bin": {

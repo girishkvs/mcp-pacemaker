@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
-import { validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
+import { exactLocalKeys, releaseVersions, validateLocalApproval, validatePreparedLocal, validateLocalRegression } from './local-regression.mjs';
+import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POLICY, digest, publicationTagName, sameDigests } from './policy.mjs';
+import { POLICY, digest, publicationTagName, sameDigests, validateDistTags } from './policy.mjs';
 import { MATRIX, githubReaders, zipFiles } from './matrix.mjs';
 import { inspectTarball } from './tarball.mjs';
-import { SECRET_COLLECTION_JOB, assertCollectionJobSkipped } from './secret-report.mjs';
+import { attachedProvenance } from './published-proof.mjs';
+import { boundedAnonymousBytes, verifyProvenance, verifyRegistrySource } from './provenance.mjs';
+import { SECRET_COLLECTION_JOB, assertCollectionJobSkipped, sourceCiAttempt } from './secret-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SOURCE_STEPS = [
@@ -18,6 +21,10 @@ const CONSUMER_STEPS = [
 ];
 const sourceTuple = value => Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, value[key]]));
 const hash = bytes => digest(bytes).sha256;
+const PUBLISHED = 'npm-registry-published';
+export const PUBLISHED_PEER_LIMITS = Object.freeze({
+  metadataBytes: 2 * 1024 * 1024, tarballBytes: 32 * 1024 * 1024, timeoutMs: 30_000,
+});
 
 function id(value) {
   assert.ok(typeof value === 'string' ||
@@ -28,7 +35,6 @@ function id(value) {
 }
 
 function gitSource(value) {
-  assert.ok(['1.3.1', '2.0.1'].includes(value.version), 'Only opposite PATCH candidates are supported');
   publicationTagName(value.ref, value.version);
   for (const key of ['tagObject', 'commit', 'tree']) {
     assert.match(value[key] ?? '', /^[a-f0-9]{40}$/, `Invalid ${key}`);
@@ -46,9 +52,8 @@ export function validatePeerApproval(approval, env) {
   assert.equal(approval.name, POLICY.name);
   gitSource(approval);
   // The source job already checked approval freshness. Do not spend it again after long-running gates.
-  for (const key of ['ciRunId', 'ciAttempt']) {
-    if (Object.hasOwn(approval, key)) id(approval[key]);
-  }
+  if (Object.hasOwn(approval, 'ciRunId')) id(approval.ciRunId);
+  if (Object.hasOwn(approval, 'ciAttempt')) sourceCiAttempt(approval.ciAttempt);
   for (const [key, expected] of Object.entries({
     GITHUB_ACTIONS: 'true', GITHUB_SERVER_URL: 'https://github.com', GITHUB_API_URL: 'https://api.github.com',
     GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: POLICY.repository,
@@ -58,8 +63,30 @@ export function validatePeerApproval(approval, env) {
   })) assert.equal(env[key], expected, `Wrong current prepare ${key}`);
   for (const key of ['GITHUB_RUN_ID', 'GITHUB_REPOSITORY_ID', 'GITHUB_REPOSITORY_OWNER_ID']) id(env[key]);
   const peer = approval.peerArtifact;
+  releaseVersions([approval.version, peer.version]);
+  validateLocalRegression(approval.localRegression, peer, Date.parse(approval.approvedAt));
+  if (peer.kind === PUBLISHED) {
+    const hasProof = Object.hasOwn(peer, 'sourceProof');
+    exactLocalKeys(peer, ['kind', 'version', 'commit', 'tree', 'sha256', 'sha512', 'integrity',
+      ...(hasProof ? ['sourceProof'] : [])]);
+    if (hasProof) {
+      const proof = peer.sourceProof;
+      exactLocalKeys(proof, ['kind', 'ref', 'runId', 'runAttempt']);
+      assert.equal(proof.kind, 'registry-slsa-v1');
+      publicationTagName(proof.ref, peer.version);
+      assert.equal(typeof proof.runId, 'string');
+      assert.match(proof.runId, /^[1-9][0-9]{0,19}$/);
+      assert.equal(proof.runAttempt, 1, 'Only the approved original provenance run is accepted');
+    }
+    validateDistTags(approval.expectedDistTags);
+    assert.match(peer.sha256 ?? '', /^[a-f0-9]{64}$/);
+    assert.match(peer.sha512 ?? '', /^[a-f0-9]{128}$/);
+    assert.equal(peer.integrity, `sha512-${Buffer.from(peer.sha512, 'hex').toString('base64')}`);
+    return { ...peer };
+  }
+  assert.equal(peer.kind, undefined, 'Unknown peer kind');
+  assert.equal(Object.hasOwn(peer, 'sourceProof'), false, 'sourceProof is only supported for published registry peers');
   gitSource(peer);
-  assert.equal(peer.version, approval.version === '1.3.1' ? '2.0.1' : '1.3.1', 'Peer must be the opposite PATCH');
   for (const key of ['artifactId', 'runId']) id(peer[key]);
   assert.notEqual(id(peer.runId), id(env.GITHUB_RUN_ID), 'Peer must come from a different completed run');
   assert.equal(peer.runAttempt, 1, 'Peer reruns are not accepted');
@@ -103,6 +130,7 @@ function successfulJob(jobs, name, image, steps) {
 
 export function validatePeerRun({ approval, env, run, jobs }) {
   const peer = validatePeerApproval(approval, env);
+  assert.equal(peer.kind, undefined, 'Published peer has no hosted run evidence');
   assert.equal(id(run.id), id(peer.runId));
   assert.equal(run.head_sha, peer.commit);
   assert.equal(run.path, POLICY.workflow);
@@ -229,6 +257,7 @@ function optionalBindings(prepared, report, peer) {
 
 export function validatePeerBundle({ approval, env, metadata, archive, tagRef, tag, commit }) {
   const peer = validatePeerApproval(approval, env);
+  assert.equal(peer.kind, undefined, 'Published peer has no prepared bundle');
   gitBinding(peer, tagRef, tag, commit);
   metadataBinding(peer, env, metadata);
   assert.ok(Buffer.isBuffer(archive), 'Actual API ZIP bytes required');
@@ -242,7 +271,7 @@ export function validatePeerBundle({ approval, env, metadata, archive, tagRef, t
   assert.equal(archive.readUInt16LE(end + 10), 3, 'Unexpected peer ZIP directory/member');
   assert.equal(hash(files.get('prepared.json')), peer.manifestSha256, 'Peer manifest hash mismatch');
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
-  validatePreparedLocal(prepared, approval, peer);
+  validatePreparedLocal(prepared, approval, peer, JSON.parse(files.get('source-gates.json').toString('utf8')));
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);
@@ -320,12 +349,16 @@ function gitReaders(env) {
 
 export async function downloadPeer({
   approval, env, directory, readRun, readJobs, readArtifactMetadata, readArtifactArchive, readTag, readCommit,
+  fetcher, timeoutMs, verifyBundle,
 }) {
   // Snapshot current inputs without changing SHA/ref or impersonating the peer's source job.
   approval = structuredClone(approval);
   env = { ...env };
   const peer = validatePeerApproval(approval, env);
   const target = destination(directory, env);
+  if (peer.kind === PUBLISHED) {
+    return downloadPublishedPeer({ approval, env, target, fetcher, timeoutMs, verifyBundle });
+  }
   const readers = { ...githubReaders(env), ...gitReaders(env),
     ...Object.fromEntries(Object.entries({
       readRun, readJobs, readArtifactMetadata, readArtifactArchive, readTag, readCommit,
@@ -347,5 +380,116 @@ export async function downloadPeer({
   mkdirSync(target, { mode: 0o700 });
   const tarball = join(target, 'peer.tgz');
   writeFileSync(tarball, bytes, { flag: 'wx', mode: 0o600 });
-  return { tarball, inspection, prepared, evidence: { ...evidence, ...runEvidence } };
+  return { tarball, inspection, prepared,
+    comparison: { version: prepared.version, artifact: digest(bytes) },
+    evidence: { ...evidence, ...runEvidence } };
+}
+
+function publishedRegistryBinding(packument, approval) {
+  const peer = approval.peerArtifact;
+  assert.equal(packument?.name, POLICY.name, 'Published peer package missing');
+  assert.ok(packument.maintainers?.some(item => item.name === POLICY.owner), 'Published peer owner mismatch');
+  assert.deepEqual(packument['dist-tags'], approval.expectedDistTags, 'Published peer channel state changed');
+  assert.ok(packument.versions &&
+    typeof packument.versions === 'object' &&
+    !Array.isArray(packument.versions), 'Published peer versions missing');
+  assert.equal(Object.hasOwn(packument.versions, approval.version), false, 'Candidate version already published');
+  const version = packument.versions[peer.version];
+  assert.equal(version?.name, POLICY.name);
+  assert.equal(version.version, peer.version);
+  if (Object.hasOwn(version, 'gitHead')) {
+    assert.match(version.gitHead, /^[a-f0-9]{40}$/, 'Malformed published peer registry gitHead');
+    assert.equal(version.gitHead, peer.commit, 'Published peer registry source mismatch');
+  } else {
+    assert.ok(peer.sourceProof, 'Missing registry gitHead requires an explicitly approved sourceProof');
+  }
+  assert.ok(!Object.hasOwn(packument, 'deprecated') &&
+    !Object.hasOwn(version, 'deprecated'), 'Deprecated published peer');
+  assert.equal(version.dist?.integrity, peer.integrity, 'Published peer registry integrity mismatch');
+  assert.match(version.dist.shasum ?? '', /^[a-f0-9]{40}$/);
+  assert.equal(version.dist.tarball, `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`,
+    'Published peer requires canonical registry tarball URL');
+  if (peer.sourceProof) {
+    assert.equal(version.dist.attestations?.url,
+      `${POLICY.registry}-/npm/v1/attestations/${POLICY.name}@${peer.version}`,
+    'Peer sourceProof requires the canonical registry attestations URL');
+    assert.equal(version.dist.attestations.provenance?.predicateType, 'https://slsa.dev/provenance/v1');
+  }
+  return version;
+}
+
+export async function validatePublishedPeer({ approval, env, packument, commit, bytes, attestations, verifyBundle }) {
+  approval = structuredClone(approval);
+  packument = structuredClone(packument);
+  commit = structuredClone(commit);
+  const peer = validatePeerApproval(approval, env);
+  assert.equal(peer.kind, PUBLISHED);
+  const version = publishedRegistryBinding(packument, approval);
+  assert.equal(commit?.sha, peer.commit, 'Published peer GitHub commit mismatch');
+  assert.equal(commit.tree?.sha, peer.tree, 'Published peer GitHub tree mismatch');
+  assert.ok(Buffer.isBuffer(bytes) &&
+    bytes.length > 0 &&
+    bytes.length <= PUBLISHED_PEER_LIMITS.tarballBytes, 'Actual bounded published tarball bytes required');
+  bytes = Buffer.from(bytes);
+  const artifact = digest(bytes);
+  sameDigests(artifact, peer);
+  assert.equal(createHash('sha1').update(bytes).digest('hex'), version.dist.shasum,
+    'Published peer registry shasum mismatch');
+  const inspection = inspectTarball(bytes, peer);
+  let provenance = { status: version.dist.attestations?.provenance ? 'present' : 'absent',
+    verification: 'not-performed' };
+  if (peer.sourceProof) {
+    assert.ok(Buffer.isBuffer(attestations) &&
+      attestations.length > 0 &&
+      attestations.length <= PUBLISHED_PEER_LIMITS.metadataBytes, 'Actual bounded registry attestations required');
+    attestations = Buffer.from(attestations);
+    const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(attestations));
+    const bundle = attachedProvenance(document);
+    const bundleJson = JSON.stringify(bundle);
+    const record = { name: POLICY.name, version: peer.version, artifact,
+      source: { commit: peer.commit, tree: peer.tree, ref: peer.sourceProof.ref },
+      workflow: { runId: peer.sourceProof.runId, attempt: peer.sourceProof.runAttempt,
+        repositoryId: env.GITHUB_REPOSITORY_ID, ownerId: env.GITHUB_REPOSITORY_OWNER_ID } };
+    assert.ok(verifyBundle === undefined ||
+      typeof verifyBundle === 'function', 'Invalid cryptographic verifier');
+    await verifyProvenance({ record, bundle, verifyBundle: verifyBundle ??
+      (value => verifyRegistrySource({ record, bundle: value, cli: env.NPM_PUBLICATION_CLI, env })) });
+    assert.equal(JSON.stringify(bundle), bundleJson, 'Verifier changed the registry bundle');
+    provenance = { status: 'present', verification: 'cryptographically-verified',
+      sourceProof: peer.sourceProof, documentSha256: hash(attestations) };
+  }
+  return { bytes, inspection, comparison: { version: peer.version, artifact }, evidence: {
+    schemaVersion: 1, origin: PUBLISHED, purpose: 'service-comparison-only', stageEligible: false,
+    name: POLICY.name, version: peer.version, source: { commit: peer.commit, tree: peer.tree },
+    ...artifact, registry: POLICY.registry, distTags: { ...packument['dist-tags'] },
+    provenance,
+    registrySignatures: 'not-verified-by-this-read',
+  } };
+}
+
+async function downloadPublishedPeer({
+  approval, env, target, fetcher = (...args) => globalThis.fetch(...args),
+  timeoutMs = PUBLISHED_PEER_LIMITS.timeoutMs, verifyBundle,
+}) {
+  assert.ok(Number.isSafeInteger(timeoutMs) &&
+    timeoutMs > 0 &&
+    timeoutMs <= PUBLISHED_PEER_LIMITS.timeoutMs, 'Invalid published peer deadline');
+  const readJson = async url => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+    await boundedAnonymousBytes(url, PUBLISHED_PEER_LIMITS.metadataBytes, fetcher, timeoutMs)));
+  const packument = await readJson(`${POLICY.registry}${POLICY.name}`);
+  const version = publishedRegistryBinding(packument, approval);
+  const peer = approval.peerArtifact;
+  const commit = await readJson(`https://api.github.com/repos/${POLICY.repository}/git/commits/${peer.commit}`);
+  assert.equal(commit?.sha, peer.commit);
+  assert.equal(commit.tree?.sha, peer.tree);
+  const bytes = await boundedAnonymousBytes(version.dist.tarball, PUBLISHED_PEER_LIMITS.tarballBytes, fetcher, timeoutMs);
+  const attestations = peer.sourceProof
+    ? await boundedAnonymousBytes(version.dist.attestations.url, PUBLISHED_PEER_LIMITS.metadataBytes, fetcher, timeoutMs)
+    : undefined;
+  const result = await validatePublishedPeer({ approval, env, packument, commit, bytes, attestations, verifyBundle });
+  destination(target, env);
+  mkdirSync(target, { mode: 0o700 });
+  const tarball = join(target, 'peer.tgz');
+  writeFileSync(tarball, result.bytes, { flag: 'wx', mode: 0o600 });
+  return { tarball, inspection: result.inspection, comparison: result.comparison, evidence: result.evidence };
 }

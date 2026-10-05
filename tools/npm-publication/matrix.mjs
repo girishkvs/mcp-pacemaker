@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
+import { releaseRole, validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
 import { readOwnerLocalAcceptance } from './local-regression-hosted.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -9,6 +9,7 @@ import { inflateRawSync } from 'node:zlib';
 import { POLICY, digest, publicationTagName, sameDigests, validatePackage, validateSource } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import { consumerSummary } from './gates.mjs';
+import { sourceCiAttempt } from './secret-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const LIMIT = 128 * 1024 * 1024;
@@ -59,7 +60,8 @@ export function validateMatrixContext(env, approval, event) {
   assert.equal(approval.scope, 'prepare');
   assert.equal(approval.approver, POLICY.owner);
   assert.equal(approval.name, POLICY.name);
-  assert.ok(['1.3.1', '2.0.1'].includes(approval.version));
+  releaseRole(approval.version);
+  if (Object.hasOwn(approval, 'ciAttempt')) sourceCiAttempt(approval.ciAttempt);
   publicationTagName(approval.ref, approval.version);
   for (const key of ['tagObject', 'commit', 'tree']) assert.match(approval[key] ?? '', /^[a-f0-9]{40}$/);
   // Source preparation checks freshness once. Long-running gates do not spend another approval.
@@ -207,6 +209,27 @@ function localFiles(directory, prefix = '') {
   return files;
 }
 
+export async function readGithubPages(readPage, key, {
+  incompleteMessage = 'Incomplete GitHub pagination',
+  countMessage = 'Unexpected GitHub result count',
+} = {}) {
+  const all = [];
+  let total;
+  for (let page = 1; page <= 20; page++) {
+    const result = await readPage(page);
+    assert.ok(Array.isArray(result?.[key]));
+    assert.ok(Number.isSafeInteger(result.total_count) &&
+      result.total_count >= 0, 'Invalid GitHub total_count');
+    if (total === undefined) total = result.total_count;
+    assert.equal(result.total_count, total, 'GitHub total_count changed during pagination');
+    assert.ok(all.length + result[key].length <= total, 'GitHub pagination exceeds total_count');
+    all.push(...result[key]);
+    if (all.length === total) return all;
+    assert.ok(result[key].length > 0, incompleteMessage);
+  }
+  throw new Error(countMessage);
+}
+
 export function githubReaders(env, { fetcher = fetch } = {}) {
   const api = async path => {
     assert.ok(env.GITHUB_TOKEN, 'Read-only artifact/job token required');
@@ -222,17 +245,7 @@ export function githubReaders(env, { fetcher = fetch } = {}) {
     assert.equal(response.status, 200, 'GitHub read failed; no fallback');
     return response.json();
   };
-  const pages = async (path, key) => {
-    const all = [];
-    for (let page = 1; page <= 20; page++) {
-      const result = await get(`${path}?per_page=100&page=${page}`);
-      assert.ok(Array.isArray(result[key]));
-      all.push(...result[key]);
-      if (all.length === result.total_count) return all;
-      assert.ok(result[key].length > 0, 'Incomplete GitHub pagination');
-    }
-    throw new Error('Unexpected GitHub result count');
-  };
+  const pages = (path, key) => readGithubPages(page => get(`${path}?per_page=100&page=${page}`), key);
   return {
     readJson: get,
     readArtifactMetadata: artifactId => get(`actions/artifacts/${id(artifactId)}`),
@@ -302,7 +315,8 @@ export async function verifyPreparedBundle({
     files.has('source-gates.json'), 'Incomplete prepared bundle');
   assert.equal(sha256(files.get('prepared.json')), env.PREPARED_MANIFEST_SHA256);
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
-  validatePreparedLocal(prepared, approval);
+  validatePreparedLocal(prepared, approval, approval,
+    JSON.parse(files.get('source-gates.json').toString('utf8')));
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);
@@ -423,12 +437,12 @@ function nativeTap(stdout) {
 }
 
 function helperFiles(inspection, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version));
+  releaseRole(version);
   const files = inspection.files.filter(file => file.path.startsWith('bin/windows/'));
   const paths = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
     'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs',
     'bin/windows/src/PoolingSecurityReader.cs'];
-  if (version === '2.0.1') paths.push('bin/windows/src/PoolingNativeFiles.cs');
+  if (releaseRole(version) === 'current') paths.push('bin/windows/src/PoolingNativeFiles.cs');
   assert.deepEqual(files.map(file => file.path).sort(), paths.sort());
   return files.map(({ path, sha256: hash }) => ({ path, sha256: hash }));
 }

@@ -213,10 +213,18 @@ export async function scanPublicationRequest({
         } };
       const advisory = await scanAdvisories({
         ...input, publicPackages, publicPackagesPath, exemptionsPath, fetchImpl,
+        ...(request.phase === 'source' ? { producerContext: {
+          phase: request.phase, version: request.version, scope: 'producer-ui',
+        } } : {}),
       });
       scannerDetails.advisories = advisory;
+      const producerReport = request.phase === 'source' && request.version === '2.0.2';
       gates[advisoryName] = {
         status: advisory.status === 'passed' ? 'passed' : 'failed',
+        ...(producerReport ? { osv: advisory, rawFindingCount: advisory.rawFindingCount,
+          remainingFindings: advisory.remainingFindings, advisoryFree: !advisory.riskAcceptance,
+          disposition: advisory.riskAcceptance ? 'RISK-ACCEPTED' : 'advisory-free',
+          ...(advisory.riskAcceptance ? { riskAcceptance: advisory.riskAcceptance } : {}) } : {}),
         evidence: [evidence(`${advisoryName}; OSV exact supplied graphs; public coordinates only; per-run responses`,
           advisory)],
       };

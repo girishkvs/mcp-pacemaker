@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { killBridge } from '../helpers/kill-bridge.mjs';
 import { ROOT, isolatedEnvironment, ownedDirectory, removeOwnedDirectory } from '../../tools/compatibility/fixtures.mjs';
+import { releaseRole } from '../../tools/npm-publication/local-regression.mjs';
 
 export async function waitFor(read, predicate, label) {
   const deadline = Date.now() + 20000;
@@ -36,7 +37,7 @@ export function assertImmediate(body, version) {
 }
 
 export function assertPending(body, version) {
-  assert.ok(['2.0.0', '2.0.1'].includes(version), 'An explicit supported batch version is required');
+  assert.equal(releaseRole(version), 'current', 'An explicit supported batch version is required');
   assertImmediate({ ...body, pending: false }, version);
   assert.equal(body.pending, true);
   assert.ok(body.batchId);

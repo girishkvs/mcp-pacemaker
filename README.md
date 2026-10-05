@@ -26,16 +26,16 @@ is separate planned work.
 
 ## Quick start
 
-Install the released **2.0.1** package from npm. Use a maintained **Node.js 22 or 24**
+Install **mcp-pacemaker 2.0.2** from npm. Use a maintained **Node.js 22 or 24**
 release; Windows also needs PowerShell 7 and Windows Script Host.
 See [installation requirements](#install) before setup.
 
 ```bash
-npm install -g mcp-pacemaker@2.0.1
+npm install -g mcp-pacemaker@2.0.2
 mcp-pacemaker --version
 ```
 
-The version check prints `2.0.1` without running setup.
+The version check prints `2.0.2` without running setup.
 Before setup, have a readable JSON host configuration containing server definitions, or
 prepare [`~/.mcp-pacemaker/servers.json`](#serversjson). Supported import sources are
 `vscode`, `cursor`, `claude` (Claude Desktop), `copilot-cli` and `gemini`.
@@ -156,7 +156,7 @@ Its repository link should point to
 Use an exact version for a repeatable installation:
 
 ```bash
-npm install -g mcp-pacemaker@2.0.1
+npm install -g mcp-pacemaker@2.0.2
 mcp-pacemaker --version
 ```
 
@@ -189,11 +189,13 @@ This README describes **2.0.x**. For 1.3.x immediate-save behavior, see the
 and [support policy](SECURITY.md#supported-versions). Those documents do not establish
 that a legacy version is available on npm.
 
-The compatibility gates cover **1.3.0 / 2.0.0** and the **1.3.1 / 2.0.1** patch pair.
+The historical baselines remain **1.3.0 / 2.0.0**. The earlier **1.3.1 / 2.0.1**
+patch-pair evidence is not transferable to a new release. The selected **1.3.1 / 2.0.2**
+pair requires fresh exact-byte compatibility and service-replacement gates.
 A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
 2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending
 or interrupted transactions with 2.x. See the [real-version gates](CONTRIBUTING.md#real-version-compatibility-gates)
-for exact pairs; other minor versions are not covered.
+for exact pairs; only the exact executed pairs are covered.
 
 ### Command reference
 

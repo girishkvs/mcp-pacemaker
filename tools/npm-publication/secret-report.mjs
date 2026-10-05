@@ -4,6 +4,7 @@ import { TOOL_PINS, scannerArguments } from '../publication-scanners/secrets.mjs
 import { LIMITS } from '../publication-scanners/core.mjs';
 import { SCANNER_RELEASES } from './install-scanners.mjs';
 import { syntheticUriLocation } from '../publication-scanners/review-source.mjs';
+import { publicationRef } from './policy.mjs';
 
 export const SECRET_COLLECTION_JOB = 'secret-collection';
 export const SECRET_COLLECTION_STEPS = Object.freeze([
@@ -24,6 +25,8 @@ export const secretId = value => {
   return String(value);
 };
 const count = value => assert.ok(Number.isSafeInteger(value) && value >= 0 && value <= 64, 'Invalid finding count');
+export const sourceCiAttempt = value => assert.ok(Number.isSafeInteger(value) &&
+  value > 0, 'Source CI attempt must be a positive safe integer');
 
 export function validateSecretReview(review, approval, now = Date.now()) {
   assert.equal(approval.scope, 'prepare', 'Secret disposition is source preparation only');
@@ -73,7 +76,7 @@ function validateCollection(report) {
   keys(report.workflow, ['runId', 'runNumber', 'attempt', 'repositoryId', 'ownerId', 'ref']);
   for (const key of ['runId', 'runNumber', 'repositoryId', 'ownerId']) secretId(report.workflow[key]);
   assert.equal(report.workflow.attempt, 1);
-  assert.match(report.workflow.ref, /^refs\/tags\/(?:npm(?:-r[2-5])?\/)?v(?:1\.3\.1|2\.0\.1)$/);
+  publicationRef(report.workflow.ref);
   keys(report.history, ['commit', 'reachableCommits', 'inventorySha256', 'metadataSha256', 'objects']);
   assert.equal(report.history.commit, report.source.commit);
   for (const key of ['reachableCommits', 'objects']) assert.ok(Number.isSafeInteger(report.history[key]) && report.history[key] > 0);
@@ -172,7 +175,7 @@ export function validateProducerEvidence(report) {
   assert.equal(proof.kind, 'pinned-hosted-original-source-execution-proof');
   keys(proof.ci, ['runId', 'attempt', 'commit', 'completedAt']);
   secretId(proof.ci.runId);
-  assert.equal(proof.ci.attempt, 1);
+  sourceCiAttempt(proof.ci.attempt);
   assert.equal(proof.ci.commit, report.source.commit);
   let previous = instant(proof.ci.completedAt);
   const completed = instant(report.completedAt);

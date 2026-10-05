@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
-import { POLICY, digest, sameDigests } from './policy.mjs';
+import { POLICY, channelFor, digest, sameDigests } from './policy.mjs';
 import { execute, isolatedConsumerEnvironment } from './matrix.mjs';
 import { registryResource, JSON_LIMIT } from './published-proof.mjs';
 import { inspectTarball } from './tarball.mjs';
@@ -25,7 +25,7 @@ export function requireAnonymousHosted(env, runtime = process) {
 
 export function registryInstallArguments(record) {
   assert.equal(record.name, POLICY.name);
-  assert.ok(['1.3.1', '2.0.1'].includes(record.version));
+  channelFor(record.version);
   return ['install', `${record.name}@${record.version}`, '--save-exact', '--ignore-scripts',
     '--package-lock=true', '--no-audit', '--no-fund', `--registry=${POLICY.registry}`,
     '--strict-ssl=true', '--fetch-retries=0', '--fetch-timeout=30000'];

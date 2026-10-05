@@ -103,15 +103,21 @@ instead of installing bundled Chromium. CI uses bundled Chromium, not that overr
 Both standalone test commands **fail** when preparation is missing or candidate bytes have
 changed. Clean and prepare again after changing package files, built assets, or Node major.
 
-Scope is explicitly **1.3.0, 1.3.1, 2.0.0 and 2.0.1**, not arbitrary compatible-looking versions.
+Historical compatibility baselines remain explicitly **1.3.0 and 2.0.0**.
+Candidate versions must be canonical stable **1.x legacy / 2.x current** versions.
+The owner selects the actual release and any exact opposite-major patch pair;
+support in the harness alone is not evidence that every patch was tested.
 The same harness runs in both maintained branches:
 
 | Preparation | Selected legacy / current pair |
 |---|---|
-| Default in the 2.0.1 checkout | Immutable 1.3.0 / packed 2.0.1 |
+| Default in the selected 2.0.2 checkout | Immutable 1.3.0 / packed 2.0.2 |
 | Default in the 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
 | `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
-| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.1 / packed 2.0.1 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.1 / packed 2.0.2 |
+
+These selections are not qualification evidence. The selected 1.3.1/2.0.2 pair
+requires fresh exact-byte gates; earlier 1.3.1/2.0.1 results remain historical.
 
 Run both API and browser gates for the explicit patch pair before publishing either complete
 dual-major release set. The two default CI pairs alone do not establish that combined result.
@@ -175,7 +181,7 @@ API, admin mutation, SSE and MCP requests go to the real backend, without respon
 Nested JS assets are included. The old-tab upgrade case does not substitute assets: it stops
 the actual selected 1.x process and starts the selected 2.x process on the same port before refresh.
 
-No other version compatibility is claimed. Writable downgrade is checked on a fresh
+Only the executed exact version pairs establish compatibility. Writable downgrade is checked on a fresh
 synthetic config with default ownership and inherited security. The test does not change
 tokens, elevate, or set ACLs. It checks unchanged caller authority and, on Windows, the actual
 selected 1.x helper's full/partial audit visibility. Caller-context hashes are not direct measurements
@@ -199,6 +205,10 @@ Run it with normal npm install-script policy and again with `--ignore-scripts`. 
 the user's global prefix, host configuration, live bridge, or npm credentials. It honors the
 resolved caller registry/cache and offline setting without a mirror fallback. Registry
 signatures and provenance are separate post-publication checks, not inferred from this smoke test.
+
+The consumer preserves npm's effective `allow-directory`, `allow-file`, `allow-git`, and
+`allow-remote` values, including environment overrides. It does not replace restrictions
+with defaults or grant permissions when an install is rejected.
 
 ## Changing how a host is wired
 

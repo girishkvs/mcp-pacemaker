@@ -1,18 +1,15 @@
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { GateRunner, gateOptions, passed, readJson, ROOT } from './gates.mjs';
 import { POLICY } from './policy.mjs';
 import { validateLocalApproval } from './local-regression.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
+import { classifyNativeAudit, uiBuildRiskAcceptance, requireBuildOnlyRiskScope, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
-export function validateAudit(output) {
-  const report = JSON.parse(output);
-  assert.equal(report.auditReportVersion, 2, 'Unexpected npm12 audit report');
-  assert.deepEqual(report.vulnerabilities, {}, 'Producer advisory findings remain unresolved');
-  for (const severity of ['info', 'low', 'moderate', 'high', 'critical', 'total']) {
-    assert.equal(report.metadata?.vulnerabilities?.[severity], 0, `Producer advisories: ${severity}`);
-  }
+export function validateAudit(output, context, execution) {
+  return classifyNativeAudit(output, execution, context);
 }
 
 export function runSourceChecks(runner) {
@@ -24,12 +21,24 @@ export function runSourceChecks(runner) {
   assert.equal(runner.npm(['--version'], 'Verify publishing npm version').stdout, POLICY.npm);
   const restores = [];
   const audits = [];
+  const auditDetails = [];
+  const acceptedContexts = [];
   for (const prefix of [[], ['--prefix', 'ui']]) {
     restores.push(runner.npm([...prefix, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'],
       `Restore exact ${prefix.length ? 'UI' : 'root'} producer lock`).evidence);
     const audit = runner.npm([...prefix, 'audit', '--json', '--audit-level=low'],
       `Audit actual ${prefix.length ? 'UI' : 'root'} producer graph`);
-    validateAudit(audit.stdout);
+    const context = audit.auditContext;
+    if (context) {
+      assert.equal(context.phase, 'source');
+      assert.equal(context.scope, prefix.length ? 'producer-ui' : 'producer-root');
+      assert.equal(context.version, source.version);
+      assert.equal(context.lockSha256, prefix.length ? source.uiLockSha256 : source.rootLockSha256);
+    }
+    const detail = validateAudit(audit.rawStdout ?? audit.stdout, context,
+      { exitCode: audit.evidence.exitCode ?? 0 });
+    auditDetails.push({ scope: prefix.length ? 'producer-ui' : 'producer-root', ...detail });
+    if (detail.acceptance) acceptedContexts.push(context);
     audits.push(audit.evidence);
   }
   const ui = [runner.npm(['--prefix', 'ui', '--silent', 'run', 'typecheck'], 'UI typecheck').evidence];
@@ -45,18 +54,37 @@ export function runSourceChecks(runner) {
   const sourceTests = runner.script('test').evidence;
   const external = runner.external('source', source);
   assert.deepEqual(runner.snapshot(), source, 'Source, generated files or producer locks changed during gates');
-  return {
+  for (const context of acceptedContexts) {
+    assert.ok(uiBuildRiskAcceptance(context), 'Producer UI risk acceptance expired before source completion');
+  }
+  const riskApplied = acceptedContexts.length > 0 || Boolean(external.gates['producer-advisories'].riskAcceptance);
+  const buildOnlyEvidence = riskApplied ? requireBuildOnlyRiskScope(
+    readFileSync(join(runner.root, 'package-lock.json')),
+    readFileSync(join(runner.root, 'ui/dist/third-party-manifest.json'))) : undefined;
+  const producerGate = { ...external.gates['producer-advisories'],
+    ...passed(...external.gates['producer-advisories'].evidence, ...audits),
+    ...(buildOnlyEvidence ? { buildOnlyEvidence } : {}) };
+  if (source.version === '2.0.2') {
+    producerGate.nativeAudits = auditDetails;
+    producerGate.disposition = riskApplied ? 'RISK-ACCEPTED' : 'advisory-free';
+    producerGate.advisoryFree = !riskApplied;
+    if (!producerGate.riskAcceptance &&
+        acceptedContexts.length > 0) producerGate.riskAcceptance = auditDetails[1].acceptance;
+  }
+  const report = {
     schemaVersion: 1, phase: 'source', source,
     localRegression: runner.context.approval.localRegression,
     toolchain: { node: POLICY.node, npm: POLICY.npm },
-    checks: { restores, sourceTests, uiTests, compatibility: 'pending-exact-tarball' },
+    checks: { restores, sourceTests, uiTests, audits: auditDetails, compatibility: 'pending-exact-tarball' },
     nativeIdentity: external.nativeIdentity, authorIdentity: external.authorIdentity,
     ...(external.scannerDetails?.secrets?.collection
       ? { secretEvidence: external.scannerDetails.secrets } : {}),
     gates: { ...external.gates,
-      'producer-advisories': passed(...external.gates['producer-advisories'].evidence, ...audits),
+      'producer-advisories': producerGate,
       'ui-build': passed(...ui) },
   };
+  validateProducerAdvisories(producerGate, { source, version: source.version, checks: report.checks, complete: true });
+  return report;
 }
 
 export async function main(args = process.argv.slice(2)) {

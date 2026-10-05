@@ -109,12 +109,12 @@ export async function readCandidateEvidence(approval, locks, readers) {
   assert.equal(source.sourceReportSha256, manifest.sourceReportSha256);
   sameDigests(digest(preparedFiles.get('candidate.tgz')), approved);
   const prepared = parse(preparedFiles.get('prepared.json'));
-  validatePreparedLocal(prepared, approval);
+  validatePreparedLocal(prepared, approval, approval, parse(preparedFiles.get('source-gates.json')));
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   for (const key of ['name', 'version', 'source', 'workflow', 'ci', 'toolchain', 'producerLocks',
     'artifact', 'publicPackages', 'sourceReportSha256', 'privateContentReview',
-    'localRegression', 'localRegressionReview']) {
+    'localRegression', 'localRegressionReview', 'producerAdvisories']) {
     assert.deepEqual(prepared[key], manifest[key], `Prepared/finalized ${key} differs`);
   }
   const ids = new Set([id(metadata.id), id(source.id)]);

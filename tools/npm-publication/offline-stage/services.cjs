@@ -137,8 +137,8 @@ Module._load = function (request, parent, isMain) {
     assert.equal(outerOptions.length, 0);
   } else {
     const { flatten, definitions } = requireNpm('@npmcli/config/lib/definitions');
-    const { stageArguments } = await import(pathToFileURL(join(root, 'tools/npm-publication/policy.mjs')));
-    const args = stageArguments(join(home, 'fixture.tgz'), version === '1.3.1' ? 'legacy' : 'latest',
+    const { channelFor, stageArguments } = await import(pathToFileURL(join(root, 'tools/npm-publication/policy.mjs')));
+    const args = stageArguments(join(home, 'fixture.tgz'), channelFor(version),
       { user: join(home, 'user.npmrc'), global: join(home, 'global.npmrc') });
     const config = {};
     flatten({ 'fetch-retries': Number(args.find(arg => arg.startsWith('--fetch-retries=')).split('=')[1]),

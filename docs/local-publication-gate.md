@@ -5,6 +5,35 @@ does not publish, authenticate, download dependencies, alter the live bridge, or
 replace the genuine hosted publication evidence. A successful report always says
 `releaseReady: false`.
 
+The controller inventory also binds the native-audit/source-gate and OSV
+adapter/evaluator files. The temporary
+[2.0.2 producer-UI risk review](npm-publishing.md#temporary-202-producer-ui-risk-acceptance)
+does not waive local qualification or authenticate it. Its raw findings and expiry
+remain explicit; old controller evidence is invalid after these source changes.
+The immutable 1.3.1 stage-proof contract and its original member pins are unchanged.
+
+Published-peer `sourceProof` is a separate approved ref/run pin, not a local qualification
+receipt. Its registry SLSA is verified through the pinned SDK in a fresh bounded child;
+local evidence cannot stand in for that registry proof. The source/verifier/loader inputs
+are included in the controller and stage-proof bindings. See the published-peer contract
+in [npm publishing](npm-publishing.md).
+
+Stage proof schema 4 has source-specific, independently selected file contracts.
+New/current sources require the complete current `STAGE_PROOF_FILES` inventory,
+including the registry-peer verifier. The immutable published 1.3.1 source
+`688b1038f88f020312230a94ff355732c34ae185` retains its original 20-file contract.
+Selection requires its exact Git commit, tree, package version and all 20 pinned
+Git member identities (including the original contract and loader), not its label
+or a report-supplied inventory. The actual bounded Git reader and checked-out bytes
+bind that selection before replay. Unknown sources use the full current contract.
+
+The immutable producer still runs its own unchanged proof code. Its schema-4 case
+semantics match the current replay checks, so the current verifier checks all 48
+cases against the original source's exact file contract without upgrading or
+relabelling the receipt. Current-source proofs cannot substitute the smaller
+historical inventory. Read-only compatibility replay of an old receipt is a
+component preflight, never a new completed paired qualification.
+
 ## Required private verification and owner acceptance
 
 After the complete run, invoke `publication:verify-local` (or its Node entrypoint)
@@ -155,7 +184,8 @@ inner `local-gate.mjs` as a substitute. Its default entrypoint refuses a full ru
 `--controls-only` exercises the isolation controls, not the source or publication
 path; its report cannot stand for a complete gate.
 
-Every full run requires both 1.3.1 and 2.0.1 and runs their complete registered
+Every full run requires one explicitly selected stable 1.x legacy source and one
+stable 2.x current source, and runs their complete registered
 source suites on Node 20, 22, and 24. It does not change test concurrency, shorten
 the selected suite, increase application deadlines, or retry failures. UI and
 publisher operations use the separately pinned Node 24.21.0 runtime.

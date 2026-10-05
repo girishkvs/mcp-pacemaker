@@ -34,8 +34,7 @@ export async function verifyCollectionSource(report, root, tools = {}, readSourc
 
 export function validateCollectionJobs(jobs, approval, report) {
   assert.ok(Array.isArray(jobs) && jobs.length > 0 && jobs.length <= 16);
-  const inactive = ['source', 'prepare', 'stage',
-    ...(approval.version === '2.0.1' ? ['sign-bootstrap', 'publish-bootstrap'] : [])];
+  const inactive = ['source', 'prepare', 'stage'];
   const names = jobs.map(job => job.name).sort();
   assert.ok(JSON.stringify(names) === JSON.stringify([...inactive, 'consumers', SECRET_COLLECTION_JOB].sort()) ||
     JSON.stringify(names) === JSON.stringify([...inactive, ...MATRIX.map(item => item.jobName), SECRET_COLLECTION_JOB].sort()),

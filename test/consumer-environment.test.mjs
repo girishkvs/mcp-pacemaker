@@ -15,6 +15,7 @@ const config = {
   '@clack:registry': 'https://approved-scoped.example.test/npm/',
   'strict-ssl': true, 'min-release-age': 7, 'ignore-scripts': false,
 };
+const packagePermissions = ['allow-directory', 'allow-file', 'allow-git', 'allow-remote'];
 
 function credentialUrl(base) {
   const url = new URL(base);
@@ -35,6 +36,39 @@ test('consumer npm policy retains scoped registries and release-age controls wit
   assert.throws(() => consumerConfiguration(missing, ['@clack:registry']), /no fallback selected/);
   assert.throws(() => consumerConfiguration({ ...config, registry: credentialUrl('https://example.test/') }));
   assert.throws(() => consumerConfiguration({ ...config, 'strict-ssl': false }), /TLS verification/);
+});
+
+for (const value of ['none', 'root', 'all']) {
+  test(`consumer npm policy preserves package-type permissions set to ${value}`, () => {
+    const permissions = Object.fromEntries(packagePermissions.map((key) => [key, value]));
+    const expected = { ...config, ...permissions };
+    const selected = consumerConfiguration(expected);
+    assert.deepEqual(selected, expected);
+    for (const key of packagePermissions) {
+      assert.ok(configurationText(selected).split('\n').includes(`${key}="${value}"`));
+    }
+  });
+}
+
+test('configuration discovery preserves mixed-case and hyphenated package-permission overrides', async () => {
+  const source = {
+    npm_config_allow_directory: 'none',
+    NPM_CONFIG_ALLOW_FILE: 'root',
+    'npm_config_allow-git': 'none',
+    npm_config_allow_remote: 'none',
+  };
+  const expected = {
+    ...config, 'allow-directory': 'none', 'allow-file': 'root',
+    'allow-git': 'none', 'allow-remote': 'none',
+  };
+  const result = await readConsumerConfiguration(source, async (args, { env }) => {
+    for (const [key, value] of Object.entries(source)) {
+      assert.equal(env[key], value);
+    }
+    return args.includes('--json') ? JSON.stringify(expected)
+      : '@clack:registry = "https://approved-scoped.example.test/npm/"\n';
+  });
+  assert.deepEqual(result, expected);
 });
 
 test('configuration discovery reads effective settings without executing caller preloads', async () => {

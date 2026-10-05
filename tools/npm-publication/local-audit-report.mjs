@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { releaseRole } from './local-regression.mjs';
 
 export const AUDIT_TEST_NAME = 'TEST-SETUP full audit oracle verifies ordinary-token staging and retained original policy';
 export const AUDIT_MODE_VARIABLE = 'MCP_TEST_AUDIT_WORKER';
@@ -8,9 +9,9 @@ export const AUDIT_PROCESS_TIMEOUT_MS = 150000;
 export const AUDIT_DIAGNOSTIC = 'MCP_WINDOWS_AUDIT_V1 ';
 
 export function auditEnvironment(environment, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version));
+  releaseRole(version);
   assert.equal(environment[AUDIT_MODE_VARIABLE], undefined, 'Audit mode must not be inherited');
-  return version === '2.0.1' ? { ...environment, [AUDIT_MODE_VARIABLE]: AUDIT_MODE } : environment;
+  return releaseRole(version) === 'current' ? { ...environment, [AUDIT_MODE_VARIABLE]: AUDIT_MODE } : environment;
 }
 
 export function auditReport(report, node) {
@@ -33,8 +34,7 @@ export function auditReport(report, node) {
 }
 
 export function auditEvidence(stdout, version, node) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version));
-  if (version === '1.3.1') return null;
+  if (releaseRole(version) === 'legacy') return null;
   assert.equal(typeof stdout, 'string');
   const lines = stdout.split('\n').map(line => line.endsWith('\r') ? line.slice(0, -1) : line);
   const prefix = `# ${AUDIT_DIAGNOSTIC}`;

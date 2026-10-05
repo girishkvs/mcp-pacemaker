@@ -17,6 +17,7 @@ import { AUDIT_MODE, AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/loc
 import { validateSdkContract } from '../../tools/npm-publication/local-sdk-check.mjs';
 import { CURRENT_REF } from '../../tools/compatibility/fixtures.mjs';
 import { POLICY, channelFor, digest } from '../../tools/npm-publication/policy.mjs';
+import { releaseRole } from '../../tools/npm-publication/local-regression.mjs';
 import { verifyStaged } from '../../tools/npm-publication/verify-staged.mjs';
 import { stageCaptureFixture } from './stage-capture-fixture.mjs';
 import { stageProofFixture } from './stage-proof-fixture.mjs';
@@ -72,7 +73,7 @@ class SdkFixture {
     write(npm, 'node_modules/sigstore/package.json', '{"name":"sigstore","version":"5.0.0","main":"index.js"}');
     write(npm, 'node_modules/sigstore/index.js',
       'exports.verify = () => { throw new Error("Unit stub must never verify a signature"); };');
-    if (this.version === '2.0.1') {
+    if (releaseRole(this.version) === 'current') {
       // Only dispatch/shape stubs. No retained npm modules, authentication or signature generation.
       write(this.gate.root, 'tools/npm-publication/owner-sdk.mjs', `
         export const PROFILE_SOURCE_SHA256 = '1'.repeat(64);
@@ -142,7 +143,7 @@ test('only legacy may omit UI tests; new scripts and nested files must all be se
   delete ui.scripts.test;
   write(gate.root, 'ui/package.json', JSON.stringify(ui));
   assert.equal(uiTestArguments(gate.root, ui.version), null);
-  assert.throws(() => uiTestArguments(gate.root, '9.0.0'), /Unsupported UI test lane/);
+  assert.throws(() => uiTestArguments(gate.root, '9.0.0'), /supported/);
   ui.version = '2.0.1';
   write(gate.root, 'ui/package.json', JSON.stringify(ui));
   assert.throws(() => uiTestArguments(gate.root, ui.version), /UI suite is required/);
@@ -643,10 +644,12 @@ test('SDK contract controls use actual owner/provenance shapes without importing
     pacote: { manifest() {} } };
   const provenance = { verifyBundle() {}, generate() {},
     subject: (name, version, sha512) => ({ name: `pkg:npm/${name}@${version}`, digest: { sha512 } }) };
-  validateSdkContract(libraries, provenance);
-  assert.throws(() => validateSdkContract({ ...libraries, publish: { publish() {} } }, provenance));
-  assert.throws(() => validateSdkContract({ ...libraries, profile: {} }, provenance));
-  assert.throws(() => validateSdkContract(libraries, { ...provenance, subject: () => ({}) }));
+  for (const version of ['2.0.1', '2.0.2', '2.7.13']) {
+    validateSdkContract(libraries, provenance, version);
+    assert.throws(() => validateSdkContract({ ...libraries, publish: { publish() {} } }, provenance, version));
+    assert.throws(() => validateSdkContract({ ...libraries, profile: {} }, provenance, version));
+    assert.throws(() => validateSdkContract(libraries, { ...provenance, subject: () => ({}) }, version));
+  }
   assert.equal(typeof net.connect, 'function');
 });
 

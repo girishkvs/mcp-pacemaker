@@ -20,9 +20,163 @@ import {
 } from '../tools/npm-publication/secret-report.mjs';
 import { collectSecrets } from '../tools/npm-publication/run.mjs';
 import { aggregateExternalGates, externalCli } from '../tools/npm-publication/external-gates.mjs';
-import { POLICY, REQUIRED_GATES, validateApproval, validateGates, validateTransfer } from '../tools/npm-publication/policy.mjs';
+import { POLICY, REQUIRED_GATES, digest, validateApproval, validateGates, validateTransfer } from '../tools/npm-publication/policy.mjs';
 import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
 import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
+import { CandidateFixture, syntheticRegistrySourceProof } from './helpers/npm-publication-candidate-fixture.mjs';
+
+for (const [version, generation, proofRequired, corruption] of [['2.0.2', ''], ['2.7.13', 'npm-r27/'], ['1.3.2', 'npm-r12/']]
+  .flatMap(pair => [[...pair, false], [...pair, true]])
+  .flatMap(pair => ['none', 'missing-runtime', 'license-text', 'notices', 'native-source', 'native-report', 'replacement']
+    .map(corruption => [...pair, corruption]))) {
+  test(`Connected SYNTHETIC reusable collection -> admission -> prepare -> matrix -> finalizer -> stage: ${version}, sourceProof=${proofRequired}, corruption=${corruption}`, async t => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
+    const f = await new Fixture().init(t, { version, generation });
+    f.approval.publicPackages.push(POLICY.name, 'smol-toml');
+    f.approval.ciAttempt = 2;
+    f.producerContext.ci.attempt = 2;
+    f.approval.expectedDistTags = { latest: '2.0.1', legacy: '1.3.1' };
+    const candidate = new CandidateFixture(t, f.approval, f.env, f.readers, {
+      package: files => {
+        if (corruption === 'missing-runtime') delete files['bin/service-control.mjs'];
+        if (corruption === 'native-source') delete files['bin/windows/PoolingSecurityHelper.exe'];
+        if (corruption === 'notices') files['THIRD_PARTY_NOTICES.txt'] = 'SYNTHETIC stale notices';
+        if (corruption === 'license-text') {
+          files.LICENSE = 'SYNTHETIC invalid license contents. '.repeat(8);
+          const manifest = JSON.parse(files['ui/dist/third-party-manifest.json']);
+          manifest.projectLicenseSha256 = digest(Buffer.from(files.LICENSE)).sha256;
+          files['ui/dist/third-party-manifest.json'] = JSON.stringify(manifest);
+        }
+      },
+      replacement: result => {
+        if (corruption === 'replacement') result.steps[0].heldBeforeAndAfterReplacement = false;
+      },
+    });
+    candidate.ciCompletedAt = f.producerContext.ci.completedAt;
+    const subject = f.approval.localRegression.subjects.find(item => item.version !== version);
+    const peerPackage = candidate.pack(subject.version);
+    const peer = f.approval.peerArtifact = { kind: 'npm-registry-published', version: subject.version,
+      commit: subject.commit, tree: subject.tree, ...digest(peerPackage.bytes) };
+    if (proofRequired) peer.sourceProof = { kind: 'registry-slsa-v1',
+      ref: `refs/tags/npm-r27/v${peer.version}`, runId: '777', runAttempt: 1 };
+    const collecting = { ...f.approval, scope: 'collect-secrets' };
+    for (const field of ['secretReview', 'publicPackages', 'peerArtifact', 'expectedDistTags']) delete collecting[field];
+    const collectionEnv = { ...f.env, GITHUB_RUN_ID: f.workflow.runId,
+      GITHUB_RUN_NUMBER: f.workflow.runNumber, GITHUB_JOB: 'secret-collection' };
+    const collected = await collectSecrets(collecting, {
+      env: collectionEnv, sourceRoot: f.root, tools: {},
+      runtime: { platform: 'linux', arch: 'x64', versions: { node: POLICY.node } },
+      preflight: (approval, options) => candidate.preflight(approval, options, collectionEnv),
+      scan: async () => f.secrets,
+      postflight: () => verifyCollectionSource(f.report, f.root, {}, f.readSource),
+    });
+    f.report = collected;
+    f.repack();
+    const emitted = Object.fromEntries(await Promise.all(['report.json',
+      ...collected.producerEvidence.receipts.map(item => item.file)].map(async name =>
+      [name, await readFile(join(f.temp, 'npm-secret-collection', name))])));
+    assert.deepEqual(emitted['report.json'], f.reportBytes);
+    f.archive = f.zip(emitted);
+    assert.equal(`sha256:${sha256(f.archive)}`, f.metadata.digest);
+    const admitted = await f.publication(await f.admit());
+    assert.equal(admitted.status, 'passed');
+    if (corruption === 'native-source') {
+      await assert.rejects(candidate.prepare(admitted));
+      assert.equal(candidate.prepared, undefined, 'Bad native source cannot produce preparation or stage admission');
+      return;
+    }
+    const prepared = await candidate.prepare(admitted);
+    const matrix = await candidate.consumers();
+    assert.equal(matrix.consumerLanes.length, 12);
+    assert.equal(matrix.artifactEvidence.length, 6);
+    const tarballUrl = `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`;
+    const attestationsUrl = `${POLICY.registry}-/npm/v1/attestations/${POLICY.name}@${peer.version}`;
+    const responses = new Map([
+      [`${POLICY.registry}${POLICY.name}`, JSON.stringify({
+        name: POLICY.name, maintainers: [{ name: POLICY.owner }], 'dist-tags': f.approval.expectedDistTags,
+        versions: { [peer.version]: { name: POLICY.name, version: peer.version,
+          ...(proofRequired ? {} : { gitHead: peer.commit }),
+          dist: { tarball: tarballUrl, integrity: peer.integrity,
+            shasum: createHash('sha1').update(peerPackage.bytes).digest('hex'),
+            ...(proofRequired ? { attestations: { url: attestationsUrl,
+              provenance: { predicateType: 'https://slsa.dev/provenance/v1' } } } : {}) } } },
+      })],
+      [`https://api.github.com/repos/${POLICY.repository}/git/commits/${peer.commit}`,
+        JSON.stringify({ sha: peer.commit, tree: { sha: peer.tree } })],
+      [tarballUrl, peerPackage.bytes],
+    ]);
+    if (proofRequired) responses.set(attestationsUrl, JSON.stringify(syntheticRegistrySourceProof(peer, f.env)));
+    let cryptographicCalls = 0;
+    const verifyBundle = async () => { cryptographicCalls++; };
+    let peerReads = 0;
+    const peerReader = async url => {
+      peerReads++;
+      assert.ok(responses.has(url), 'Unexpected synthetic peer endpoint');
+      return new Response(responses.get(url));
+    };
+    const finalized = await candidate.finalize(peerReader, verifyBundle);
+    const expectedReads = proofRequired ? 4 : 3;
+    assert.equal(peerReads, expectedReads);
+    assert.equal(cryptographicCalls, proofRequired ? 1 : 0);
+    assert.deepEqual(finalized.matrix, matrix);
+    assert.deepEqual(finalized.prepared, prepared.prepared);
+    assert.equal(finalized.peer.prepared, undefined);
+    if (corruption === 'native-report') finalized.matrix.nativeWindowsEvidence[0].counts.pass = 0;
+    if (corruption !== 'none') {
+      await assert.rejects(candidate.stageInputs(finalized, admitted));
+      const failedGate = {
+        'missing-runtime': 'runtime-closure', 'license-text': 'licenses-notices', notices: 'licenses-notices',
+        'native-report': 'native-windows-execution', replacement: 'service-replacement',
+      }[corruption];
+      assert.equal(candidate.externalReport.status, 'failed');
+      assert.equal(candidate.externalReport.error.gate, failedGate,
+        'The real downstream validator, not an unconditional status fixture, must reject');
+      return;
+    }
+    const stage = await candidate.stageInputs(finalized, admitted);
+    assert.equal(candidate.externalReport.runtimeLicenses.coverage.consumerGraphs, 12);
+    assert.ok(candidate.externalReport.runtimeClosure.files.some(file => file.path === 'bin/service-control.mjs'));
+    assert.equal(candidate.externalReport.nativeWindows.length, 2);
+    assert.equal(candidate.externalReport.serviceReplacement.steps.length, 4);
+    const manifest = stage.validate();
+    assert.equal(manifest.version, version);
+    assert.equal(manifest.peerArtifact.version, peer.version);
+    assert.equal(manifest.peerArtifact.purpose, 'service-comparison-only');
+    if (proofRequired) {
+      assert.deepEqual(manifest.peerArtifact.provenance.sourceProof, peer.sourceProof);
+      assert.equal(manifest.peerArtifact.provenance.verification, 'cryptographically-verified');
+      const good = structuredClone(finalized.peer.evidence.provenance);
+      finalized.peer.evidence.provenance.verification = 'not-performed';
+      await assert.rejects(() => candidate.stageInputs(finalized, admitted), /must be verified/);
+      finalized.peer.evidence.provenance = good;
+    }
+    assert.equal(manifest.matrixArtifacts.length, 6);
+    assert.equal(stage.gates.consumers.length, 12);
+    assert.deepEqual(stage.gates.sourceSecretEvidence.collection, collected);
+    assert.equal(collected.producerEvidence.ci.attempt, 2);
+    const replacement = candidate.calls.find(call => call.file === 'tools/service-replacement/check.mjs');
+    assert.equal(replacement.args[replacement.args.indexOf('--current-version') + 1],
+      version.startsWith('2.') ? version : peer.version);
+    assert.equal(replacement.args[replacement.args.indexOf('--legacy-version') + 1],
+      version.startsWith('1.') ? version : peer.version);
+    for (const name of ['licenses-notices', 'runtime-closure', 'native-windows-execution', 'service-replacement']) {
+      assert.equal(stage.gates.gates[name].status, 'passed');
+    }
+    const substituted = { ...stage.approval, artifact: { ...stage.approval.artifact, ...finalized.peer.evidence } };
+    assert.throws(() => validateApproval(substituted, 'stage'), /comparison-only/);
+    assert.throws(() => validateTransfer(stage.run, stage.jobs, stage.metadata, substituted), /comparison-only/);
+    candidate.ciRun.run_attempt = 3;
+    await assert.rejects(candidate.finalize(peerReader, verifyBundle), error => error.stack.includes('validateCi'));
+    candidate.ciRun.run_attempt = 2;
+    candidate.jobs.pop();
+    await assert.rejects(candidate.finalize(peerReader, verifyBundle), /Missing\/duplicate current-run job/);
+    assert.equal(peerReads, expectedReads, 'Invalid own evidence fails before any peer read');
+    for (const invalid of ['3.0.2', '2.0.2-beta.1', '2.00.2']) {
+      assert.throws(() => validateApproval({ ...stage.approval, version: invalid }, 'stage'));
+    }
+    assert.throws(() => validateApproval({ ...stage.approval, ref: 'refs/tags/v2.9.9' }, 'stage'));
+  });
+}
 
 const NATIVE_URI_FIXTURES = [
   { blob: '2abc5b2058695c2274c3913b99b1be6d5427af5d', rawBytes: 44, fullBytes: 50,
@@ -38,7 +192,7 @@ const NATIVE_URI_FIXTURES = [
 
 // Synthetic execution, GitHub, Git and owner inputs only. No genuine approval is generated.
 class Fixture {
-  async init(t, { nativeUri = false, nativeCheckouts } = {}) {
+  async init(t, { nativeUri = false, nativeCheckouts, version = '2.0.1', generation = 'npm-r5/' } = {}) {
     this.nativeUri = nativeUri;
     if (nativeCheckouts !== undefined) {
       assert.ok(nativeUri && nativeCheckouts instanceof Map && nativeCheckouts.size === 3);
@@ -82,10 +236,10 @@ class Fixture {
     this.source = await this.readSource(this.root, { tools: {}, context: {} });
     this.secrets = await this.scan();
     this.workflow = { runId: '11', runNumber: '7', attempt: 1, repositoryId: '23', ownerId: '17',
-      ref: 'refs/tags/npm-r5/v2.0.1' };
+      ref: `refs/tags/${generation}v${version}` };
     this.report = makeSecretCollection(this.secrets, this.workflow, this.producerContext);
     this.approval = syntheticLocalApproval({
-      schemaVersion: 1, scope: 'prepare', name: POLICY.name, version: '2.0.1', commit: this.commit,
+      schemaVersion: 1, scope: 'prepare', name: POLICY.name, version, commit: this.commit,
       tree: this.tree, tagObject: 'c'.repeat(40), ref: this.workflow.ref, ciRunId: '100', ciAttempt: 1,
       approver: POLICY.owner, approvedAt: this.time(-15), publicPackages: ['synthetic-public-package'],
     });
@@ -121,8 +275,7 @@ class Fixture {
         'Post Run actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803', 'Complete job']
         .map((name, index) => ({ name, number: index + 1, status: 'completed', conclusion: 'success',
           started_at: this.time(index === 5 ? -53 : -59), completed_at: this.time(index === 4 ? -54 : index === 5 ? -29 : -21) })),
-    }, ...['source', 'prepare', 'stage', 'consumers',
-      ...(this.approval.version === '2.0.1' ? ['sign-bootstrap', 'publish-bootstrap'] : [])].map((name, index) =>
+    }, ...['source', 'prepare', 'stage', 'consumers'].map((name, index) =>
       ({ id: 112 + index, run_id: 11, run_attempt: 1, head_sha: this.commit, name,
         status: 'completed', conclusion: 'skipped', steps: [] }))];
     this.repack();
@@ -138,7 +291,7 @@ class Fixture {
       readJobs: async () => this.jobs,
     };
     this.request = { schemaVersion: 1, phase: 'source', root: this.root, sourceRoot: this.root,
-      commit: this.commit, name: POLICY.name, version: '2.0.1', requiredGates: ['source-gitleaks', 'source-trufflehog'] };
+      commit: this.commit, name: POLICY.name, version, requiredGates: ['source-gitleaks', 'source-trufflehog'] };
     return this;
   }
 

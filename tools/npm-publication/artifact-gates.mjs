@@ -9,12 +9,21 @@ import {
 } from './gates.mjs';
 import { POLICY, digest, sameDigests, validateGates } from './policy.mjs';
 import { extractTarball } from './tarball.mjs';
-import { validateLocalApproval } from './local-regression.mjs';
+import { releaseRole, releaseVersions, validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
+import { requireBuildOnlyRiskScope, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
-export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence) {
+export async function runArtifactChecks(runner, binding, sourceReport, noticesEvidence) {
   validateLocalApproval(runner.context.approval, { continuing: true });
   assert.deepEqual(sourceReport?.localRegression, runner.context.approval.localRegression);
+  const sourceRisk = sourceReport.gates?.['producer-advisories'];
+  const riskApplied = validateProducerAdvisories(sourceRisk, { source: sourceReport.source,
+    version: binding.version, checks: sourceReport.checks, complete: true });
+  if (riskApplied) {
+    const current = requireBuildOnlyRiskScope(readFileSync(join(runner.root, 'package-lock.json')),
+      readFileSync(join(binding.extractedRoot, 'ui/dist/third-party-manifest.json')));
+    assert.deepEqual(current, sourceRisk.buildOnlyEvidence, 'Build-only exception runtime/bundle evidence changed');
+  }
   runner.requireScripts(['compat:prepare', 'compat:clean', 'test:compat', 'test:compat:browser']);
   assert.equal(sourceReport?.schemaVersion, 1);
   assert.equal(sourceReport.phase, 'source', 'A real source-gate report is required');
@@ -24,6 +33,27 @@ export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence
   const matrix = runner.context.matrix;
   const consumers = matrix?.consumerLanes?.map(lane => lane.result);
   validateConsumerMatrix(consumers, binding);
+  const peer = runner.context.peer;
+  assert.ok(peer?.tarball, 'Approved peer source artifact is required for actual T32 execution');
+  releaseVersions([binding.version, peer.comparison?.version]);
+  const approvedPeer = runner.context.approval.peerArtifact;
+  assert.equal(peer.comparison.version, approvedPeer?.version, 'Comparison version differs from approved peer');
+  validateLocalRegression(runner.context.approval.localRegression, approvedPeer);
+  sameDigests(peer.comparison.artifact, approvedPeer);
+  if (approvedPeer.sourceProof) {
+    assert.equal(peer.evidence.origin, 'npm-registry-published');
+    assert.deepEqual(peer.evidence.source, { commit: approvedPeer.commit, tree: approvedPeer.tree });
+    assert.equal(peer.evidence.provenance?.verification, 'cryptographically-verified',
+      'Declared peer sourceProof must be verified before artifact gates');
+    assert.deepEqual(peer.evidence.provenance.sourceProof, approvedPeer.sourceProof);
+    assert.match(peer.evidence.provenance.documentSha256, /^[a-f0-9]{64}$/);
+  }
+  sameDigests(peer.comparison.artifact, peer.evidence);
+  assert.equal(peer.evidence.purpose, 'service-comparison-only');
+  assert.equal(peer.evidence.stageEligible, false);
+  if (peer.evidence.origin === 'npm-registry-published') {
+    assert.equal(peer.prepared, undefined, 'Published peer must not impersonate a preparation');
+  }
   runner.publicCoordinates();
   assert.equal(runner.npm(['--version'], 'Verify artifact npm version').stdout, POLICY.npm);
   const restores = [];
@@ -34,22 +64,23 @@ export function runArtifactChecks(runner, binding, sourceReport, noticesEvidence
   const browser = runner.node('ui/node_modules/playwright/cli.js',
     ['install', '--with-deps', 'chromium'], 'Install locked Chromium for exact-tarball compatibility').evidence;
   const compatibility = runner.compatibility(binding);
-  const peer = runner.context.peer;
-  assert.ok(peer?.tarball, 'Approved peer source artifact is required for actual T32 execution');
   const own = { tarball: binding.tarball, version: binding.version, ...binding.artifact, files: binding.files };
-  const opposite = { tarball: peer.tarball, version: peer.prepared.version,
-    ...peer.prepared.artifact, files: peer.inspection.files };
-  const pair = binding.version === '1.3.1' ? { legacy: own, current: opposite } : { legacy: opposite, current: own };
+  const opposite = { tarball: peer.tarball, version: peer.comparison.version,
+    ...peer.comparison.artifact, files: peer.inspection.files };
+  releaseVersions([own.version, opposite.version]);
+  const pair = releaseRole(binding.version) === 'legacy' ? { legacy: own, current: opposite } : { legacy: opposite, current: own };
   const replacementRun = runner.node('tools/service-replacement/check.mjs', [
     '--legacy-tarball', pair.legacy.tarball, '--legacy-sha256', pair.legacy.sha256,
+    '--legacy-version', pair.legacy.version,
     '--current-tarball', pair.current.tarball, '--current-sha256', pair.current.sha256,
+    '--current-version', pair.current.version,
   ], 'Run actual exact-two-patch-tarball T32 service replacement');
-  runner.verifyArtifact(peer.tarball, peer.prepared.artifact);
+  runner.verifyArtifact(peer.tarball, peer.comparison.artifact);
   const replacement = {
     result: JSON.parse(replacementRun.stdout), stdout: replacementRun.rawStdout,
     evidence: replacementRun.evidence, approvedArtifacts: pair,
   };
-  const external = runner.external('artifact', binding, {
+  const external = await runner.external('artifact', binding, {
     extractedRoot: binding.extractedRoot,
     consumers: consumers.filter(item => item.platform === 'linux' &&
       item.npm === POLICY.npm), matrix, sourceReport, replacement,
@@ -104,7 +135,7 @@ export async function main(args = process.argv.slice(2)) {
       artifact, tarball: options['--tarball'], extractedRoot, files: inspection.files,
       sourceReportSha256: digest(readFileSync(options['--source-report'])).sha256,
     };
-    const report = runArtifactChecks(runner, binding, readJson(options['--source-report']), noticesEvidence);
+    const report = await runArtifactChecks(runner, binding, readJson(options['--source-report']), noticesEvidence);
     sameDigests(digest(readFileSync(binding.tarball)), artifact);
     assert.deepEqual(runner.snapshot(), source, 'Source or locks changed during artifact gates');
     runner.writeReport(options['--output'], report);

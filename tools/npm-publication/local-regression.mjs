@@ -1,19 +1,60 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const LOCAL_CONTRACT = 'mcp-pacemaker-private-local-regression-v1';
-export const LOCAL_VERSIONS = Object.freeze(['1.3.1', '2.0.1']);
 export const LOCAL_NODES = Object.freeze(['20.20.2', '22.23.2', '24.21.0']);
 export const LOCAL_CONTROLS = Object.freeze([
   ['failure-control', 'fail'], ['timeout-control', 'timeout'],
   ['early-descendant-exit-control', 'timeout-early-exit'],
 ]);
-export const LOCAL_CASES = Object.freeze([
-  ...LOCAL_CONTROLS.map(([name, mode]) => ({ name, mode })),
-  ...LOCAL_VERSIONS.flatMap(version => LOCAL_NODES.map(node => ({
-    name: `v${version}-node${node}`, mode: 'gate', version, node,
-  }))),
-]);
+
+export function isCanonicalUnsigned(value) {
+  if (typeof value !== 'string' ||
+      value.length === 0 ||
+      value.length > 16) return false;
+  if (value.length > 1 &&
+      value.startsWith('0')) return false;
+  for (const digit of value) {
+    if (digit < '0' ||
+        digit > '9') return false;
+  }
+  return Number.isSafeInteger(Number(value));
+}
+
+export function releaseRole(version) {
+  const parts = typeof version === 'string' ? version.split('.') : [];
+  assert.ok(parts.length === 3 &&
+    ['1', '2'].includes(parts[0]) &&
+    parts.slice(1).every(isCanonicalUnsigned),
+  'Only canonical stable 1.x legacy and 2.x current versions are supported');
+  return parts[0] === '1' ? 'legacy' : 'current';
+}
+
+export function releaseVersions(versions) {
+  assert.ok(Array.isArray(versions) &&
+    versions.length === 2, 'Exactly two selected release versions are required');
+  const ordered = [...versions].sort();
+  assert.deepEqual(ordered.map(releaseRole), ['legacy', 'current'],
+    'Select exactly one legacy and one current version');
+  return ordered;
+}
+
+export function localCases(versions) {
+  return [
+    ...LOCAL_CONTROLS.map(([name, mode]) => ({ name, mode })),
+    ...releaseVersions(versions).flatMap(version => LOCAL_NODES.map(node => ({
+      name: `v${version}-node${node}`, mode: 'gate', version, node,
+    }))),
+  ];
+}
+
+export function localReportVersions(report) {
+  assert.ok(Array.isArray(report.cases));
+  return releaseVersions([...new Set(report.cases.filter(item => item.name.startsWith('v'))
+    .map(item => item.name.split('-node')[0].slice(1)))]);
+}
+
 export const LOCAL_CONTROLLER = Object.freeze([
   'local-windows.mjs', 'local-windows-entry.mjs', 'local-gate.mjs', 'local-inputs.mjs',
   'local-git.mjs', 'local-environment.mjs', 'local-sdk-check.mjs', 'local-source.mjs',
@@ -24,8 +65,13 @@ export const LOCAL_CONTROLLER = Object.freeze([
   'offline-stage/control.cjs',
   'offline-stage/loader.cjs', 'stage-issuer.mjs', 'stage-loader.mjs', 'stage-sdk-loader.json',
   'offline-stage/services.cjs', 'stage-fulcio.mjs',
-  'local-audit-report.mjs',
-].map(name => `tools/npm-publication/${name}`).concat(['test/helpers/local-regression-fixture.mjs']));
+  'local-audit-report.mjs', 'provenance.mjs',
+].map(name => `tools/npm-publication/${name}`).concat([
+  'test/helpers/local-regression-fixture.mjs', 'tools/npm-publication/source-gates.mjs',
+  'tools/npm-publication/artifact-gates.mjs',
+  'tools/npm-publication/gates.mjs', 'tools/publication-scanners/advisories.mjs',
+  'tools/publication-scanners/core.mjs', 'tools/publication-scanners/publication.mjs',
+]));
 
 export function exactLocalKeys(value, keys) {
   assert.ok(value &&
@@ -77,7 +123,8 @@ export function validateLocalRegression(value, source, now = Date.now()) {
     exactLocalKeys(runtime, ['version', 'sha256']);
     localSha(runtime.sha256);
   }
-  assert.deepEqual(value.subjects?.map(item => item.version), LOCAL_VERSIONS);
+  const versions = value.subjects?.map(item => item.version);
+  assert.deepEqual(versions, releaseVersions(versions));
   for (const subject of value.subjects) {
     exactLocalKeys(subject, ['version', 'commit', 'tree', 'treeEntriesSha256',
       'checkoutFilesSha256', 'inputManifestSha256']);
@@ -118,7 +165,7 @@ export function validateLocalApproval(approval, { continuing = false, now = Date
   return approval.localRegression;
 }
 
-export function validatePreparedLocal(prepared, approval, source = approval) {
+export function validatePreparedLocal(prepared, approval, source = approval, sourceReport) {
   validateLocalRegression(prepared.localRegression, source);
   assert.deepEqual(prepared.localRegression, approval.localRegression, 'Prepared local evidence differs');
   assert.equal(prepared.preparationApproval?.approver, 'girishkvs');
@@ -127,6 +174,26 @@ export function validatePreparedLocal(prepared, approval, source = approval) {
   assert.ok(Number.isFinite(at) &&
     at <= Date.now());
   validateLocalReview(prepared.localRegressionReview, prepared.localRegression, at);
+  if (source.version === '2.0.2' ||
+      prepared.producerAdvisories !== undefined) {
+    const producer = prepared.producerAdvisories;
+    assert.ok(producer, 'Prepared producer advisory evidence required');
+    exactLocalKeys(producer, ['source', 'checks', 'gate']);
+    assert.equal(prepared.version, source.version);
+    assert.equal(producer.source?.commit, source.commit);
+    assert.equal(producer.source?.version, source.version);
+    assert.deepEqual(prepared.producerLocks, {
+      root: producer.source.rootLockSha256, ui: producer.source.uiLockSha256,
+    });
+    validateProducerAdvisories(producer.gate, {
+      version: source.version, source: producer.source, checks: producer.checks, complete: true,
+    });
+    if (sourceReport) {
+      assert.equal(sourceReport.phase, 'source');
+      assert.deepEqual(producer, { source: sourceReport.source, checks: sourceReport.checks,
+        gate: sourceReport.gates?.['producer-advisories'] }, 'Prepared/source producer evidence differs');
+    }
+  }
 }
 
 export function validateLocalManifest(bytes, approval, gates) {
@@ -137,6 +204,15 @@ export function validateLocalManifest(bytes, approval, gates) {
   validatePreparedLocal(manifest, approval);
   assert.deepEqual(manifest.source, Object.fromEntries(
     ['ref', 'tagObject', 'commit', 'tree'].map(key => [key, approval[key]])));
-  if (gates) assert.deepEqual(gates.localRegression, manifest.localRegression);
+  if (gates) {
+    assert.deepEqual(gates.localRegression, manifest.localRegression);
+    validateProducerAdvisories(gates.gates?.['producer-advisories'], {
+      version: approval.version, source: gates.source, checks: gates.sourceChecks, complete: true,
+    });
+    if (manifest.producerAdvisories) {
+      assert.deepEqual(manifest.producerAdvisories, { source: gates.source, checks: gates.sourceChecks,
+        gate: gates.gates?.['producer-advisories'] }, 'Manifest/final producer evidence differs');
+    }
+  }
   return manifest;
 }

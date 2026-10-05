@@ -109,7 +109,7 @@ test('consumer validation requires an exact version and digest before installing
   for (const invalid of [
     [], args.slice(2), [...args, '--name', 'other'], [...args, '--unknown'],
     args.map((value) => value === '2.0.1' ? 'latest' : value),
-    args.map((value) => value === '2.0.1' ? '2.0.2' : value),
+    args.map((value) => value === '2.0.1' ? '3.0.2' : value),
     args.map((value) => value === 'a'.repeat(64) ? 'bad-hash' : value),
     args.map((value) => value === 'mcp-pacemaker' ? '../outside' : value),
   ]) assert.throws(() => consumerOptions(invalid));

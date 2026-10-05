@@ -8,7 +8,7 @@ import { LocalCaseReplay } from './local-case-evidence.mjs';
 import { digest, sameDigests, npm12Contents } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import {
-  LOCAL_CONTRACT, LOCAL_CASES, LOCAL_NODES, LOCAL_VERSIONS, localHash, localCommitment,
+  LOCAL_CONTRACT, localCases, localReportVersions, releaseRole, LOCAL_NODES, localHash, localCommitment,
   validateLocalRegression,
 } from './local-regression.mjs';
 import { readLocalBytes, readLocalJson, controllerBinding, evidenceInventory, evidenceTar } from './local-evidence.mjs';
@@ -35,7 +35,8 @@ export function verifyLocalHeader(report) {
     Date.parse(report.completedAt) <= Date.now());
   assert.equal(report.error, undefined);
   assert.deepEqual(report.nodes.map(item => item.version), LOCAL_NODES);
-  assert.deepEqual(report.cases.map(item => item.name).sort(), LOCAL_CASES.map(item => item.name).sort());
+  assert.deepEqual(report.cases.map(item => item.name).sort(),
+    localCases(localReportVersions(report)).map(item => item.name).sort());
   assert.equal(report.cases.length, 9);
   return report;
 }
@@ -214,6 +215,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
   physical(directory);
   const reportBytes = readLocalBytes(join(directory, 'result.json'));
   const report = verifyLocalHeader(JSON.parse(reportBytes.toString('utf8')));
+  const versions = localReportVersions(report);
   const evidenceBytes = readLocalBytes(join(directory, 'evidence-manifest.json'));
   const inventory = evidenceInventory(directory);
   assert.deepEqual(JSON.parse(evidenceBytes.toString('utf8')), inventory);
@@ -229,7 +231,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
     assert.equal(localHash(readLocalBytes(join(directory, 'controller', path))),
       report.controller.files.find(item => item.path === path).sha256);
   }
-  assert.deepEqual(Object.keys(sourceRoots).sort(), LOCAL_VERSIONS);
+  assert.deepEqual(Object.keys(sourceRoots).sort(), versions);
   assert.deepEqual(Object.keys(toolRoots).sort(), ['git', 'node', 'npm', 'pwsh']);
   assert.equal(process.platform, 'win32', 'Verify the private Windows receipt on Windows');
   assert.equal(process.arch, 'x64');
@@ -242,7 +244,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
     assert.equal(localHash(readLocalBytes(join(toolRoots.node, name), 128 * 1024 ** 2)), node.sha256);
   }
   const inputs = new Map();
-  const subjects = LOCAL_VERSIONS.map(version => {
+  const subjects = versions.map(version => {
     const input = join(directory, `inputs-${version}`);
     const bytes = readLocalBytes(join(input, 'manifest.json'));
     const manifest = JSON.parse(bytes.toString('utf8'));
@@ -268,13 +270,13 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
       treeEntriesSha256: localCommitment(identity.entries), checkoutFilesSha256: localCommitment(identity.files),
       inputManifestSha256: value.sha256 };
   });
-  for (const expected of LOCAL_CASES) {
+  for (const expected of localCases(versions)) {
     await verifyLocalCase(directory, report.cases.find(item => item.name === expected.name), expected,
       report, inputs.get(expected.version), commands);
   }
   // This final re-enumeration catches changed receipts as well as changed live source/tool inputs.
   assert.deepEqual(evidenceInventory(directory), inventory);
-  for (const version of LOCAL_VERSIONS) {
+  for (const version of versions) {
     const input = inputs.get(version);
     assert.deepEqual(new LocalSourceReader(sourceRoots[version], gitExecutable).capture(), input.manifest.sourceIdentity);
     verifyManifest(input.directory, input.manifest);
@@ -303,8 +305,12 @@ export async function main(args) {
   assert.equal(args.length, names.length * 2);
   assert.deepEqual(args.filter((_, index) => index % 2 === 0), names);
   for (let index = 1; index < args.length; index += 2) assert.ok(isAbsolute(args[index]));
-  const result = await verifyLocalEvidence({ directory: args[1],
-    sourceRoots: { '1.3.1': args[3], '2.0.1': args[5] },
+  const sourceRoots = Object.fromEntries([['legacy', args[3]], ['current', args[5]]].map(([role, root]) => {
+    const version = readLocalJson(join(root, 'package.json')).version;
+    assert.equal(releaseRole(version), role);
+    return [version, root];
+  }));
+  const result = await verifyLocalEvidence({ directory: args[1], sourceRoots,
     toolRoots: { npm: args[7], git: args[9], pwsh: args[11], node: args[13] } });
   // No owner acceptance is generated. Full evidence and paths remain private.
   console.log(JSON.stringify(result, null, 2));

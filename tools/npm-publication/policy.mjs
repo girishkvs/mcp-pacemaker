@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
-import { assertCollectionJobSkipped, secretHash, secretId, validateSecretCollection, validateSecretReview } from './secret-report.mjs';
+import { isCanonicalUnsigned, releaseRole, validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
+import { assertCollectionJobSkipped, secretHash, secretId, sourceCiAttempt, validateSecretCollection, validateSecretReview } from './secret-report.mjs';
+import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const POLICY = Object.freeze({
   name: 'mcp-pacemaker',
@@ -24,6 +25,9 @@ export const REQUIRED_GATES = Object.freeze([
 ]);
 
 export function validateGateStatus(name, gate) {
+  if (name === 'producer-advisories') validateProducerAdvisories(gate);
+  else assert.ok(!gate || !['riskAcceptance', 'nativeAudits', 'osv'].some(key => Object.hasOwn(gate, key)),
+    'UI build risk review cannot waive another gate');
   if (gate?.admission !== undefined) {
     assert.equal(name, 'source-trufflehog');
     const value = gate.admission;
@@ -69,18 +73,43 @@ export function sameDigests(actual, expected) {
 }
 
 export function channelFor(version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Only approved 1.3.1/2.0.1 candidates are supported');
-  return version.startsWith('1.') ? 'legacy' : 'latest';
+  return releaseRole(version) === 'legacy' ? 'legacy' : 'latest';
+}
+
+export function publicationRef(ref) {
+  const message = 'Publication requires the exact approved release or npm tag';
+  assert.ok(typeof ref === 'string' &&
+    ref.startsWith('refs/tags/'), message);
+  const tag = ref.slice('refs/tags/'.length);
+  const parts = tag.split('/');
+  assert.ok(parts.length === 1 ||
+    parts.length === 2, message);
+  if (parts.length === 2 &&
+      parts[0] !== 'npm') {
+    assert.ok(parts[0].startsWith('npm-r'), message);
+    const generation = parts[0].slice('npm-r'.length);
+    assert.ok(isCanonicalUnsigned(generation) &&
+      Number(generation) >= 2, message);
+  }
+  assert.ok(parts.at(-1).startsWith('v') &&
+    parts.at(-1).length > 1, message);
+  const version = parts.at(-1).slice(1);
+  channelFor(version);
+  return { tag, version };
 }
 
 export function publicationTagName(ref, version) {
   channelFor(version);
-  const tag = `v${version}`;
-  assert.ok([`refs/tags/${tag}`, `refs/tags/npm/${tag}`,
-    `refs/tags/npm-r2/${tag}`, `refs/tags/npm-r3/${tag}`, `refs/tags/npm-r4/${tag}`,
-    `refs/tags/npm-r5/${tag}`].includes(ref),
-    'Publication requires the exact approved release or npm tag');
-  return ref.slice('refs/tags/'.length);
+  const parsed = publicationRef(ref);
+  assert.equal(parsed.version, version, 'Publication requires the exact approved release version');
+  return parsed.tag;
+}
+
+export function assertCandidateEvidence(value) {
+  assert.notEqual(value?.kind, 'npm-registry-published', 'Published peer is comparison-only, not candidate evidence');
+  assert.notEqual(value?.origin, 'npm-registry-published', 'Published peer is comparison-only, not candidate evidence');
+  assert.notEqual(value?.purpose, 'service-comparison-only', 'Peer is comparison-only, not candidate evidence');
+  assert.notEqual(value?.stageEligible, false, 'Comparison-only evidence cannot authorize stage');
 }
 
 export function fresh(value, now = Date.now()) {
@@ -91,6 +120,7 @@ export function fresh(value, now = Date.now()) {
 }
 
 export function validateApproval(approval, action, now = Date.now()) {
+  assertCandidateEvidence(approval);
   assert.ok(['prepare', 'collect-secrets', 'stage', 'sign-bootstrap', 'verify-bootstrap', 'publish-bootstrap'].includes(action),
     'Unsupported publication scope');
   assert.equal(approval.schemaVersion, 1);
@@ -100,9 +130,8 @@ export function validateApproval(approval, action, now = Date.now()) {
   for (const key of ['tagObject', 'commit', 'tree']) {
     assert.match(approval[key] ?? '', /^[a-f0-9]{40}$/, `Invalid approved ${key}`);
   }
-  for (const key of ['ciRunId', 'ciAttempt']) {
-    assert.match(String(approval[key] ?? ''), /^[1-9][0-9]*$/, `Invalid ${key}`);
-  }
+  secretId(approval.ciRunId);
+  sourceCiAttempt(approval.ciAttempt);
   assert.equal(approval.approver, POLICY.owner);
   assert.equal(approval.scope, action, 'Approval does not authorize this action');
   fresh(approval.approvedAt, now);
@@ -122,6 +151,7 @@ export function validateApproval(approval, action, now = Date.now()) {
   }
   if (!['prepare', 'collect-secrets'].includes(action)) {
     const artifact = approval.artifact;
+    assertCandidateEvidence(artifact);
     assert.match(artifact?.sha256 ?? '', /^[a-f0-9]{64}$/);
     assert.match(artifact.sha512 ?? '', /^[a-f0-9]{128}$/);
     assert.equal(artifact.integrity, `sha512-${Buffer.from(artifact.sha512, 'hex').toString('base64')}`);
@@ -148,13 +178,7 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
     repository: POLICY.repository, workflow: 'npm-publish.yml', environment: POLICY.environment,
     allowPublish: false, allowStagePublish: true,
   }, 'Missing or wrong stage-only trust; bootstrap/trust setup is a separate owner operation');
-  assert.ok(owner.expectedDistTags &&
-    typeof owner.expectedDistTags === 'object' &&
-    !Array.isArray(owner.expectedDistTags), 'Expected current dist-tags are required');
-  assert.match(owner.expectedDistTags.latest ?? '', /^2\.\d+\.\d+$/, 'Bootstrap real 2.x first');
-  if (owner.expectedDistTags.legacy !== undefined) {
-    assert.match(owner.expectedDistTags.legacy, /^1\.\d+\.\d+$/);
-  }
+  validateDistTags(owner.expectedDistTags);
   const pending = owner.pending;
   assert.ok(['none', 'matching'].includes(pending?.status),
     'Conflicting/unknown pending stage: owner disposition required, no retry');
@@ -169,6 +193,19 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
     assert.equal(pending.workflow.commit, approval.commit);
     assert.match(String(pending.workflow.runId ?? ''), /^[1-9][0-9]*$/);
     assert.equal(pending.workflow.attempt, 1);
+  }
+
+}
+
+export function validateDistTags(tags) {
+  assert.ok(tags &&
+    typeof tags === 'object' &&
+    !Array.isArray(tags), 'Expected current dist-tags are required');
+  assert.equal(releaseRole(tags.latest), 'current', 'An existing current release is required');
+  if (tags.legacy !== undefined) assert.equal(releaseRole(tags.legacy), 'legacy');
+  for (const [tag, version] of Object.entries(tags)) {
+    assert.match(tag, /^[a-z][a-z0-9-]*$/);
+    releaseRole(version);
   }
 }
 
@@ -303,7 +340,8 @@ export function validatePackage(pkg, approval) {
     assert.equal(value, allowed[key], `Conflicting publishConfig.${key}`);
   }
   assert.equal(pkg.dependencies?.['smol-toml'], '^1.8.0', 'Reviewed safe direct TOML floor is required');
-  if (pkg.gitHead !== undefined) {
+  if (Object.hasOwn(pkg, 'gitHead')) {
+    assert.match(pkg.gitHead, /^[a-f0-9]{40}$/, 'Malformed packed gitHead');
     assert.equal(pkg.gitHead, approval.commit);
   }
 }
@@ -355,6 +393,10 @@ export function validateGates(report, approval, artifact) {
   if (approval.localRegression) assert.deepEqual(report.localRegression, approval.localRegression);
   assert.equal(report.commit, approval.commit);
   sameDigests(report.artifact, artifact);
+  validateProducerAdvisories(report.gates?.['producer-advisories'], {
+    version: subject.version, source: report.source, checks: report.sourceChecks, complete: true,
+  });
+  if (subject.version === '2.0.2') assert.equal(report.source.commit, approval.commit);
   for (const name of REQUIRED_GATES) {
     const gate = report.gates?.[name];
     validateGateStatus(name, gate);
@@ -382,8 +424,9 @@ export function validateGates(report, approval, artifact) {
 }
 
 export function validateCi(run, jobs, approval) {
+  sourceCiAttempt(approval.ciAttempt);
   assert.equal(String(run.id), String(approval.ciRunId));
-  assert.equal(run.run_attempt, Number(approval.ciAttempt));
+  assert.equal(run.run_attempt, approval.ciAttempt);
   assert.equal(run.head_sha, approval.commit);
   assert.equal(run.head_repository?.full_name, POLICY.repository);
   assert.equal(run.repository?.full_name, POLICY.repository);
@@ -424,6 +467,7 @@ export function validateEnvironment(environment, policies, reviews, approval) {
 }
 
 export function validateTransfer(runInfo, jobs, metadata, approval) {
+  for (const value of [approval, approval.artifact, runInfo, metadata]) assertCandidateEvidence(value);
   assertCollectionJobSkipped(jobs);
   const artifact = approval.artifact;
   assert.equal(String(runInfo.id), String(artifact.runId));

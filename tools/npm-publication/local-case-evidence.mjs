@@ -11,7 +11,7 @@ import { validatePackage } from './policy.mjs';
 import { safeName, physical } from './local-inputs.mjs';
 import { treeEntries } from './local-source.mjs';
 import { readLocalBytes, readLocalJson } from './local-evidence.mjs';
-import { exactLocalKeys, localHash, localSha, LOCAL_NODES } from './local-regression.mjs';
+import { exactLocalKeys, localHash, localSha, LOCAL_NODES, releaseRole } from './local-regression.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
 import { auditEvidence } from './local-audit-report.mjs';
 
@@ -168,14 +168,14 @@ export class LocalCaseReplay {
   native(cwd) {
     const commit = this.git(cwd, ['rev-parse', 'HEAD']);
     lowerHex(commit, 40);
-    const baseline = this.version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
+    const baseline = releaseRole(this.version) === 'legacy' ? LEGACY_REF : CURRENT_REF;
     assert.equal(this.git(cwd, ['cat-file', '-e', `${baseline}^{commit}`]), '');
     const read = args => this.git(cwd, ['-c', 'core.hooksPath=', '-c', 'credential.helper=',
       '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=', '-c', 'safe.bareRepository=explicit',
       '-C', cwd, ...args], true);
     assert.equal(read(['cat-file', '-e', `${baseline}^{commit}`]).length, 0);
     const entries = treeEntries(read(['ls-tree', '-r', '-z', baseline, '--', 'bin/windows', BUILD]).toString('utf8'));
-    assert.equal(entries.length, this.version === '1.3.1' ? 6 : 7);
+    assert.equal(entries.length, releaseRole(this.version) === 'legacy' ? 6 : 7);
     const expected = this.filesUnder('bin/windows').map(file => file.path).concat(BUILD).sort();
     assert.deepEqual(entries.map(file => file.path).sort(), expected);
     for (const path of ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json', BUILD]) {
@@ -294,15 +294,15 @@ export class LocalCaseReplay {
   sdk(value) {
     const common = ['status', 'kind', 'node', 'npm', 'version', 'contract', 'networkAttempts', 'subprocessAttempts',
       'authenticated', 'published', 'releaseReady', 'provenanceVerified', 'signatureVerified'];
-    exactLocalKeys(value, [...common, ...(this.version === '1.3.1'
+    exactLocalKeys(value, [...common, ...(releaseRole(this.version) === 'legacy'
       ? ['module', 'verifier'] : ['profileSourceSha256', 'provenanceSourceSha256'])]);
     assert.equal(value.status, 'passed');
     assert.equal(value.kind, 'fresh-child-offline-sdk-load');
     assert.equal(value.node, 'v24.21.0');
     assert.equal(value.npm, '12.0.2');
     assert.equal(value.version, this.version);
-    assert.equal(value.contract, this.version === '1.3.1' ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
-    if (this.version === '1.3.1') {
+    assert.equal(value.contract, releaseRole(this.version) === 'legacy' ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
+    if (releaseRole(this.version) === 'legacy') {
       assert.equal(value.module, 'verify-staged.mjs');
       assert.equal(value.verifier, 'sigstore@5.0.0 (npm@12.0.2)');
     } else {
@@ -379,7 +379,7 @@ export class LocalCaseReplay {
       const ui = uiTestArguments(this.root, this.version);
       if (ui === null) {
         assert.deepEqual(checks.uiTests, { status: 'not-defined', executed: false,
-          reason: 'Legacy 1.3.1 defines neither a UI test script nor a ui/test directory' });
+          reason: `Legacy ${this.version} defines neither a UI test script nor a ui/test directory` });
       } else assert.deepEqual(checks.uiTests,
         testTotals(this.take('UI tests', 'C:\\publisher-node.exe', ui, `${cwd}\\ui`).toString('utf8')));
       this.snapshot(cwd);

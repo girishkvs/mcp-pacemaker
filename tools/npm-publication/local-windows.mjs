@@ -9,7 +9,7 @@ import { POLICY, digest } from './policy.mjs';
 import { InputSnapshot, outside, physical, safeName, sha256, writeManifest } from './local-inputs.mjs';
 import { LocalGitConfig } from './local-git.mjs';
 import { captureSourceIdentity } from './local-source.mjs';
-import { LOCAL_CONTRACT } from './local-regression.mjs';
+import { LOCAL_CONTRACT, releaseVersions } from './local-regression.mjs';
 import { controllerBinding, writeEvidenceInventory } from './local-evidence.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -78,7 +78,7 @@ export class WindowsLocalGate {
     assert.notEqual(resolve(peerRoot), resolve(ROOT), 'Both release lines are required');
     const current = JSON.parse(readFileSync(join(ROOT, 'package.json')));
     const peer = JSON.parse(readFileSync(join(peerRoot, 'package.json')));
-    assert.deepEqual([current.version, peer.version].sort(), ['1.3.1', '2.0.1']);
+    releaseVersions([current.version, peer.version]);
     const npm = JSON.parse(readFileSync(resolve(dirname(npmCli), '../package.json')));
     assert.equal(npm.name, 'npm');
     assert.equal(npm.version, POLICY.npm);
