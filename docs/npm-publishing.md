@@ -146,6 +146,13 @@ The only artifact is `npm-secret-collection-<runId>-1`, containing schema-2
 The report binds every canonical receipt byte sequence and remains explicitly
 `eligibility: "none"`; this cannot replace any prepared/source/candidate bundle.
 
+GitHub may retain the exact declared consumer matrix name when the job is skipped
+before expansion. Collection admission accepts that name, the unexpanded job key,
+or all six lane names only with the existing skipped/no-step checks. Original job
+names and timestamps are never rewritten. A whole-second GitHub step completion
+includes that second but not the next; a millisecond-precision completion remains
+an exact boundary.
+
 If review of that exact report identifies only the supported synthetic URI
 rejection inputs, a **new real owner prepare dispatch** may add `secretReview`.
 No tool creates this human review. Its exact fields are:

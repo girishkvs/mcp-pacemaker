@@ -15,6 +15,7 @@ import {
 import { main as sourceMain, runSourceChecks, validateAudit } from '../tools/npm-publication/source-gates.mjs';
 import { main as artifactMain, runArtifactChecks } from '../tools/npm-publication/artifact-gates.mjs';
 import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
+import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
 import { fixturePlan, ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { cleanNpmEnvironment } from '../tools/npm-publication/run.mjs';
 import { temporaryEnvironment } from '../tools/npm-publication/gate-environment.mjs';
@@ -179,7 +180,7 @@ function cleanAudit() {
 }
 
 class ControlledRunner {
-  constructor(artifact = binding) {
+  constructor(artifact = binding, approvedAt) {
     this.calls = [];
     this.uiPackage = { scripts: { typecheck: 'fixture', test: 'fixture', build: 'fixture' } };
     this.failure = undefined;
@@ -188,7 +189,7 @@ class ControlledRunner {
       ['test', 'compat:prepare', 'compat:clean', 'test:compat', 'test:compat:browser']
         .map(name => [name, 'controlled fixture'])) };
     this.context = {
-      approval: syntheticLocalApproval({ ...artifact.source, version: artifact.version, scope: 'prepare',
+      approval: syntheticLocalApproval({ ...artifact.source, version: artifact.version, scope: 'prepare', approvedAt,
         ref: `refs/tags/v${artifact.version}`, tagObject: 'c'.repeat(40), approver: POLICY.owner }),
       publicPackages: [POLICY.name, 'smol-toml'],
       matrix: { consumerLanes: lanes(artifact).map(result => ({ result })), artifactEvidence: [evidence] },
@@ -277,6 +278,21 @@ function sourceReport(artifact = binding) {
   return runSourceChecks(new ControlledRunner(artifact));
 }
 
+test('Controlled source approval uses the explicit fixture clock and still rejects future approvals', t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  for (const approvedAt of ['2000-01-01T00:00:00.000Z', '2035-01-01T00:00:00.000Z']) {
+    now = Date.parse(approvedAt);
+    const approval = new ControlledRunner(binding, approvedAt).context.approval;
+    assert.equal(approval.approvedAt, approvedAt);
+    assert.equal(approval.localRegression.completedAt, new Date(now - 60_000).toISOString());
+    assert.equal(approval.localRegressionReview.reviewedAt, approvedAt);
+    validateLocalApproval(approval, { continuing: true });
+    const future = syntheticLocalApproval({ ...approval, approvedAt: new Date(now + 1).toISOString() });
+    assert.throws(() => validateLocalApproval(future, { continuing: true }));
+  }
+});
+
 test('Actual source orchestration retains native exit1 and scoped OSV risk details without waiving other gates', async t => {
   const at = Date.parse('2026-10-06T00:00:00Z');
   t.mock.method(Date, 'now', () => at);
@@ -302,7 +318,7 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
   const selected = { ...binding, version: '2.0.2',
     source: { ...source, version: '2.0.2', uiLockSha256: UI_BUILD_RISK_REVIEW.lockSha256,
       rootLockSha256: scanned.gates['producer-advisories'].osv.scope[0].lockSha256 } };
-  const runner = new ControlledRunner(selected);
+  const runner = new ControlledRunner(selected, new Date(at).toISOString());
   runner.root = owned.dir;
   mkdirSync(join(owned.dir, 'ui/dist'));
   writeFileSync(join(owned.dir, 'ui/dist/third-party-manifest.json'),

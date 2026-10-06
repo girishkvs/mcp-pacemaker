@@ -22,6 +22,7 @@ import { collectSecrets } from '../tools/npm-publication/run.mjs';
 import { aggregateExternalGates, externalCli } from '../tools/npm-publication/external-gates.mjs';
 import { POLICY, REQUIRED_GATES, digest, validateApproval, validateGates, validateTransfer } from '../tools/npm-publication/policy.mjs';
 import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
+import { MATRIX } from '../tools/npm-publication/matrix.mjs';
 import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
 import { CandidateFixture, syntheticRegistrySourceProof } from './helpers/npm-publication-candidate-fixture.mjs';
 
@@ -190,6 +191,8 @@ const NATIVE_URI_FIXTURES = [
     fullSha256: '618386be8b79f7991b70268ae66b5dfbeaed06c2efb02a36c0027683980f388a' },
 ];
 
+const SKIPPED_CONSUMER_JOB_NAME = 'consumer (${{ matrix.platform }}, ${{ matrix.npm }})';
+
 // Synthetic execution, GitHub, Git and owner inputs only. No genuine approval is generated.
 class Fixture {
   async init(t, { nativeUri = false, nativeCheckouts, version = '2.0.1', generation = 'npm-r5/' } = {}) {
@@ -275,7 +278,7 @@ class Fixture {
         'Post Run actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803', 'Complete job']
         .map((name, index) => ({ name, number: index + 1, status: 'completed', conclusion: 'success',
           started_at: this.time(index === 5 ? -53 : -59), completed_at: this.time(index === 4 ? -54 : index === 5 ? -29 : -21) })),
-    }, ...['source', 'prepare', 'stage', 'consumers'].map((name, index) =>
+    }, ...['source', 'prepare', 'stage', SKIPPED_CONSUMER_JOB_NAME].map((name, index) =>
       ({ id: 112 + index, run_id: 11, run_attempt: 1, head_sha: this.commit, name,
         status: 'completed', conclusion: 'skipped', steps: [] }))];
     this.repack();
@@ -1063,6 +1066,95 @@ test('local correlation rejects CI in both API and CLI before source reads', asy
   const failure = new Error('Synthetic local fixture failure');
   await assert.rejects(f.withCi(undefined, async () => { throw failure; }), error => error === failure);
   assert.equal(process.env.CI, inherited);
+});
+
+test('collection topology accepts the exact skipped matrix name and preserves inactive-job restrictions', async t => {
+  const workflow = await readFile(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
+  const consumers = workflow.slice(workflow.indexOf('\n  consumers:'), workflow.indexOf('\n  prepare:'));
+  assert.ok(consumers.split(/\r?\n/).includes(`    name: ${SKIPPED_CONSUMER_JOB_NAME}`));
+  for (const version of ['1.3.1', '1.3.2', '2.0.1', '2.0.2', '2.7.13']) {
+    await t.test(version, async t => {
+      const f = await new Fixture().init(t, { version });
+      const original = structuredClone(f.jobs);
+      const consumer = original.find(job => job.name === SKIPPED_CONSUMER_JOB_NAME);
+      const otherJobs = original.filter(job => job !== consumer);
+      for (const names of [[SKIPPED_CONSUMER_JOB_NAME], ['consumers'], MATRIX.map(item => item.jobName)]) {
+        f.jobs = [...otherJobs, ...names.map((name, index) => ({ ...consumer, id: 300 + index, name }))];
+        validateCollectionJobs(f.jobs, f.approval, f.report);
+        await f.admit();
+      }
+      for (const change of [
+        job => { job.name = 'consumer (${{ matrix.os }}, ${{ matrix.npm }})'; },
+        job => { job.name += ' '; },
+        job => { job.status = 'in_progress'; job.conclusion = null; },
+        job => { job.conclusion = 'success'; },
+        job => { job.steps = [{ name: 'Unexpected consumer execution', conclusion: 'success' }]; },
+        job => { job.run_id = 99; },
+        job => { job.run_attempt = 2; },
+        job => { job.head_sha = 'f'.repeat(40); },
+      ]) {
+        f.jobs = structuredClone(original);
+        change(f.jobs.find(job => job.name === SKIPPED_CONSUMER_JOB_NAME));
+        assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
+        await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+      }
+      for (const names of [[], [SKIPPED_CONSUMER_JOB_NAME, SKIPPED_CONSUMER_JOB_NAME],
+        [SKIPPED_CONSUMER_JOB_NAME, 'consumers'], [SKIPPED_CONSUMER_JOB_NAME, ...MATRIX.map(item => item.jobName)]]) {
+        f.jobs = [...otherJobs, ...names.map((name, index) => ({ ...consumer, id: 300 + index, name }))];
+        assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
+        await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+      }
+    });
+  }
+});
+
+test('collection step bounds honor GitHub second precision without widening precise timestamps', async t => {
+  for (const version of ['1.3.1', '1.3.2', '2.0.1', '2.0.2', '2.7.13']) {
+    await t.test(version, async t => {
+      const f = await new Fixture().init(t, { version });
+      const collect = f.jobs[0].steps.find(step => step.name === 'Collect redacted source secret evidence only');
+      const end = Math.floor(Date.parse(f.report.completedAt) / 1000) * 1000;
+      collect.completed_at = new Date(end).toISOString().replace('.000Z', 'Z');
+      for (const offset of [0, 223, 999]) {
+        f.report.completedAt = new Date(end + offset).toISOString();
+        f.repack();
+        validateCollectionJobs(f.jobs, f.approval, f.report);
+        await f.admit();
+      }
+      for (const offset of [1000, 1001]) {
+        f.report.completedAt = new Date(end + offset).toISOString();
+        f.repack();
+        assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
+        await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+      }
+      f.report.completedAt = new Date(end + 999).toISOString();
+      f.repack();
+      for (const offset of [0, 223, 999, 1000]) {
+        const report = structuredClone(f.report);
+        report.producerEvidence.receipts.at(-1).record.native.completedAt = new Date(end + offset).toISOString();
+        if (offset < 1000) validateCollectionJobs(f.jobs, f.approval, report);
+        else assert.throws(() => validateCollectionJobs(f.jobs, f.approval, report));
+      }
+      const early = structuredClone(f.report);
+      early.producerEvidence.receipts[0].record.native.startedAt =
+        new Date(Date.parse(collect.started_at) - 1).toISOString();
+      assert.throws(() => validateCollectionJobs(f.jobs, f.approval, early));
+      for (const preciseOffset of [0, 223]) {
+        collect.completed_at = new Date(end + preciseOffset).toISOString();
+        for (const offset of [preciseOffset, preciseOffset + 1]) {
+          f.report.completedAt = new Date(end + offset).toISOString();
+          f.repack();
+          if (offset === preciseOffset) {
+            validateCollectionJobs(f.jobs, f.approval, f.report);
+            await f.admit();
+          } else {
+            assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
+            await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+          }
+        }
+      }
+    });
+  }
 });
 
 test('collection action and strict topology remain separate from preparation, signing and publication', async t => {

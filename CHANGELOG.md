@@ -17,6 +17,8 @@ Target release: **2.0.2**. This candidate has not yet been published.
   reverting directory, file, Git, or remote dependency restrictions to npm defaults.
 - Resolve native directory watcher paths in publication and compatibility test helpers,
   avoiding Windows short-path watcher crashes without changing the selected files.
+- Restore the legacy publisher's skipped-matrix job and whole-second timestamp handling
+  in reusable secret-collection admission, preserving source and execution checks.
 
 ### Changed
 
