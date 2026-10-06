@@ -9,14 +9,38 @@ const NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const ADVISORY = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,199}$/;
 
-export const UI_BUILD_RISK_REVIEW = Object.freeze({
-  id: 'GHSA-vfj7-8cjw-p6xm', cve: 'CVE-2026-93687', package: 'braces', version: '3.0.3',
-  release: '2.0.2', phase: 'source', scope: 'producer-ui',
-  lockSha256: 'b88a73a6212e26f4c4dde985d84eadf39870c8758e4698cdd5544b8a55eb8cca',
-  reviewedBy: 'girishkvs', approvedOn: '2026-10-05',
-  notBefore: '2026-10-05T15:00:00Z', expiresAt: '2026-10-12T00:00:00Z',
-  reason: 'Short-lived build-only risk acceptance for trusted producer patterns; not a patch or an advisory-free result.',
-  nativeReportSha256: 'fdf9aa05f1b9fbb49855b71055e746cddc375cf3c2f1506dfe1ff57ad63acb05',
+export const PRODUCER_RISK_REVIEW = Object.freeze({
+  release: '2.0.2', phase: 'source', scope: 'producer-root-and-ui',
+  reviewedBy: 'girishkvs', approvedOn: '2026-10-06',
+  notBefore: '2026-10-06T15:33:00Z', expiresAt: '2026-10-12T00:00:00Z',
+  reason: 'Temporary acceptance of exact existing CLI-runtime and UI-build findings for the 2.0.2 documentation release; remediation deferred, not advisory-free.',
+  locks: Object.freeze({
+    'producer-root': '62f92175cd124818678166381c0acd0376cb9dedb2278d39eb4e4033368e2500',
+    'producer-ui': 'b88a73a6212e26f4c4dde985d84eadf39870c8758e4698cdd5544b8a55eb8cca',
+  }),
+  advisories: Object.freeze([
+    Object.freeze({ scope: 'producer-root', exposure: 'cli-runtime', package: 'smol-toml',
+      version: '1.8.0', id: 'GHSA-r4xh-jqrq-34v2' }),
+    Object.freeze({ scope: 'producer-ui', exposure: 'ui-build', package: 'braces',
+      version: '3.0.3', id: 'GHSA-vfj7-8cjw-p6xm' }),
+    Object.freeze({ scope: 'producer-ui', exposure: 'ui-build', package: 'postcss-selector-parser',
+      version: '6.1.4', id: 'GHSA-rj75-hqrm-r3gf' }),
+    Object.freeze({ scope: 'producer-ui', exposure: 'ui-build', package: 'source-map-js',
+      version: '1.2.1', id: 'GHSA-68fv-2mgg-jv7q' }),
+  ]),
+  nativeReports: Object.freeze({
+    'producer-root': Object.freeze({
+      sha256: '93a12f5109ca8488a8e80f8287a0961cb06f2b9c57122d81a93645c4a9e2159f',
+      counts: Object.freeze({ info: 0, low: 0, moderate: 1, high: 0, critical: 0, total: 1 }),
+      affectedAncestors: Object.freeze(['smol-toml']),
+    }),
+    'producer-ui': Object.freeze({
+      sha256: '8320a09dc8d1831eb7054034d5148137fb2af784b02716eecc0db860eea826cf',
+      counts: Object.freeze({ info: 0, low: 0, moderate: 2, high: 6, critical: 0, total: 8 }),
+      affectedAncestors: Object.freeze(['braces', 'chokidar', 'fast-glob', 'micromatch',
+        'postcss-nested', 'postcss-selector-parser', 'source-map-js', 'tailwindcss']),
+    }),
+  }),
 });
 
 export function canonicalAdvisoryJson(value) {
@@ -27,12 +51,12 @@ export function canonicalAdvisoryJson(value) {
   return value;
 }
 
-export function validateUiRiskEvidence(value, now = Date.now()) {
-  const expected = { disposition: 'RISK-ACCEPTED', ...UI_BUILD_RISK_REVIEW,
-    reviewRecordSha256: sha256(JSON.stringify(UI_BUILD_RISK_REVIEW)), advisoryFree: false };
+export function validateProducerRiskEvidence(value, now = Date.now()) {
+  const expected = { disposition: 'RISK-ACCEPTED', ...PRODUCER_RISK_REVIEW,
+    reviewRecordSha256: sha256(JSON.stringify(PRODUCER_RISK_REVIEW)), advisoryFree: false };
   requireCondition(JSON.stringify(canonicalAdvisoryJson(value)) === JSON.stringify(canonicalAdvisoryJson(expected)) &&
     Number.isFinite(now) && now >= Date.parse(expected.notBefore) && now < Date.parse(expected.expiresAt),
-  'ui-risk-evidence-invalid-or-expired');
+  'producer-risk-evidence-invalid-or-expired');
   return value;
 }
 
@@ -63,16 +87,17 @@ function validateNativeAdvisories(audits, now) {
         rawCounts: counts, rawFindingCount: 0 }, 'producer-native-clean-contradiction');
       continue;
     }
-    requireCondition(audit.scope === 'producer-ui', 'producer-native-risk-scope');
-    validateUiRiskEvidence(audit.acceptance, now);
+    const reviewed = PRODUCER_RISK_REVIEW.nativeReports[audit.scope];
+    requireCondition(Boolean(reviewed), 'producer-native-risk-scope');
+    validateProducerRiskEvidence(audit.acceptance, now);
     requireCondition(/^[a-f0-9]{64}$/.test(audit.reportSha256 ?? ''), 'producer-native-report-digest');
     requireCondition(Array.isArray(audit.affectedAncestors), 'producer-native-ancestors');
-    sameAdvisory([...audit.affectedAncestors].sort(),
-      ['braces', 'chokidar', 'fast-glob', 'micromatch', 'tailwindcss'], 'producer-native-ancestors');
-    sameAdvisory(audit, { scope: 'producer-ui', disposition: 'RISK-ACCEPTED', advisoryFree: false,
-      rawExitCode: 1, rawCounts: { ...counts, high: 5, total: 5 }, rawFindingCount: 5, rawAdvisoryCount: 1,
+    sameAdvisory([...audit.affectedAncestors].sort(), reviewed.affectedAncestors, 'producer-native-ancestors');
+    sameAdvisory(audit, { scope: audit.scope, disposition: 'RISK-ACCEPTED', advisoryFree: false,
+      rawExitCode: 1, rawCounts: reviewed.counts, rawFindingCount: reviewed.counts.total,
+      rawAdvisoryCount: PRODUCER_RISK_REVIEW.advisories.filter(item => item.scope === audit.scope).length,
       affectedAncestors: audit.affectedAncestors, reportSha256: audit.reportSha256,
-      canonicalReportSha256: UI_BUILD_RISK_REVIEW.nativeReportSha256, acceptance: audit.acceptance },
+      canonicalReportSha256: reviewed.sha256, acceptance: audit.acceptance },
     'producer-native-risk-contradiction');
     risk = true;
   }
@@ -81,7 +106,7 @@ function validateNativeAdvisories(audits, now) {
 
 // A continuation validates retained records; it never reconstructs missing acceptance.
 export function validateProducerAdvisories(gate, { source, checks, version, complete = false, now = Date.now() } = {}) {
-  const required = complete && version === UI_BUILD_RISK_REVIEW.release;
+  const required = complete && version === PRODUCER_RISK_REVIEW.release;
   if (!required &&
       !hasProducerAdvisoryEvidence(gate) &&
       !hasProducerAdvisoryEvidence(checks)) return false;
@@ -111,18 +136,24 @@ export function validateProducerAdvisories(gate, { source, checks, version, comp
   }
   const osvRisk = osv.findings.length > 0;
   if (osvRisk) {
-    requireCondition(osv.findings.length === 1 && osv.advisoryFree === false, 'producer-osv-risk-count');
-    validateUiRiskEvidence(osv.riskAcceptance, now);
-    const finding = osv.findings[0];
-    validateUiRiskEvidence(finding.riskAcceptance, now);
-    requireCondition(finding.name === UI_BUILD_RISK_REVIEW.package &&
-      finding.version === UI_BUILD_RISK_REVIEW.version && finding.id === UI_BUILD_RISK_REVIEW.id &&
-      finding.status === 'reviewed-exemption' && Number.isFinite(Date.parse(finding.modified)),
-    'producer-osv-risk-finding');
-    sameAdvisory(finding, { name: UI_BUILD_RISK_REVIEW.package, version: UI_BUILD_RISK_REVIEW.version,
-      id: UI_BUILD_RISK_REVIEW.id, modified: finding.modified, status: 'reviewed-exemption',
-      riskAcceptance: finding.riskAcceptance }, 'producer-osv-ambiguous-finding');
-    requireCondition(osv.scope[1].lockSha256 === UI_BUILD_RISK_REVIEW.lockSha256, 'producer-osv-risk-lock');
+    requireCondition(osv.findings.length <= PRODUCER_RISK_REVIEW.advisories.length &&
+      osv.advisoryFree === false, 'producer-osv-risk-count');
+    validateProducerRiskEvidence(osv.riskAcceptance, now);
+    const seen = new Set();
+    for (const finding of osv.findings) {
+      validateProducerRiskEvidence(finding.riskAcceptance, now);
+      const reviewed = PRODUCER_RISK_REVIEW.advisories.find(item =>
+        finding.name === item.package && finding.version === item.version && finding.id === item.id);
+      requireCondition(reviewed && !seen.has(finding.id) &&
+        finding.status === 'reviewed-exemption' && Number.isFinite(Date.parse(finding.modified)),
+      'producer-osv-risk-finding');
+      seen.add(finding.id);
+      sameAdvisory(finding, { name: reviewed.package, version: reviewed.version,
+        id: reviewed.id, modified: finding.modified, status: 'reviewed-exemption',
+        riskAcceptance: finding.riskAcceptance }, 'producer-osv-ambiguous-finding');
+    }
+    sameAdvisory(osv.scope.map(item => item.lockSha256),
+      Object.values(PRODUCER_RISK_REVIEW.locks), 'producer-osv-risk-lock');
   } else {
     requireCondition(!Object.hasOwn(osv, 'riskAcceptance') &&
       osv.advisoryFree !== false, 'producer-osv-clean-contradiction');
@@ -132,17 +163,21 @@ export function validateProducerAdvisories(gate, { source, checks, version, comp
       Object.hasOwn(gate, 'nativeAudits')) {
     nativeRisk = validateNativeAdvisories(gate.nativeAudits, now);
     const exits = gate.evidence.filter(item => Object.hasOwn(item, 'exitCode'));
+    const riskAudits = gate.nativeAudits.filter(item => item.rawExitCode === 1);
     requireCondition(exits.every(item => [0, 1].includes(item.exitCode)) &&
-      exits.filter(item => item.exitCode === 1).length === (nativeRisk ? 1 : 0), 'producer-native-exit-evidence');
-    for (const item of exits.filter(item => item.exitCode === 1)) {
-      requireCondition(item.stdoutSha256 === gate.nativeAudits[1].reportSha256, 'producer-native-stdout-binding');
+      exits.filter(item => item.exitCode === 1).length === riskAudits.length, 'producer-native-exit-evidence');
+    requireCondition(new Set(riskAudits.map(item => item.reportSha256)).size === riskAudits.length,
+      'producer-native-stdout-binding');
+    for (const audit of riskAudits) {
+      requireCondition(exits.filter(item => item.exitCode === 1 &&
+        item.stdoutSha256 === audit.reportSha256).length === 1, 'producer-native-stdout-binding');
     }
   }
   const risk = osvRisk || nativeRisk;
   requireCondition(gate.rawFindingCount === osv.rawFindingCount && gate.remainingFindings === 0 &&
     gate.advisoryFree === !risk && gate.disposition === (risk ? 'RISK-ACCEPTED' : 'advisory-free'),
   'producer-advisory-disposition-contradiction');
-  if (risk) validateUiRiskEvidence(gate.riskAcceptance, now);
+  if (risk) validateProducerRiskEvidence(gate.riskAcceptance, now);
   else requireCondition(!Object.hasOwn(gate, 'riskAcceptance'), 'producer-clean-acceptance-contradiction');
   if (complete) {
     requireCondition(source?.version === version && /^[a-f0-9]{40}$/.test(source.commit ?? ''),
@@ -151,8 +186,9 @@ export function validateProducerAdvisories(gate, { source, checks, version, comp
     sameAdvisory(osv.scope.map(item => item.lockSha256), [source.rootLockSha256, source.uiLockSha256],
       'producer-source-lock-binding');
     if (risk) {
-      requireCondition(version === UI_BUILD_RISK_REVIEW.release &&
-        source.uiLockSha256 === UI_BUILD_RISK_REVIEW.lockSha256, 'producer-risk-source-binding');
+      requireCondition(version === PRODUCER_RISK_REVIEW.release, 'producer-risk-source-binding');
+      sameAdvisory([source.rootLockSha256, source.uiLockSha256],
+        Object.values(PRODUCER_RISK_REVIEW.locks), 'producer-risk-source-binding');
     }
   }
   return risk;
@@ -164,36 +200,41 @@ export function requireBuildOnlyRiskScope(rootLockBytes, bundleManifestBytes) {
   requireCondition(root.packages && bundle.schemaVersion === 1 &&
     Array.isArray(bundle.packages) && Array.isArray(bundle.runtimeNotices) &&
     Array.isArray(bundle.sources), 'ui-risk-runtime-evidence-missing');
-  const affected = UI_BUILD_RISK_REVIEW.package;
-  requireCondition(!Object.entries(root.packages).some(([path, item]) =>
-    path && (item.name ?? path.split('node_modules/').at(-1)) === affected),
-  'ui-risk-package-in-root-runtime');
-  requireCondition(![...bundle.packages, ...bundle.runtimeNotices].some(item => item.name === affected) &&
-    !bundle.sources.some(item => item.path?.includes(`node_modules/${affected}/`)), 'ui-risk-package-bundled');
+  for (const { package: affected } of PRODUCER_RISK_REVIEW.advisories.filter(item => item.exposure === 'ui-build')) {
+    requireCondition(!Object.entries(root.packages).some(([path, item]) =>
+      path && (item.name ?? path.split('node_modules/').at(-1)) === affected),
+    'ui-risk-package-in-root-runtime');
+    requireCondition(![...bundle.packages, ...bundle.runtimeNotices].some(item => item.name === affected) &&
+      !bundle.sources.some(item => item.path?.includes(`node_modules/${affected}/`)), 'ui-risk-package-bundled');
+  }
   return { rootLockSha256: sha256(rootLockBytes), bundleManifestSha256: sha256(bundleManifestBytes),
     affectedPackageAbsentFromRuntimeAndBundle: true };
 }
 
-export function uiBuildRiskAcceptance(context, now = Date.now(), review = UI_BUILD_RISK_REVIEW) {
+export function producerRiskAcceptance(context, now = Date.now(), review = PRODUCER_RISK_REVIEW) {
   if (!review ||
-      JSON.stringify(review) !== JSON.stringify(UI_BUILD_RISK_REVIEW) ||
+      JSON.stringify(review) !== JSON.stringify(PRODUCER_RISK_REVIEW) ||
       !Number.isFinite(now) ||
       now < Date.parse(review.notBefore) ||
       now >= Date.parse(review.expiresAt) ||
       context?.phase !== review.phase ||
       context.version !== review.release ||
-      context.scope !== review.scope ||
-      context.lockSha256 !== review.lockSha256 ||
+      !Object.hasOwn(review.locks, context.scope) ||
+      context.lockSha256 !== review.locks[context.scope] ||
       !Buffer.isBuffer(context.lockBytes) ||
-      sha256(context.lockBytes) !== review.lockSha256) return null;
+      sha256(context.lockBytes) !== review.locks[context.scope]) return null;
   const lock = JSON.parse(context.lockBytes);
-  const chain = { braces: '3.0.3', chokidar: '3.6.0', micromatch: '4.0.8', 'fast-glob': '3.3.3', tailwindcss: '3.4.19' };
+  const chain = context.scope === 'producer-root' ? { 'smol-toml': '1.8.0' } : {
+    braces: '3.0.3', chokidar: '3.6.0', micromatch: '4.0.8', 'fast-glob': '3.3.3', tailwindcss: '3.4.19',
+    'postcss-nested': '6.2.0', 'postcss-selector-parser': '6.1.4', 'source-map-js': '1.2.1',
+  };
   requireCondition(lock.lockfileVersion === 3 && lock.packages[''].version === review.release,
-    'ui-risk-lock-schema');
+    'producer-risk-lock-schema');
   for (const [name, version] of Object.entries(chain)) {
     const entry = lock.packages[`node_modules/${name}`];
-    requireCondition(entry?.version === version && entry.dev === true && !entry.link,
-      'ui-risk-not-exact-build-only-chain');
+    requireCondition(entry?.version === version && !entry.link &&
+      (context.scope === 'producer-ui' ? entry.dev === true : entry.dev !== true),
+    'producer-risk-not-exact-chain');
   }
   return { disposition: 'RISK-ACCEPTED', ...review,
     reviewRecordSha256: sha256(JSON.stringify(review)), advisoryFree: false };
@@ -221,13 +262,15 @@ export function classifyNativeAudit(output, execution = { exitCode: 0 }, context
     requireCondition(execution.exitCode === 0 && counts.total === 0, 'native-audit-clean-exit-mismatch');
     return { disposition: 'advisory-free', rawExitCode: 0, rawCounts: counts, rawFindingCount: 0 };
   }
-  const acceptance = uiBuildRiskAcceptance(context, now);
+  const acceptance = producerRiskAcceptance(context, now);
   requireCondition(acceptance && execution.exitCode === 1 && (execution.stderr ?? '') === '',
     'Producer advisory findings remain unresolved');
   const fingerprint = sha256(JSON.stringify(canonicalAdvisoryJson(report)));
-  requireCondition(fingerprint === acceptance.nativeReportSha256, 'native-audit-not-exact-reviewed-finding-report');
+  requireCondition(fingerprint === acceptance.nativeReports[context.scope].sha256,
+    'native-audit-not-exact-reviewed-finding-report');
   return { disposition: 'RISK-ACCEPTED', advisoryFree: false, rawExitCode: execution.exitCode,
-    rawCounts: counts, rawFindingCount: findings.length, rawAdvisoryCount: 1,
+    rawCounts: counts, rawFindingCount: findings.length,
+    rawAdvisoryCount: acceptance.advisories.filter(item => item.scope === context.scope).length,
     affectedAncestors: findings, reportSha256: sha256(output), canonicalReportSha256: fingerprint, acceptance };
 }
 
@@ -429,7 +472,7 @@ export async function scanAdvisories({
     const graphs = [];
     const unique = new Map();
     const coordinateScopes = new Map();
-    let uiInput;
+    const producerInputs = [];
     for (const lock of locks ?? []) {
       const input = await readJson(lock.path);
       const candidate = lock.scope === 'fresh-consumer' ? localArtifact : undefined;
@@ -444,7 +487,9 @@ export async function scanAdvisories({
         const key = `${item.name}@${item.version}`;
         coordinateScopes.set(key, [...(coordinateScopes.get(key) ?? []), lock.scope]);
       }
-      if (lock.scope === 'producer-ui') uiInput = { path: lock.path, sha256: input.sha256 };
+      if (lock.scope.startsWith('producer-')) producerInputs.push({
+        ...producerContext, scope: lock.scope, lockSha256: input.sha256, lockBytes: await readFile(lock.path),
+      });
     }
     const lanes = new Set();
     for (const consumer of consumers ?? []) {
@@ -471,9 +516,10 @@ export async function scanAdvisories({
     const packages = [...unique.values()];
     const findings = [];
     const evidence = [];
-    const riskContext = producerContext && uiInput ? { ...producerContext,
-      lockSha256: uiInput.sha256, lockBytes: await readFile(uiInput.path) } : null;
-    const risk = uiBuildRiskAcceptance(riskContext);
+    const reviewedProducer = producerContext?.scope === 'producer-root-and-ui' &&
+      producerInputs.length === 2 &&
+      producerInputs.every(context => producerRiskAcceptance(context));
+    const risk = reviewedProducer ? producerRiskAcceptance(producerInputs[0]) : null;
     // Cache/deduplication is deliberately scoped to this invocation; every new run queries OSV again.
     for (let offset = 0; offset < packages.length; offset += BATCH_SIZE) {
       const batch = packages.slice(offset, offset + BATCH_SIZE);
@@ -501,8 +547,9 @@ export async function scanAdvisories({
           const item = batch[index];
           const exempted = exemptions.has(`${vulnerability.id}\0${item.name}\0${item.version}`);
           const scopes = coordinateScopes.get(`${item.name}@${item.version}`);
-          const scoped = risk && scopes?.length === 1 && scopes[0] === risk.scope &&
-            item.name === risk.package && item.version === risk.version && vulnerability.id === risk.id;
+          const scoped = risk && scopes?.length === 1 && risk.advisories.some(reviewed =>
+            scopes[0] === reviewed.scope && item.name === reviewed.package &&
+            item.version === reviewed.version && vulnerability.id === reviewed.id);
           findings.push({ ...item, ...vulnerability, status: exempted || scoped ? 'reviewed-exemption' : 'blocked',
             ...(scoped ? { riskAcceptance: risk } : {}) });
         }
@@ -514,7 +561,8 @@ export async function scanAdvisories({
     }
     requireCondition(JSON.stringify(producerContext) === contextBefore, 'advisory-release-context-changed');
     if (findings.some(item => item.riskAcceptance)) {
-      requireCondition(Boolean(uiBuildRiskAcceptance(riskContext)), 'ui-risk-expired-during-query');
+      requireCondition(producerInputs.every(context => producerRiskAcceptance(context)),
+        'producer-risk-expired-during-query');
     }
     return { status: findings.some(item => item.status === 'blocked') ? 'findings' : 'passed',
       datasource: ENDPOINT, cache: 'this-run-only',

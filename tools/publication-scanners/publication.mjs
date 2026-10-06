@@ -214,7 +214,7 @@ export async function scanPublicationRequest({
       const advisory = await scanAdvisories({
         ...input, publicPackages, publicPackagesPath, exemptionsPath, fetchImpl,
         ...(request.phase === 'source' ? { producerContext: {
-          phase: request.phase, version: request.version, scope: 'producer-ui',
+          phase: request.phase, version: request.version, scope: 'producer-root-and-ui',
         } } : {}),
       });
       scannerDetails.advisories = advisory;

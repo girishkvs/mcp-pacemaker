@@ -6,7 +6,7 @@ import { GateRunner, gateOptions, passed, readJson, ROOT } from './gates.mjs';
 import { POLICY } from './policy.mjs';
 import { validateLocalApproval } from './local-regression.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
-import { classifyNativeAudit, uiBuildRiskAcceptance, requireBuildOnlyRiskScope, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
+import { classifyNativeAudit, producerRiskAcceptance, requireBuildOnlyRiskScope, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export function validateAudit(output, context, execution) {
   return classifyNativeAudit(output, execution, context);
@@ -55,7 +55,7 @@ export function runSourceChecks(runner) {
   const external = runner.external('source', source);
   assert.deepEqual(runner.snapshot(), source, 'Source, generated files or producer locks changed during gates');
   for (const context of acceptedContexts) {
-    assert.ok(uiBuildRiskAcceptance(context), 'Producer UI risk acceptance expired before source completion');
+    assert.ok(producerRiskAcceptance(context), 'Producer risk acceptance expired before source completion');
   }
   const riskApplied = acceptedContexts.length > 0 || Boolean(external.gates['producer-advisories'].riskAcceptance);
   const buildOnlyEvidence = riskApplied ? requireBuildOnlyRiskScope(
@@ -69,7 +69,7 @@ export function runSourceChecks(runner) {
     producerGate.disposition = riskApplied ? 'RISK-ACCEPTED' : 'advisory-free';
     producerGate.advisoryFree = !riskApplied;
     if (!producerGate.riskAcceptance &&
-        acceptedContexts.length > 0) producerGate.riskAcceptance = auditDetails[1].acceptance;
+        acceptedContexts.length > 0) producerGate.riskAcceptance = auditDetails.find(item => item.acceptance).acceptance;
   }
   const report = {
     schemaVersion: 1, phase: 'source', source,

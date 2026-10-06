@@ -7,7 +7,7 @@ replace the genuine hosted publication evidence. A successful report always says
 
 The controller inventory also binds the native-audit/source-gate and OSV
 adapter/evaluator files. The temporary
-[2.0.2 producer-UI risk review](npm-publishing.md#temporary-202-producer-ui-risk-acceptance)
+[2.0.2 CLI-runtime and UI-build risk review](npm-publishing.md#temporary-202-producer-risk-acceptance)
 does not waive local qualification or authenticate it. Its raw findings and expiry
 remain explicit; old controller evidence is invalid after these source changes.
 The immutable 1.3.1 stage-proof contract and its original member pins are unchanged.

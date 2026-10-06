@@ -4,28 +4,59 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { UI_BUILD_RISK_REVIEW, uiBuildRiskAcceptance, classifyNativeAudit, scanAdvisories, requireBuildOnlyRiskScope } from '../../tools/publication-scanners/advisories.mjs';
+import { PRODUCER_RISK_REVIEW, producerRiskAcceptance, classifyNativeAudit, scanAdvisories, requireBuildOnlyRiskScope } from '../../tools/publication-scanners/advisories.mjs';
 import { digest, validateGateStatus, validateGates, REQUIRED_GATES } from '../../tools/npm-publication/policy.mjs';
 import { LOCAL_CONTROLLER, validateLocalManifest, validatePreparedLocal, localHash } from '../../tools/npm-publication/local-regression.mjs';
 import { syntheticLocalApproval, syntheticLocalReview } from './local-regression-fixture.mjs';
 
-const raw = readFileSync(new URL('../fixtures/npm-ui-braces-audit.json', import.meta.url), 'utf8');
+const raw = readFileSync(new URL('../fixtures/npm-ui-202-risk-audit.json', import.meta.url), 'utf8');
+const rootRaw = readFileSync(new URL('../fixtures/npm-root-202-risk-audit.json', import.meta.url), 'utf8');
 const lockBytes = readFileSync(new URL('../fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
-const review = UI_BUILD_RISK_REVIEW;
-const time = Date.parse('2026-10-06T00:00:00Z');
-const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui', lockSha256: review.lockSha256, lockBytes };
+const rootLockBytes = readFileSync(new URL('../../package-lock.json', import.meta.url));
+const review = PRODUCER_RISK_REVIEW;
+const time = Date.parse(review.notBefore) + 60_000;
+const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui',
+  lockSha256: review.locks['producer-ui'], lockBytes };
+const rootContext = { ...context, scope: 'producer-root',
+  lockSha256: review.locks['producer-root'], lockBytes: rootLockBytes };
 const execution = { exitCode: 1, signal: null, error: null };
 
-test('Exact native finding report preserves exit1/five high entries and is never called clean', () => {
+test('Exact native UI report preserves exit1/eight affected nodes and is never called clean', () => {
   assert.throws(() => classifyNativeAudit(raw, execution, undefined, time));
   const result = classifyNativeAudit(raw, execution, context, time);
   assert.equal(result.disposition, 'RISK-ACCEPTED');
   assert.equal(result.advisoryFree, false);
   assert.equal(result.rawExitCode, 1);
-  assert.equal(result.rawFindingCount, 5);
-  assert.equal(result.rawAdvisoryCount, 1);
-  assert.equal(result.rawCounts.high, 5);
+  assert.equal(result.rawFindingCount, 8);
+  assert.equal(result.rawAdvisoryCount, 3);
+  assert.equal(result.rawCounts.high, 6);
+  assert.equal(result.rawCounts.moderate, 2);
   assert.equal(result.acceptance.reviewRecordSha256, digest(Buffer.from(JSON.stringify(review))).sha256);
+});
+
+test('Exact root audit records CLI-runtime exposure separately from build-only findings', () => {
+  const result = classifyNativeAudit(rootRaw, execution, rootContext, time);
+  assert.equal(result.rawFindingCount, 1);
+  assert.equal(result.rawAdvisoryCount, 1);
+  assert.equal(result.rawCounts.moderate, 1);
+  assert.equal(result.acceptance.advisories.find(item => item.package === 'smol-toml').exposure, 'cli-runtime');
+  assert.equal(result.canonicalReportSha256, review.nativeReports['producer-root'].sha256);
+  assert.equal(result.advisoryFree, false);
+  assert.throws(() => classifyNativeAudit(rootRaw, execution, context, time));
+  assert.throws(() => classifyNativeAudit(raw, execution, rootContext, time));
+  assert.throws(() => classifyNativeAudit(rootRaw, execution, { ...rootContext, scope: 'fresh-consumer' }, time));
+  for (const change of [
+    value => { value.vulnerabilities['smol-toml'].via[0].source++; },
+    value => { value.vulnerabilities['smol-toml'].via[0].range = '<2'; },
+    value => { value.vulnerabilities['smol-toml'].nodes.push('node_modules/other/smol-toml'); },
+    value => { value.metadata.dependencies.total++; },
+  ]) {
+    const changed = JSON.parse(rootRaw);
+    change(changed);
+    assert.throws(() => classifyNativeAudit(JSON.stringify(changed), execution, rootContext, time));
+  }
+  const oldUi = readFileSync(new URL('../fixtures/npm-ui-braces-audit.json', import.meta.url), 'utf8');
+  assert.throws(() => classifyNativeAudit(oldUi, execution, context, time));
 });
 
 for (const [name, value] of [['version', '2.0.1'], ['version', '2.0.3'], ['version', '1.3.1'],
@@ -37,14 +68,16 @@ for (const [name, value] of [['version', '2.0.1'], ['version', '2.0.3'], ['versi
 }
 
 test('Exact review not-before/expiry, missing/malformed record and clean unrelated releases', () => {
-  assert.equal(review.approvedOn, '2026-10-05');
+  assert.equal(review.approvedOn, '2026-10-06');
+  assert.equal(review.expiresAt, '2026-10-12T00:00:00Z');
   assert.equal(Object.hasOwn(review, 'approvedAt'), false);
   for (const now of [Date.parse(review.notBefore) - 1, Date.parse(review.expiresAt), Date.parse(review.expiresAt) + 1]) {
     assert.throws(() => classifyNativeAudit(raw, execution, context, now));
   }
-  assert.ok(uiBuildRiskAcceptance(context, Date.parse(review.notBefore)));
-  assert.equal(uiBuildRiskAcceptance(context, time, null), null);
-  assert.equal(uiBuildRiskAcceptance(context, time, { ...review, id: 'other' }), null);
+  assert.ok(producerRiskAcceptance(context, Date.parse(review.notBefore)));
+  assert.ok(producerRiskAcceptance(rootContext, Date.parse(review.notBefore)));
+  assert.equal(producerRiskAcceptance(context, time, null), null);
+  assert.equal(producerRiskAcceptance(context, time, { ...review, scope: 'other' }), null);
   const clean = { auditReportVersion: 2, vulnerabilities: {},
     metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } };
   assert.equal(classifyNativeAudit(JSON.stringify(clean), { exitCode: 0 },
@@ -64,18 +97,22 @@ test('Later gate/manifest admission still rejects expired or repurposed source r
   validateGateStatus('producer-advisories', { status: 'passed' });
 });
 
-test('Build-only review cannot cover a root runtime or bundled braces package', () => {
-  const root = { packages: { '': {} } };
+test('Build-only findings cannot be relabelled as CLI runtime or bundled UI packages', () => {
+  const root = { packages: { '': {}, 'node_modules/smol-toml': { version: '1.8.0' } } };
   const bundle = { schemaVersion: 1, packages: [], runtimeNotices: [], sources: [] };
   const bytes = value => Buffer.from(JSON.stringify(value));
   requireBuildOnlyRiskScope(bytes(root), bytes(bundle));
-  for (const field of ['packages', 'runtimeNotices']) {
+  for (const item of review.advisories.filter(item => item.exposure === 'ui-build')) {
+    for (const field of ['packages', 'runtimeNotices']) {
+      assert.throws(() => requireBuildOnlyRiskScope(bytes(root),
+        bytes({ ...bundle, [field]: [{ name: item.package, version: item.version }] })));
+    }
+    assert.throws(() => requireBuildOnlyRiskScope(bytes({
+      packages: { ...root.packages, [`node_modules/${item.package}`]: { version: item.version } },
+    }), bytes(bundle)));
     assert.throws(() => requireBuildOnlyRiskScope(bytes(root),
-      bytes({ ...bundle, [field]: [{ name: 'braces', version: '3.0.3' }] })));
+      bytes({ ...bundle, sources: [{ path: `node_modules/${item.package}/index.js` }] })));
   }
-  assert.throws(() => requireBuildOnlyRiskScope(bytes({ packages: { 'node_modules/braces': { version: '3.0.3' } } }), bytes(bundle)));
-  assert.throws(() => requireBuildOnlyRiskScope(bytes(root),
-    bytes({ ...bundle, sources: [{ path: 'node_modules/braces/index.js' }] })));
 });
 
 test('Existing manifest reader rechecks risk release/lock/expiry without creating owner approval', async t => {
@@ -134,25 +171,27 @@ class OsvFixture {
     t.after(() => rmSync(directory, { recursive: true }));
     const rootPath = join(directory, 'root.json');
     const uiPath = join(directory, 'ui.json');
-    const root = { lockfileVersion: 3, packages: { '': { version: '2.0.2' },
-      'node_modules/picocolors': { version: '1.1.1', resolved: 'https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz' } } };
-    writeFileSync(rootPath, JSON.stringify(root));
+    const root = JSON.parse(rootLockBytes);
+    writeFileSync(rootPath, rootLockBytes);
     writeFileSync(uiPath, lockBytes);
-    const publicPackages = [...new Set(['picocolors', ...Object.keys(JSON.parse(lockBytes).packages)
-      .filter(Boolean).map(path => path.split('node_modules/').at(-1))])];
+    const publicPackages = [...new Set([root, JSON.parse(lockBytes)].flatMap(lock =>
+      Object.entries(lock.packages).filter(([path]) => path).map(([path, entry]) =>
+        entry.name ?? path.split('node_modules/').at(-1))))];
     t.mock.method(Date, 'now', () => time);
     return { directory, rootPath, uiPath, root, options: {
       locks: [{ path: rootPath, scope: 'producer-root' }, { path: uiPath, scope: 'producer-ui' }],
-      publicPackages, producerContext: { phase: 'source', version: '2.0.2', scope: 'producer-ui' },
+      publicPackages, producerContext: { phase: 'source', version: '2.0.2', scope: 'producer-root-and-ui' },
     } };
   }
   fetch(extra = false, callback = () => {}) {
     return async (_url, options) => {
       callback();
       const queries = JSON.parse(options.body).queries;
-      return new Response(JSON.stringify({ results: queries.map(query => ({ vulns: query.package.name === 'braces'
-        ? [{ id: review.id, modified: '2026-10-02T22:45:04.328737Z' },
-          ...(extra ? [{ id: 'GHSA-new-new-new', modified: '2026-10-05T00:00:00Z' }] : [])] : [] })) }),
+      return new Response(JSON.stringify({ results: queries.map(query => ({ vulns:
+        review.advisories.filter(item => item.package === query.package.name && item.version === query.version)
+          .flatMap(item => [{ id: item.id, modified: '2026-10-06T00:00:08.430664Z' },
+            ...(extra ? [{ id: 'GHSA-new-new-new', modified: '2026-10-06T00:00:00Z' }] : [])]),
+      })) }),
       { headers: { 'Content-Type': 'application/json' } });
     };
   }
@@ -167,7 +206,8 @@ class OsvFixture {
       const osv = await scanAdvisories({ ...f.options, fetchImpl });
       const zero = classifyNativeAudit(JSON.stringify({ auditReportVersion: 2, vulnerabilities: {},
         metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } }));
-      const nativeAudits = [{ scope: 'producer-root', ...zero }, { scope: 'producer-ui',
+      const nativeAudits = [{ scope: 'producer-root',
+        ...(clean ? zero : classifyNativeAudit(rootRaw, execution, rootContext, time)) }, { scope: 'producer-ui',
         ...(clean ? zero : classifyNativeAudit(raw, execution, context, time)) }];
       this.clock = clock;
       Date.now.mock.mockImplementation(() => this.clock);
@@ -175,15 +215,16 @@ class OsvFixture {
         tree: 'b'.repeat(40), ref: 'refs/tags/v2.0.2', tagObject: 'c'.repeat(40),
         approvedAt: new Date(this.clock).toISOString(), ownerPreflight: { privateContentReview: {} }, artifact: {} });
       const source = { version: '2.0.2', commit: this.approval.commit,
-        rootLockSha256: osv.scope[0].lockSha256, uiLockSha256: review.lockSha256 };
+        rootLockSha256: osv.scope[0].lockSha256, uiLockSha256: review.locks['producer-ui'] };
       const evidence = [{ description: 'Controlled OSV report', sha256: localHash(JSON.stringify(osv)) },
-        { description: 'Controlled root audit', sha256: '1'.repeat(64), exitCode: 0 },
+        { description: 'Controlled root audit', sha256: '1'.repeat(64), exitCode: clean ? 0 : 1,
+          ...(clean ? {} : { stdoutSha256: localHash(rootRaw) }) },
         { description: 'Controlled UI audit', sha256: '2'.repeat(64), exitCode: clean ? 0 : 1,
           ...(clean ? {} : { stdoutSha256: localHash(raw) }) }];
       const gate = { status: 'passed', evidence, nativeAudits, osv,
         rawFindingCount: osv.rawFindingCount, remainingFindings: osv.remainingFindings,
         disposition: clean ? 'advisory-free' : 'RISK-ACCEPTED', advisoryFree: clean,
-        ...(clean ? {} : { riskAcceptance: uiBuildRiskAcceptance(context, time) }) };
+        ...(clean ? {} : { riskAcceptance: producerRiskAcceptance(context, time) }) };
       const checks = { audits: structuredClone(nativeAudits) };
       this.report = { schemaVersion: 1, commit: source.commit, artifact: digest(Buffer.from('controlled artifact')),
         localRegression: this.approval.localRegression, source, sourceChecks: checks,
@@ -258,9 +299,32 @@ class OsvFixture {
     assert.throws(() => validatePreparedLocal(stripped, f.approval));
   });
 
+  for (const boundary of ['gate', 'local manifest', 'prepared manifest']) {
+    test(`Serialized ${boundary} requires one-to-one native stdout evidence`, async t => {
+      const f = await new ContinuationFixture().setup(t);
+      const changed = structuredClone(f.report);
+      const gate = changed.gates['producer-advisories'];
+      gate.nativeAudits[0].reportSha256 = gate.nativeAudits[1].reportSha256;
+      changed.sourceChecks.audits = structuredClone(gate.nativeAudits);
+      const manifest = JSON.parse(f.bytes);
+      manifest.producerAdvisories.checks = structuredClone(changed.sourceChecks);
+      manifest.producerAdvisories.gate = structuredClone(gate);
+      const bytes = Buffer.from(JSON.stringify(manifest));
+      f.approval.artifact.manifestSha256 = localHash(bytes);
+      if (boundary === 'gate') assert.throws(() => f.gateCheck(changed));
+      if (boundary === 'local manifest') assert.throws(() => validateLocalManifest(bytes, f.approval, changed));
+      if (boundary === 'prepared manifest') assert.throws(() => validatePreparedLocal(manifest, f.approval));
+    });
+  }
+
   const continuationMutations = [
     ['top acceptance removed', g => { delete g.riskAcceptance; }],
     ['native acceptance removed', g => { delete g.nativeAudits[1].acceptance; }],
+    ['root acceptance removed', g => { delete g.nativeAudits[0].acceptance; }],
+    ['root report replaced by UI report', g => { g.nativeAudits[0].canonicalReportSha256 = g.nativeAudits[1].canonicalReportSha256; }],
+    ['root raw counts hidden', g => { g.nativeAudits[0].rawCounts.moderate = 0; }],
+    ['root native digest missing', g => { delete g.evidence[1].stdoutSha256; }],
+    ['root native digest duplicated', g => { g.evidence[1].stdoutSha256 = g.evidence[2].stdoutSha256; }],
     ['both acceptances removed', g => { delete g.riskAcceptance; delete g.nativeAudits[1].acceptance; }],
     ['all classification fields removed', g => {
       for (const key of Object.keys(g)) if (!['status', 'evidence'].includes(key)) delete g[key];
@@ -282,6 +346,7 @@ class OsvFixture {
     ['source checks drift', (_g, r) => { r.sourceChecks.audits[1].rawExitCode = 0; }],
     ['source checks removed', (_g, r) => { delete r.sourceChecks; }],
     ['wrong UI lock', (_g, r) => { r.source.uiLockSha256 = '0'.repeat(64); }],
+    ['wrong root lock', (_g, r) => { r.source.rootLockSha256 = '0'.repeat(64); }],
     ['wrong release', (_g, r) => { r.source.version = '2.0.3'; }],
     ['wrong advisory', g => { g.nativeAudits[1].acceptance.id = 'GHSA-other'; }],
     ['wrong record hash', g => { g.riskAcceptance.reviewRecordSha256 = '0'.repeat(64); }],
@@ -319,22 +384,45 @@ class OsvFixture {
       assert.throws(() => f.manifestCheck(changed));
     }
   });
-test('OSV exact UI scope preserves raw finding/id/modified and raw response digest', async t => {
+test('OSV exact root and UI scopes retain all four findings and raw response evidence', async t => {
   const f = new OsvFixture().setup(t);
   const result = await scanAdvisories({ ...f.options, fetchImpl: new OsvFixture().fetch() });
   assert.equal(result.status, 'passed');
-  assert.equal(result.rawFindingCount, 1);
+  assert.equal(result.rawFindingCount, 4);
   assert.equal(result.remainingFindings, 0);
   assert.equal(result.findings[0].status, 'reviewed-exemption');
-  assert.equal(result.findings[0].modified, '2026-10-02T22:45:04.328737Z');
-  assert.equal(result.riskAcceptance.scope, 'producer-ui');
+  assert.equal(result.findings[0].modified, '2026-10-06T00:00:08.430664Z');
+  assert.equal(result.riskAcceptance.scope, 'producer-root-and-ui');
+  assert.deepEqual(result.findings.map(item => item.id).sort(), review.advisories.map(item => item.id).sort());
   assert.equal(result.advisoryFree, false);
   assert.ok(result.evidence.every(item => item.rawResponseSha256.length === 64 && item.responseBytes > 0));
 });
 
-for (const mode of ['root-too', 'consumer', 'additional', 'wrong-release', 'wrong-phase', 'no-context',
-  'changed-lock', 'drift-during-query', 'release-during-query', 'expired-during-query', 'network-error']) {
-  test(`OSV UI exception does not waive ${mode}`, async t => {
+test('Fresh consumers do not inherit the producer smol-toml runtime exception', async t => {
+  const f = new OsvFixture().setup(t);
+  const localArtifact = { name: 'mcp-pacemaker', version: '2.0.2', sha256: 'a'.repeat(64),
+    integrity: `sha512-${Buffer.alloc(64).toString('base64')}` };
+  const consumer = { ...localArtifact, node: 'v24.21.0', npm: '12.0.2', platform: 'linux',
+    installScripts: 'disabled', producerLockCopied: false, installedBin: true, bridgeAndUi: true,
+    dependencies: [
+      { name: localArtifact.name, version: localArtifact.version, integrity: localArtifact.integrity },
+      { name: 'smol-toml', version: '1.8.0', integrity: null },
+    ] };
+  const result = await scanAdvisories({ consumers: [consumer], localArtifact,
+    publicPackages: f.options.publicPackages, producerContext: f.options.producerContext,
+    fetchImpl: new OsvFixture().fetch() });
+  assert.equal(result.status, 'findings');
+  assert.equal(result.rawFindingCount, 1);
+  assert.equal(result.remainingFindings, 1);
+  assert.equal(result.findings[0].name, 'smol-toml');
+  assert.equal(result.findings[0].status, 'blocked');
+  assert.equal(result.findings[0].riskAcceptance, undefined);
+  assert.equal(result.riskAcceptance, undefined);
+});
+
+for (const mode of ['root-too', 'consumer', 'additional', 'wrong-release', 'wrong-phase', 'wrong-scope', 'no-context',
+  'changed-lock', 'changed-root-lock', 'drift-during-query', 'release-during-query', 'expired-during-query', 'network-error']) {
+  test(`Producer exception does not waive ${mode}`, async t => {
     const f = new OsvFixture().setup(t);
     if (mode === 'root-too') {
       f.root.packages['node_modules/braces'] = JSON.parse(lockBytes).packages['node_modules/braces'];
@@ -343,8 +431,10 @@ for (const mode of ['root-too', 'consumer', 'additional', 'wrong-release', 'wron
     if (mode === 'consumer') f.options.locks = [{ path: f.uiPath, scope: 'fresh-consumer' }];
     if (mode === 'wrong-release') f.options.producerContext.version = '2.0.3';
     if (mode === 'wrong-phase') f.options.producerContext.phase = 'artifact';
+    if (mode === 'wrong-scope') f.options.producerContext.scope = 'producer-ui';
     if (mode === 'no-context') delete f.options.producerContext;
     if (mode === 'changed-lock') writeFileSync(f.uiPath, Buffer.concat([lockBytes, Buffer.from('\n')]));
+    if (mode === 'changed-root-lock') writeFileSync(f.rootPath, Buffer.concat([rootLockBytes, Buffer.from('\n')]));
     const fetchImpl = new OsvFixture().fetch(mode === 'additional', () => {
       if (mode === 'drift-during-query') writeFileSync(f.uiPath, '{}');
       if (mode === 'release-during-query') f.options.producerContext.version = '2.0.3';

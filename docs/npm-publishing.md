@@ -903,46 +903,64 @@ versions. Run npm audits and the existing OSV gates with the approved public coo
 An advisory or notice mismatch is a stop unless an exact, current risk review explicitly
 covers it. The only release-specific review below does not suppress raw findings.
 
-#### Temporary 2.0.2 producer-UI risk acceptance
+#### Temporary 2.0.2 producer risk acceptance
 
 **This is a risk exception, not a vulnerability patch or an advisory-free scan.**
-The release owner approved this build-only exception on October 5, 2026. It expires
-at **2026-10-12T00:00:00Z**, which is earlier than seven full days after approval.
+The release owner deferred all dependency changes from the **2.0.2 documentation
+release** on October 6, 2026. This replaces the earlier braces-only producer-UI
+record with exact, separate CLI-runtime and UI-build findings. Package manifests,
+producer locks, runtime code and built UI remain unchanged.
+The original expiry remains **2026-10-12T00:00:00Z**; it is not extended.
 The gate uses `notBefore <= now < expiresAt`; equality with expiry is rejected.
-Its public effective start is **2026-10-05T15:00:00Z**, conservatively after the
+Its public effective start is **2026-10-06T15:33:00Z**, conservatively after the
 approval. The exact authorization timestamp and private approval evidence are
 not part of the public review record.
 
 | Field | Exact scope |
 |---|---|
 | Release / phase | **2.0.2**, source gates only |
-| Dependency scope | **producer-ui**, never root producer, fresh consumer or shipped-runtime/payload scope |
-| Advisory | [GHSA-vfj7-8cjw-p6xm / CVE-2026-93687](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) |
-| Package / version | **braces 3.0.3** |
-| Severity / risk | **High, CVSS 7.5**; deeply nested build patterns can exhaust the stack and deny service |
+| Dependency scope | Exact **producer-root** and **producer-ui** graphs; no fresh-consumer or payload exemption |
+| Root lock SHA256 | `62f92175cd124818678166381c0acd0376cb9dedb2278d39eb4e4033368e2500` |
 | UI lock SHA256 | `b88a73a6212e26f4c4dde985d84eadf39870c8758e4698cdd5544b8a55eb8cca` |
 | Public reviewer | `girishkvs` |
-| Approved / expires | 2026-10-05 / **2026-10-12T00:00:00Z** |
-| Native report | Five high entries: braces, chokidar, micromatch, fast-glob and tailwindcss; one underlying advisory |
+| Approved / expires | 2026-10-06 / **2026-10-12T00:00:00Z** |
+| Root native report | One moderate finding, `smol-toml`; canonical SHA256 `93a12f5109ca8488a8e80f8287a0961cb06f2b9c57122d81a93645c4a9e2159f` |
+| UI native report | Eight affected entries, six high and two moderate, representing three advisories; canonical SHA256 `8320a09dc8d1831eb7054034d5148137fb2af784b02716eecc0db860eea826cf` |
 
-No patched braces release was available at approval. In the exact reviewed graph,
-braces and its affected ancestors are UI **development/build dependencies**.
-The root runtime lock and the bundled UI artifact manifest exclude braces.
-The build uses trusted, controlled producer inputs, not arbitrary user-supplied
-glob patterns. These constraints reduce exposure; they do not make the package
-safe or establish zero risk.
+| Exact dependency / advisory | Exposure and risk |
+|---|---|
+| `smol-toml@1.8.0` / [GHSA-r4xh-jqrq-34v2](https://github.com/advisories/GHSA-r4xh-jqrq-34v2) | **CLI runtime**, moderate/CVSS 5.3. Parsing crafted TOML can consume excessive CPU. This is not a build-only finding. |
+| `braces@3.0.3` / [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | **UI build**, high/CVSS 7.5. Deep patterns can exhaust the stack. |
+| `postcss-selector-parser@6.1.4` / [GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf) | **UI build**, moderate/CVSS 5.9. Crafted selectors can consume excessive CPU. |
+| `source-map-js@1.2.1` / [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) | **UI build**, high/CVSS 7.5. Crafted indexed source-map offsets can cause denial of service. |
+
+The CLI parses local TOML configuration. During the deferral, treat those files
+as trusted inputs and avoid processing untrusted or unusually large TOML.
+UI builds use controlled source inputs. All three reviewed UI-build dependencies
+are excluded from the root runtime graph and bundled UI manifest, and that
+exclusion is checked again against the candidate. These limits reduce exposure;
+they do not make the dependencies safe or fix the vulnerabilities.
+
+Patched versions exist for `smol-toml` (1.9.0), `postcss-selector-parser` (7.1.6),
+and `source-map-js` (1.2.2). Their upgrades, including the Tailwind compatibility
+work, are explicitly deferred from this release. No patched braces release was
+available at review. Fresh consumer installs still resolve and audit their own
+graphs; a vulnerable consumer result is not covered by the producer exception.
 
 The shared record/evaluator is in `tools/publication-scanners/advisories.mjs`.
 Native audit acceptance binds the **entire exact reviewed report** (all advisory
-IDs, ranges, paths, ancestor edges, fix metadata and counts), not a five-package
-ignore list. Only complete finding exit **1** is eligible; execution errors,
+IDs, ranges, paths, ancestor edges, fix metadata and counts), not a package-name
+ignore list. Root and UI reports cannot substitute for each other.
+Only complete finding exit **1** is eligible; execution errors,
 signals, partial output and other exits fail. The original exit, raw stream hashes
 and counts remain in evidence. OSV still queries all approved coordinates and
 retains each original ID, modified timestamp, graph and raw-response digest.
-Only the matching UI-only finding becomes `reviewed-exemption`.
+Only exact package/version/advisory matches in their reviewed producer scope
+become `reviewed-exemption`. Both producer locks must match the record for OSV
+acceptance, and unknown or cross-scope findings still block.
 
 Reports and final gate evidence explicitly say **RISK-ACCEPTED** with the review
-record hash, exact lock, scope and expiry. They must not say advisory-free.
+record hash, exact locks, exposure, scope and expiry. They must not say advisory-free.
 For 2.0.2, the producer gate must retain both native audit classifications and
 the complete OSV report, including an explicit zero-findings result when clean.
 The shared continuation validator reconciles every acceptance, count, scope and
@@ -951,16 +969,17 @@ disposition with the retained source checks; removing fields is not a clean resu
 `producerAdvisories` evidence. Source, artifact, prepared and stage/owner readers
 recheck it at the current time, and compare continuation copies with the original
 source report where available. Historical 1.3.1 peer receipts are unchanged.
-Changed locks, another release, root/consumer findings, any additional advisory,
+Changed locks, another release, fresh-consumer findings, any additional advisory,
 report drift or expiry fail closed. Clean unrelated releases do not fail merely
 because this record is expired. Fresh hosted scans still run; local receipts are
 not reused as fresh scan results. No global `exemptionsPath` is installed.
 
-**Required follow-up:** remediate/remove the affected build dependency path and
+**Required follow-up:** remediate the CLI-runtime and UI-build dependency findings and
 remove this release-specific exception and its fixtures **before expiry or the
 next release, whichever comes first**. Review the replacement source/version/
 license/integrity, rebuild UI/notices with existing tools, and requalify the exact
-source. There is no automatic renewal, extension to 2.0.3, Tailwind migration,
+source. Existing published packages are not retroactively patched by this record.
+There is no automatic renewal, extension to 2.0.3, Tailwind migration,
 severity-threshold change or dev-dependency omission.
 All other advisories, notices, source/consumer/native/platform gates and separate
 source/byte/stage/owner-publication approvals remain required.

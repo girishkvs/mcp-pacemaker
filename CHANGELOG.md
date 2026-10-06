@@ -29,14 +29,16 @@ Target release: **2.0.2**. This candidate has not yet been published.
 
 ### Security
 
-- Record a temporary **2.0.2-only producer-UI build risk acceptance** for
-  [braces 3.0.3 / GHSA-vfj7-8cjw-p6xm (CVE-2026-93687)](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm),
-  approved October 5, 2026 and expiring **2026-10-12T00:00:00Z**. It is bound to
-  the exact reviewed UI lock; raw native audit/OSV findings remain visible.
-  This is not a patch or a clean advisory result, and does not cover root/runtime
-  or fresh-consumer dependencies. Remediation and exception removal are required
+- Record a temporary **2.0.2-only producer risk acceptance** for `smol-toml 1.8.0`
+  in the CLI runtime and `braces 3.0.3`, `postcss-selector-parser 6.1.4` and
+  `source-map-js 1.2.1` in UI build tooling. The October 6 review keeps the
+  original **2026-10-12T00:00:00Z** expiry and binds both unchanged producer
+  locks and the exact native reports. Raw audit/OSV findings remain visible.
+  Dependency upgrades stay deferred from this documentation release.
+  This is not a patch or a clean advisory result; fresh-consumer findings are
+  not exempted. Remediation and exception removal are required
   before expiry or the next release. See the
-  [exact scope, mitigations and follow-up](docs/npm-publishing.md#temporary-202-producer-ui-risk-acceptance).
+  [exact advisories, exposure, mitigations and follow-up](docs/npm-publishing.md#temporary-202-producer-risk-acceptance).
 
 ## [2.0.1]
 

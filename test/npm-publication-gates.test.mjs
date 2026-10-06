@@ -21,7 +21,7 @@ import { cleanNpmEnvironment } from '../tools/npm-publication/run.mjs';
 import { temporaryEnvironment } from '../tools/npm-publication/gate-environment.mjs';
 import { LICENSE_FAILURE_HINTS } from '../tools/npm-publication/runtime-licenses.mjs';
 import './helpers/npm-ui-advisory-exception.mjs';
-import { UI_BUILD_RISK_REVIEW, scanAdvisories } from '../tools/publication-scanners/advisories.mjs';
+import { PRODUCER_RISK_REVIEW, scanAdvisories } from '../tools/publication-scanners/advisories.mjs';
 import { scanPublicationRequest } from '../tools/publication-scanners/publication.mjs';
 
 // Only the adapter is under test. The child executor remains injected; no hosted reader is called.
@@ -294,29 +294,31 @@ test('Controlled source approval uses the explicit fixture clock and still rejec
 });
 
 test('Actual source orchestration retains native exit1 and scoped OSV risk details without waiving other gates', async t => {
-  const at = Date.parse('2026-10-06T00:00:00Z');
+  const at = Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000;
   t.mock.method(Date, 'now', () => at);
   const owned = ownedDirectory();
   t.after(() => removeOwnedDirectory(owned));
   const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
   mkdirSync(join(owned.dir, 'ui'));
   writeFileSync(join(owned.dir, 'ui/package-lock.json'), lockBytes);
-  writeFileSync(join(owned.dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
-    '': {}, 'node_modules/picocolors': { version: '1.1.1', resolved: 'https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz' },
-  } }));
-  const names = [...new Set(['picocolors', ...Object.keys(JSON.parse(lockBytes).packages).filter(Boolean)
-    .map(path => path.split('node_modules/').at(-1))])];
+  const rootLockBytes = readFileSync(new URL('../package-lock.json', import.meta.url));
+  writeFileSync(join(owned.dir, 'package-lock.json'), rootLockBytes);
+  const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
+    Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
+      entry.name ?? path.split('node_modules/').at(-1))))];
   const scanned = await scanPublicationRequest({
     request: { schemaVersion: 1, phase: 'source', sourceRoot: owned.dir, root: owned.dir,
       name: POLICY.name, version: '2.0.2', commit: source.commit, requiredGates: ['producer-advisories'] },
     bindingReader: async () => ({ syntheticIdentityOnly: true }), publicPackages: names,
     fetchImpl: async (_url, options) => new Response(JSON.stringify({ results: JSON.parse(options.body).queries
-      .map(item => item.package.name === 'braces' ? { vulns: [{ id: UI_BUILD_RISK_REVIEW.id,
-        modified: '2026-10-02T22:45:04Z' }] } : {}) }), { headers: { 'Content-Type': 'application/json' } }),
+      .map(query => ({ vulns: PRODUCER_RISK_REVIEW.advisories
+        .filter(item => item.package === query.package.name && item.version === query.version)
+        .map(item => ({ id: item.id, modified: '2026-10-06T00:00:08Z' })) })) }),
+    { headers: { 'Content-Type': 'application/json' } }),
   });
   assert.equal(scanned.gates['producer-advisories'].status, 'passed');
   const selected = { ...binding, version: '2.0.2',
-    source: { ...source, version: '2.0.2', uiLockSha256: UI_BUILD_RISK_REVIEW.lockSha256,
+    source: { ...source, version: '2.0.2', uiLockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'],
       rootLockSha256: scanned.gates['producer-advisories'].osv.scope[0].lockSha256 } };
   const runner = new ControlledRunner(selected, new Date(at).toISOString());
   runner.root = owned.dir;
@@ -324,12 +326,16 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
   writeFileSync(join(owned.dir, 'ui/dist/third-party-manifest.json'),
     JSON.stringify({ schemaVersion: 1, packages: [], runtimeNotices: [], sources: [] }));
   const original = runner.npm.bind(runner);
-  const raw = readFileSync(new URL('./fixtures/npm-ui-braces-audit.json', import.meta.url), 'utf8');
-  runner.npm = (args, label) => args.includes('audit') && args[1] === 'ui'
-    ? { rawStdout: raw, stdout: raw, evidence: { ...evidence, exitCode: 1, stdoutSha256: digest(Buffer.from(raw)).sha256 },
-      auditContext: { phase: 'source', scope: 'producer-ui', version: '2.0.2',
-        lockSha256: UI_BUILD_RISK_REVIEW.lockSha256, lockBytes } }
-    : original(args, label);
+  runner.npm = (args, label) => {
+    if (!args.includes('audit')) return original(args, label);
+    const ui = args[1] === 'ui';
+    const scope = ui ? 'producer-ui' : 'producer-root';
+    const raw = readFileSync(new URL(`./fixtures/npm-${ui ? 'ui' : 'root'}-202-risk-audit.json`, import.meta.url), 'utf8');
+    return { rawStdout: raw, stdout: raw,
+      evidence: { ...evidence, exitCode: 1, stdoutSha256: digest(Buffer.from(raw)).sha256 },
+      auditContext: { phase: 'source', scope, version: '2.0.2',
+        lockSha256: PRODUCER_RISK_REVIEW.locks[scope], lockBytes: ui ? lockBytes : rootLockBytes } };
+  };
   const external = runner.external.bind(runner);
   runner.external = (...args) => {
     const report = external(...args);
@@ -342,9 +348,11 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
   assert.equal(gate.disposition, 'RISK-ACCEPTED');
   assert.equal(gate.advisoryFree, false);
   assert.equal(gate.nativeAudits[1].rawExitCode, 1);
-  assert.equal(gate.nativeAudits[1].rawCounts.high, 5);
-  assert.equal(gate.rawFindingCount, 1);
-  assert.equal(gate.riskAcceptance.scope, 'producer-ui');
+  assert.equal(gate.nativeAudits[1].rawCounts.high, 6);
+  assert.equal(gate.nativeAudits[0].rawCounts.moderate, 1);
+  assert.equal(gate.nativeAudits[0].rawExitCode, 1);
+  assert.equal(gate.rawFindingCount, 4);
+  assert.equal(gate.riskAcceptance.scope, 'producer-root-and-ui');
   for (const all of [false, true]) {
     const changed = JSON.parse(JSON.stringify(report));
     if (all) changed.gates['producer-advisories'] = { status: 'passed', evidence: gate.evidence };
@@ -356,15 +364,15 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
 });
 
 test('Actual GateRunner native process preserves finding exit1 and rejects exit2 with the same report', t => {
-  t.mock.method(Date, 'now', () => Date.parse('2026-10-06T00:00:00Z'));
+  t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
   const owned = ownedDirectory();
   t.after(() => removeOwnedDirectory(owned));
-  const file = new URL('./fixtures/npm-ui-braces-audit.json', import.meta.url);
+  const file = new URL('./fixtures/npm-ui-202-risk-audit.json', import.meta.url);
   const raw = readFileSync(file, 'utf8');
   const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
   const runner = { owned, logs: [], root: owned.dir, env: process.env };
   const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui',
-    lockSha256: UI_BUILD_RISK_REVIEW.lockSha256, lockBytes };
+    lockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'], lockBytes };
   const args = code => ['-e', `process.stdout.write(${JSON.stringify(raw)});process.exitCode=${code}`];
   const result = GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(1),
     owned.dir, process.env, context);

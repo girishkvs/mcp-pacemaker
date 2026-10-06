@@ -24,7 +24,7 @@ import {
   assertHostedScannerContext, installScanners, releaseExecutable, retainScannerProvenance, SCANNER_RELEASES,
 } from '../tools/npm-publication/install-scanners.mjs';
 import { scanPublicationRequest } from '../tools/publication-scanners/publication.mjs';
-import { UI_BUILD_RISK_REVIEW } from '../tools/publication-scanners/advisories.mjs';
+import { PRODUCER_RISK_REVIEW } from '../tools/publication-scanners/advisories.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 test('scanner bootstrap retains exact create-only safe provenance for the original collector', t => {
@@ -154,15 +154,15 @@ async function scanner({ request, policyPath, publicPackages }) {
 }
 
 test('Existing external source aggregation carries actual scoped OSV risk evidence to the gate', async t => {
-  t.mock.method(Date, 'now', () => Date.parse('2026-10-06T00:00:00Z'));
+  t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
   const f = fixture(t);
   const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
   write(f.sourceRoot, 'ui/package-lock.json', lockBytes);
-  write(f.sourceRoot, 'package-lock.json', { lockfileVersion: 3, packages: {
-    '': {}, 'node_modules/picocolors': { version: '1.1.1', resolved: 'https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz' },
-  } });
-  const names = [...new Set(['picocolors', ...Object.keys(JSON.parse(lockBytes).packages)
-    .filter(Boolean).map(path => path.split('node_modules/').at(-1))])];
+  const rootLockBytes = readFileSync(new URL('../package-lock.json', import.meta.url));
+  write(f.sourceRoot, 'package-lock.json', rootLockBytes);
+  const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
+    Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
+      entry.name ?? path.split('node_modules/').at(-1))))];
   const request = { ...f.request, version: '2.0.2', publicPackages: names };
   const report = await aggregateExternalGates(request, {
     run: gitRunner(f),
@@ -172,8 +172,10 @@ test('Existing external source aggregation carries actual scoped OSV risk eviden
         request: { ...options.request, requiredGates: ['producer-advisories'] }, publicPackages: names,
         bindingReader: async () => ({ syntheticSourceBinding: true }),
         fetchImpl: async (_url, init) => new Response(JSON.stringify({ results: JSON.parse(init.body).queries
-          .map(item => item.package.name === 'braces' ? { vulns: [{ id: UI_BUILD_RISK_REVIEW.id,
-            modified: '2026-10-02T22:45:04Z' }] } : {}) }), { headers: { 'Content-Type': 'application/json' } }),
+          .map(query => ({ vulns: PRODUCER_RISK_REVIEW.advisories
+            .filter(item => item.package === query.package.name && item.version === query.version)
+            .map(item => ({ id: item.id, modified: '2026-10-06T00:00:08Z' })) })) }),
+        { headers: { 'Content-Type': 'application/json' } }),
       });
       ordinary.gates['producer-advisories'] = risk.gates['producer-advisories'];
       ordinary.scannerDetails = risk.scannerDetails;
@@ -182,7 +184,7 @@ test('Existing external source aggregation carries actual scoped OSV risk eviden
   });
   assert.equal(report.status, 'pending-owner-review');
   assert.equal(report.gates['producer-advisories'].riskAcceptance.disposition, 'RISK-ACCEPTED');
-  assert.equal(report.scannerDetails.advisories.rawFindingCount, 1);
+  assert.equal(report.scannerDetails.advisories.rawFindingCount, 4);
   assert.equal(report.scannerDetails.advisories.findings[0].status, 'reviewed-exemption');
   assert.equal(report.gates['native-release-identity'].status, 'passed');
 });
