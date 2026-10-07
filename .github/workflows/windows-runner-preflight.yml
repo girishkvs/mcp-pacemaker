@@ -1,0 +1,145 @@
+name: Windows runner preflight
+
+on:
+  push:
+    branches: [windows-runner-preflight-20261006]
+    paths: [.github/workflows/windows-runner-preflight.yml]
+
+permissions: {}
+
+concurrency:
+  group: windows-runner-preflight-20261006
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == 'girishkvs/mcp-pacemaker'
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Check disposable Windows loopback file sharing
+        shell: pwsh
+        env:
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          $approvedRunner = (
+              $env:GITHUB_ACTIONS -eq 'true' -and
+              $env:RUNNER_ENVIRONMENT -eq 'github-hosted' -and
+              $env:ACTUAL_RUNNER_ENVIRONMENT -eq 'github-hosted' -and
+              $env:RUNNER_OS -eq 'Windows' -and
+              $env:RUNNER_ARCH -eq 'X64' -and
+              $env:GITHUB_REPOSITORY -eq 'girishkvs/mcp-pacemaker' -and
+              $env:GITHUB_EVENT_NAME -eq 'push' -and
+              $env:GITHUB_REF -eq 'refs/heads/windows-runner-preflight-20261006'
+          )
+          if (-not $approvedRunner) {
+              throw 'Refusing to run outside the approved GitHub-hosted Windows branch.'
+          }
+
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+              throw 'This preflight requires the disposable runner administrator.'
+          }
+
+          Get-Command New-SmbShare, Get-SmbShare, Get-SmbShareAccess, Remove-SmbShare -ErrorAction Stop | Out-Null
+          if ((Get-Service -Name LanmanServer).Status -ne 'Running') {
+              throw 'SMB server is not running. No service or firewall setting was changed.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+              throw 'The owned runner temporary directory is missing.'
+          }
+
+          $temp = Get-Item -LiteralPath $env:RUNNER_TEMP
+          if (-not $temp.PSIsContainer) {
+              throw 'Runner temporary path is not a directory.'
+          }
+          for ($parent = $temp; $null -ne $parent; $parent = $parent.Parent) {
+              if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                  throw 'Runner temporary path contains a reparse point.'
+              }
+          }
+          $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($temp.FullName))
+          if ($drive.DriveType -ne [IO.DriveType]::Fixed) {
+              throw 'Runner temporary storage is not a local fixed disk.'
+          }
+
+          $nonce = [guid]::NewGuid().ToString('N')
+          $shareName = "runner-preflight-$nonce"
+          $directory = Join-Path $temp.FullName $shareName
+          $fixture = Join-Path $directory 'canary.txt'
+          $directoryCreated = $false
+          $result = $null
+          try {
+              if (@(Get-SmbShare | Where-Object Name -eq $shareName).Count -ne 0) {
+                  throw 'The generated share name is already in use.'
+              }
+              New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+              $directoryCreated = $true
+              $acl = [Security.AccessControl.DirectorySecurity]::new()
+              $acl.SetAccessRuleProtection($true, $false)
+              $acl.SetOwner($identity.User)
+              $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                  $identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+              Set-Acl -LiteralPath $directory -AclObject $acl
+
+              $expected = "Public, synthetic runner preflight data: $nonce"
+              [IO.File]::WriteAllText($fixture, $expected, [Text.Encoding]::ASCII)
+              New-SmbShare -Name $shareName -Path $directory -ReadAccess $identity.Name `
+                  -CachingMode None -FolderEnumerationMode AccessBased -EncryptData $true | Out-Null
+              $access = @(Get-SmbShareAccess -Name $shareName)
+              if ($access.Count -ne 1) {
+                  throw 'The temporary share does not have the expected single-principal ACL.'
+              }
+              $account = [Security.Principal.NTAccount]::new($access[0].AccountName)
+              $accessSid = $account.Translate([Security.Principal.SecurityIdentifier])
+              $readOnlyOwner = (
+                  $accessSid.Value -eq $identity.User.Value -and
+                  $access[0].AccessControlType.ToString() -eq 'Allow' -and
+                  $access[0].AccessRight.ToString() -eq 'Read'
+              )
+              if (-not $readOnlyOwner) {
+                  throw 'The temporary share ACL is not limited to the current runner account.'
+              }
+
+              $unc = '\\127.0.0.1\' + $shareName + '\canary.txt'
+              $actual = [IO.File]::ReadAllText($unc, [Text.Encoding]::ASCII)
+              if ($actual -cne $expected) {
+                  throw 'The loopback UNC read did not return the expected synthetic data.'
+              }
+              $result = [ordered]@{
+                  osVersion = [Environment]::OSVersion.Version.ToString()
+                  powershell = $PSVersionTable.PSVersion.ToString()
+                  reader = 'System.IO.File'
+                  loopbackUncRead = 'passed'
+                  crossHostTested = $false
+                  serviceSettingsChanged = $false
+                  firewallSettingsChanged = $false
+                  userAccountsCreated = $false
+              }
+          }
+          finally {
+              if ($directoryCreated) {
+                  $remaining = @(Get-SmbShare | Where-Object Name -eq $shareName)
+                  if ($remaining.Count -gt 0) {
+                      if ($remaining[0].Path -ne $directory) {
+                          throw 'The generated share points elsewhere; refusing unrelated cleanup.'
+                      }
+                      Remove-SmbShare -Name $shareName -Force
+                  }
+                  if (@(Get-SmbShare | Where-Object Name -eq $shareName).Count -ne 0) {
+                      throw 'Temporary share cleanup did not complete.'
+                  }
+                  if ([IO.File]::Exists($fixture)) {
+                      [IO.File]::Delete($fixture)
+                  }
+                  [IO.Directory]::Delete($directory, $false)
+              }
+              $identity.Dispose()
+          }
+          $result['cleanup'] = 'passed'
+          $result | ConvertTo-Json -Compress
