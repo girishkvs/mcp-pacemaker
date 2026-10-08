@@ -9,7 +9,9 @@ no forwarding, one hash-bound upload/execute and a 30-minute absolute deadline.
 The host accepts only this repository's `homebrew-macos-validation-20261008`
 branch on a first-attempt `macos-15` ARM64 GitHub-hosted job.
 
-The bundle validates the exact local Homebrew formula: Ruby syntax, style/audit,
+The bundle stages the formula with LF line endings and public source permissions
+(`0644`) inside the temporary tap; private SSH extraction stays `0600`.
+It validates the exact local Homebrew formula: Ruby syntax, style/audit,
 installation, retained shrinkwrap and all 48 production versions, isolated
 `brew test`, a real synthetic MCP initialize/tool-call/delete round trip, no
 automatic per-user setup, package removal and local tap cleanup.
@@ -27,3 +29,10 @@ or result archive. The test bundle and results travel privately over SSH.
 Local testing reuses the already installed transport dependencies via `NODE_PATH`;
 it performs no new dependency acquisition on the work machine. The hosted
 runner uses the source lock as an ordinary public CI dependency install.
+
+The first macOS run reached Homebrew 6.0.22 on macOS 15.7.9 ARM64 through the
+verified SSH session. Ruby syntax passed, but Homebrew style found private
+extraction permissions, CRLF and formula-helper/hash-alignment issues before
+installation began. Results and cleanup receipts are retained in the first run
+directory. The local fixes need a separately approved follow-up job; that first
+run is not installation or lifecycle evidence.
