@@ -1,0 +1,44 @@
+name: macOS Homebrew SSH validation
+
+on:
+  push:
+    branches: [homebrew-macos-validation-20261008]
+    paths:
+      - .github/workflows/macos-homebrew-lab.yml
+      - .ci/macos-homebrew-lab/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-macos-validation-20261008
+  cancel-in-progress: false
+
+jobs:
+  private-test:
+    if: github.actor == 'girishkvs' && github.repository == 'girishkvs/mcp-pacemaker' && github.run_attempt == '1'
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: homebrew-macos-validation-20261008
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+      - name: Install locked transport dependencies
+        working-directory: .ci/macos-homebrew-lab
+        run: npm ci --registry=https://registry.npmjs.org/ --ignore-scripts --omit=optional --no-audit --no-fund
+      - name: Run one approved private Homebrew test
+        working-directory: .ci/macos-homebrew-lab
+        env:
+          MACOS_LAB_BOOTSTRAP: ${{ secrets.MACOS_LAB_BOOTSTRAP }}
+          DEBUG: ''
+          NODE_DEBUG: ''
+          NODE_DEBUG_NATIVE: ''
+          NODE_OPTIONS: ''
+          SSLKEYLOGFILE: ''
+        run: node host.cjs
