@@ -5,6 +5,19 @@ const { test } = require('node:test');
 const { SessionIdentity, SingleSessionServer, PinnedClient } = require('../identity.cjs');
 const { Relay, connectionOptions } = require('../relay.cjs');
 
+test('session key generation preserves a valid fixed-curve SSH encoding', () => {
+  for (let index = 0; index < 1000; index++) {
+    const identity = new SessionIdentity();
+    try {
+      assert.ok(identity.host.public.startsWith('ecdsa-sha2-nistp256 '));
+      assert.ok(identity.client.public.startsWith('ecdsa-sha2-nistp256 '));
+      assert.match(identity.hostHash, /^[a-f0-9]{64}$/);
+    } finally {
+      identity.discard();
+    }
+  }
+});
+
 test('one key-authenticated SSH connection carries a private command', async () => {
   const identity = new SessionIdentity();
   const server = new SingleSessionServer({

@@ -3,8 +3,9 @@ const { Client, Server, utils } = require('ssh2');
 
 class SessionIdentity {
   constructor() {
-    this.host = utils.generateKeyPairSync('ed25519');
-    this.client = utils.generateKeyPairSync('ed25519');
+    // ssh2 1.17.0 drops leading zero bytes from generated Ed25519 public keys.
+    this.host = utils.generateKeyPairSync('ecdsa', { bits: 256 });
+    this.client = utils.generateKeyPairSync('ecdsa', { bits: 256 });
     const parsed = utils.parseKey(this.host.public);
     if (parsed instanceof Error) {
       throw new Error('HOST_KEY_GENERATION_FAILED');

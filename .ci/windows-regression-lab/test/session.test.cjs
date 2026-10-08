@@ -35,3 +35,29 @@ test('authorization retention never retries a job, unknown write or incomplete c
     fs.rmSync(root, { recursive: true });
   }
 });
+
+test('completed nonzero tests can retain authorization for review without automatically rerunning', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-completed-review-'));
+  const session = new SingleAuthorizationSession({ credential: { token: 'synthetic-in-memory-only' } });
+  session.attemptNumber = 1;
+  const controller = { root, commitSha: 'a'.repeat(40), testExitCode: 1 };
+  fs.writeFileSync(path.join(root, 'cleanup.json'), JSON.stringify({ failures: [] }));
+  fs.writeFileSync(path.join(root, 'completed-run.json'), JSON.stringify({
+    status: 'completed', head_sha: controller.commitSha
+  }));
+  fs.writeFileSync(path.join(root, 'result-receipt.json'), JSON.stringify({ testExitCode: 1 }));
+  try {
+    assert.equal(session.canReviewCompletedTest(controller), true);
+    controller.testExitCode = 0;
+    assert.equal(session.canReviewCompletedTest(controller), false);
+    controller.testExitCode = 1;
+    fs.writeFileSync(path.join(root, 'cleanup.json'), JSON.stringify({ failures: ['unverified'] }));
+    assert.equal(session.canReviewCompletedTest(controller), false);
+    fs.writeFileSync(path.join(root, 'cleanup.json'), JSON.stringify({ failures: [] }));
+    fs.unlinkSync(path.join(root, 'completed-run.json'));
+    assert.equal(session.canReviewCompletedTest(controller), false);
+  } finally {
+    session.authorization.credential = undefined;
+    fs.rmSync(root, { recursive: true });
+  }
+});

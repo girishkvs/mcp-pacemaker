@@ -4,8 +4,8 @@ const { Controller } = require('./controller.cjs');
 const { sleep } = require('./control.cjs');
 
 class SingleAuthorizationSession {
-  constructor() {
-    this.authorization = {};
+  constructor(authorization = {}) {
+    this.authorization = authorization;
     this.attemptNumber = 0;
   }
 
@@ -15,7 +15,7 @@ class SingleAuthorizationSession {
     ].includes(error.message);
     const branchAttempted = controller.auditRecords.some(entry =>
       entry.phase === 'attempt' && (
-        entry.endpoint?.endsWith('/git/refs') ||
+        entry.endpoint?.includes('/git/refs') ||
         entry.operation === 'execute-approved-bundle'
       )
     );
@@ -27,6 +27,26 @@ class SingleAuthorizationSession {
       cleaned &&
       Boolean(this.authorization.credential) &&
       this.attemptNumber < 3;
+  }
+
+  canReviewCompletedTest(controller) {
+    if (!this.authorization.credential ||
+        this.attemptNumber >= 3 ||
+        !Number.isInteger(controller.testExitCode) ||
+        controller.testExitCode === 0) {
+      return false;
+    }
+    const files = ['cleanup.json', 'completed-run.json', 'result-receipt.json'];
+    if (!files.every(name => fs.existsSync(path.join(controller.root, name)))) {
+      return false;
+    }
+    const cleanup = JSON.parse(fs.readFileSync(path.join(controller.root, files[0]), 'utf8'));
+    const run = JSON.parse(fs.readFileSync(path.join(controller.root, files[1]), 'utf8'));
+    const result = JSON.parse(fs.readFileSync(path.join(controller.root, files[2]), 'utf8'));
+    return cleanup.failures.length === 0 &&
+      run.status === 'completed' &&
+      run.head_sha === controller.commitSha &&
+      result.testExitCode === controller.testExitCode;
   }
 
   async waitForApprovedRetry(root, base) {
@@ -43,6 +63,9 @@ class SingleAuthorizationSession {
     while (Date.now() < deadline) {
       if (fs.existsSync(requestPath)) {
         const request = JSON.parse(fs.readFileSync(requestPath, 'utf8'));
+        if (request.status === 'finish-review') {
+          return { finishReview: true };
+        }
         const valid = (
           request.status === 'approved' &&
           /^[A-Za-z0-9_.-]+\.json$/.test(request.planFile || '') &&
@@ -81,12 +104,33 @@ class SingleAuthorizationSession {
           if (!Number.isInteger(controller.testExitCode)) {
             throw new Error('TEST_EXIT_CODE_MISSING');
           }
+          if (this.canReviewCompletedTest(controller)) {
+            console.log(`TEST_EXIT=${controller.testExitCode}; private results retrieved and cleanup verified. No rerun without a new approval.`);
+            let decision;
+            try {
+              decision = await this.waitForApprovedRetry(root, base);
+            } catch (error) {
+              if (error.message === 'AUTHORIZATION_SESSION_EXPIRED') {
+                return controller.testExitCode;
+              }
+              throw error;
+            }
+            if (decision.finishReview) {
+              return controller.testExitCode;
+            }
+            ({ planPath, approvalPath } = decision);
+            continue;
+          }
           return controller.testExitCode;
         } catch (error) {
           if (!this.canWait(controller, error)) {
             throw error;
           }
-          ({ planPath, approvalPath } = await this.waitForApprovedRetry(root, base));
+          const decision = await this.waitForApprovedRetry(root, base);
+          if (decision.finishReview) {
+            throw error;
+          }
+          ({ planPath, approvalPath } = decision);
         }
       }
       throw new Error('AUTHORIZED_SESSION_ATTEMPT_LIMIT');
