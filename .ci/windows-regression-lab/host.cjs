@@ -290,7 +290,8 @@ class Host {
       await this.server.listen(2222);
       await this.relay.host(
         { tunnelId: this.config.tunnelId, clusterId: this.config.clusterId },
-        this.config.hostAccessToken
+        this.config.hostAccessToken,
+        this.config.relayConfiguration
       );
       console.log('Private test transport ready.');
       const reason = await this.done;

@@ -77,8 +77,37 @@ class Relay {
     return tunnel;
   }
 
-  async host(reference, token) {
-    const tunnel = await this.get(reference, token);
+  descriptor(tunnel, reference) {
+    this.validate(tunnel, reference);
+    const access = value => value == null ? undefined : {
+      entries: value.entries.map(entry => ({
+        type: entry.type, provider: entry.provider, subjects: entry.subjects,
+        scopes: entry.scopes, isDeny: entry.isDeny, isInherited: entry.isInherited
+      }))
+    };
+    return JSON.parse(JSON.stringify({
+      tunnelId: tunnel.tunnelId, clusterId: tunnel.clusterId,
+      name: tunnel.name, domain: tunnel.domain,
+      accessControl: access(tunnel.accessControl),
+      ports: tunnel.ports.map(port => ({
+        portNumber: port.portNumber, protocol: port.protocol,
+        accessControl: access(port.accessControl)
+      })),
+      endpoints: (tunnel.endpoints || []).map(endpoint => ({
+        id: endpoint.id, hostId: endpoint.hostId,
+        connectionMode: endpoint.connectionMode,
+        hostPublicKeys: endpoint.hostPublicKeys,
+        clientRelayUri: endpoint.clientRelayUri,
+        hostRelayUri: endpoint.hostRelayUri
+      }))
+    }));
+  }
+
+  async host(reference, token, ownerConfiguration) {
+    if (!ownerConfiguration) {
+      throw new Error('OWNER_RELAY_DESCRIPTOR_REQUIRED');
+    }
+    const tunnel = this.descriptor(ownerConfiguration, reference);
     tunnel.accessTokens = { [TunnelAccessScopes.Host]: token };
     this.connection = new TunnelRelayTunnelHost(this.manager);
     this.connection.enableE2EEncryption = true;
@@ -91,8 +120,11 @@ class Relay {
     await this.connect(tunnel);
   }
 
-  async client(reference, token) {
-    const tunnel = await this.get(reference, token);
+  async client(reference, token, ownerConfiguration) {
+    if (!ownerConfiguration) {
+      throw new Error('OWNER_RELAY_DESCRIPTOR_REQUIRED');
+    }
+    const tunnel = this.descriptor(ownerConfiguration, reference);
     tunnel.accessTokens = { [TunnelAccessScopes.Connect]: token };
     this.connection = new TunnelRelayTunnelClient(this.manager);
     this.connection.enableE2EEncryption = true;

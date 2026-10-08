@@ -303,6 +303,7 @@ class RelayOwner {
         includePorts: true, includeAccessControl: true
       }, manager);
       this.reader.validate(readback, this.reference);
+      this.configuration = this.reader.descriptor(readback, this.reference);
       const tokens = tunnel.accessTokens || {};
       for (const scope of ['host', 'connect', 'manage']) {
         if (typeof tokens[scope] !== 'string') {
@@ -333,6 +334,30 @@ class RelayOwner {
       this.reference = null;
       this.tokens = null;
       throw new Error('RELAY_CREATION_FAILED');
+    } finally {
+      await manager.dispose();
+      identityToken = null;
+    }
+  }
+
+  async readVerified(identityToken) {
+    if (!this.reference) {
+      throw new Error('RELAY_REFERENCE_MISSING');
+    }
+    const manager = new TunnelManagementHttpClient(
+      { name: 'windows-regression-lab', version: '0.0.0' },
+      ManagementApiVersions.Version20230927preview,
+      async () => 'github ' + identityToken
+    );
+    manager.enableEventsReporting = false;
+    try {
+      const tunnel = await this.reader.read(this.reference, {
+        includePorts: true, includeAccessControl: true
+      }, manager);
+      if (tunnel === null) {
+        throw new Error('RELAY_NOT_FOUND');
+      }
+      return this.reader.descriptor(tunnel, this.reference);
     } finally {
       await manager.dispose();
       identityToken = null;

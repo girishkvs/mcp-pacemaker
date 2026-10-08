@@ -63,6 +63,8 @@ class Controller {
       this.plan.branch === this.branch &&
       this.plan.environment === this.environment &&
       this.plan.authenticationMode === 'single-device-code' &&
+      (this.plan.branchAction !== 'fast-forward-existing' ||
+        this.approval.fastForwardExistingBranch === true) &&
       /^[a-f0-9]{40}$/.test(this.plan.baseSha || '') &&
       this.plan.maxJobMinutes === 30
     );
@@ -129,20 +131,41 @@ class Controller {
     if (main.object.sha !== this.plan.baseSha) {
       throw new Error('MAIN_CHANGED_AFTER_REVIEW');
     }
-    if (await this.github.request('GET', this.prefix + '/git/ref/heads/' + this.branch, undefined, true)) {
-      throw new Error('LAB_BRANCH_ALREADY_EXISTS');
+    const branch = await this.github.request('GET', this.prefix + '/git/ref/heads/' + this.branch, undefined, true);
+    const updating = this.plan.branchAction === 'fast-forward-existing';
+    if (updating) {
+      if (!/^[a-f0-9]{40}$/.test(this.plan.expectedBranchSha || '') ||
+          branch?.value?.object?.sha !== this.plan.expectedBranchSha) {
+        throw new Error('LAB_BRANCH_CHANGED_AFTER_REVIEW');
+      }
+      this.parentSha = this.plan.expectedBranchSha;
+    } else {
+      if (branch) {
+        throw new Error('LAB_BRANCH_ALREADY_EXISTS');
+      }
+      this.parentSha = this.plan.baseSha;
     }
-    if (await this.github.request('GET', this.prefix + '/environments/' + this.environment, undefined, true)) {
-      throw new Error('LAB_ENVIRONMENT_ALREADY_EXISTS');
+    const existingEnvironment = await this.github.request('GET', this.prefix + '/environments/' + this.environment, undefined, true);
+    if (existingEnvironment) {
+      await this.verifyRecreatedEnvironment(existingEnvironment.value);
     }
-    const commit = (await this.github.request('GET', this.prefix + '/git/commits/' + this.plan.baseSha)).value;
+    const commit = (await this.github.request('GET', this.prefix + '/git/commits/' + this.parentSha)).value;
     const baseTree = (await this.github.request('GET', this.prefix + '/git/trees/' + commit.tree.sha + '?recursive=1')).value;
     if (baseTree.truncated) {
       throw new Error('BASE_TREE_TRUNCATED');
     }
     const existing = new Set(baseTree.tree.map(entry => entry.path));
     for (const entry of this.plan.publicFiles) {
-      if (existing.has(entry.repositoryPath)) {
+      const inLab = (
+        entry.repositoryPath === '.github/workflows/windows-regression-lab.yml' ||
+        entry.repositoryPath.startsWith('.ci/windows-regression-lab/')
+      );
+      if (!inLab ||
+          entry.repositoryPath.split('/').some(part => part === '..' || part === '.')) {
+        throw new Error('SOURCE_OUTSIDE_REVIEWED_LAB');
+      }
+      if (!updating &&
+          existing.has(entry.repositoryPath)) {
         throw new Error('LAB_PATH_ALREADY_EXISTS');
       }
     }
@@ -164,18 +187,63 @@ class Controller {
     const changed = [...new Set([...before.keys(), ...after.keys()])]
       .filter(name => JSON.stringify(before.get(name)) !== JSON.stringify(after.get(name)))
       .sort();
-    const expected = this.plan.publicFiles.map(entry => entry.repositoryPath).sort();
+    const expected = this.plan.publicFiles.filter(entry => {
+      const content = fs.readFileSync(entry.localPath);
+      const blob = crypto.createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
+      return JSON.stringify(before.get(entry.repositoryPath)) !== JSON.stringify(['100644', 'blob', blob]);
+    }).map(entry => entry.repositoryPath).sort();
     if (JSON.stringify(changed) !== JSON.stringify(expected)) {
       throw new Error('UNEXPECTED_GIT_TREE_CHANGE');
     }
+    if (changed.length === 0) {
+      throw new Error('NO_REVIEWED_SOURCE_CHANGE');
+    }
     const created = (await this.github.request('POST', this.prefix + '/git/commits', {
-      message: 'Add a single-session Windows regression lab',
-      tree: tree.sha, parents: [this.plan.baseSha]
+      message: updating ? 'Fix owner-verified relay metadata in Windows regression lab' : 'Add a single-session Windows regression lab',
+      tree: tree.sha, parents: [this.parentSha]
     })).value;
     this.commitSha = created.sha;
     this.save('prepared-commit.json', {
-      sha: created.sha, baseSha: this.plan.baseSha,
+      sha: created.sha, baseSha: this.plan.baseSha, parentSha: this.parentSha,
       publicPaths: this.plan.publicFiles.map(entry => entry.repositoryPath)
+    });
+  }
+
+  async verifyRecreatedEnvironment(environment) {
+    const expected = this.plan.recreatedEnvironment;
+    const matches = (
+      expected &&
+      environment.id === expected.id &&
+      environment.name === this.environment &&
+      environment.created_at === expected.createdAt &&
+      environment.updated_at === expected.createdAt &&
+      environment.deployment_branch_policy === null &&
+      Array.isArray(environment.protection_rules) &&
+      environment.protection_rules.length === 0
+    );
+    if (!matches) {
+      throw new Error('LAB_ENVIRONMENT_ALREADY_EXISTS');
+    }
+    const run = (await this.github.request('GET', this.prefix + '/actions/runs/' + expected.runId)).value;
+    const ownedRun = (
+      run.status === 'completed' &&
+      run.head_sha === this.plan.expectedBranchSha &&
+      run.updated_at === expected.createdAt
+    );
+    if (!ownedRun) {
+      throw new Error('RECREATED_ENVIRONMENT_RUN_MISMATCH');
+    }
+    const secrets = (await this.github.request('GET', this.prefix + '/environments/' + this.environment + '/secrets')).value;
+    const variables = (await this.github.request('GET', this.prefix + '/environments/' + this.environment + '/variables')).value;
+    if (secrets.total_count !== 0 ||
+        variables.total_count !== 0) {
+      throw new Error('RECREATED_ENVIRONMENT_IS_NOT_EMPTY');
+    }
+    this.save('recreated-environment-verification.json', {
+      id: environment.id, name: environment.name,
+      createdAt: environment.created_at, previousRunId: run.id,
+      secrets: 0, variables: 0,
+      action: 'Reconfigure only this verified empty placeholder for the approved run.'
     });
   }
 
@@ -216,7 +284,8 @@ class Controller {
       ...this.owner.reference,
       hostPrivateKey: this.identity.host.private,
       clientPublicKey: this.identity.client.public,
-      hostAccessToken: this.owner.tokens.host
+      hostAccessToken: this.owner.tokens.host,
+      relayConfiguration: this.owner.configuration
     };
     const secretPrefix = this.prefix + '/environments/' + this.environment + '/secrets';
     const key = (await this.github.request('GET', secretPrefix + '/public-key')).value;
@@ -244,14 +313,24 @@ class Controller {
     if (main.object.sha !== this.plan.baseSha) {
       throw new Error('MAIN_CHANGED_BEFORE_PUBLISH');
     }
-    await this.github.request('POST', this.prefix + '/git/refs', {
-      ref: 'refs/heads/' + this.branch, sha: this.commitSha
-    });
+    if (this.plan.branchAction === 'fast-forward-existing') {
+      const current = (await this.github.request('GET', this.prefix + '/git/ref/heads/' + this.branch)).value;
+      if (current.object.sha !== this.plan.expectedBranchSha) {
+        throw new Error('LAB_BRANCH_CHANGED_BEFORE_PUBLISH');
+      }
+      await this.github.request('PATCH', this.prefix + '/git/refs/heads/' + this.branch, {
+        sha: this.commitSha, force: false
+      });
+    } else {
+      await this.github.request('POST', this.prefix + '/git/refs', {
+        ref: 'refs/heads/' + this.branch, sha: this.commitSha
+      });
+    }
     const readback = (await this.github.request('GET', this.prefix + '/git/ref/heads/' + this.branch)).value;
     if (readback.object.sha !== this.commitSha) {
       throw new Error('BRANCH_READBACK_MISMATCH');
     }
-    console.log('Created the approved lab branch. Waiting for its one Windows job.');
+    console.log('Published the approved lab commit. Waiting for its one Windows job.');
   }
 
   async findRun() {
@@ -283,7 +362,7 @@ class Controller {
         throw new Error('HOST_JOB_ENDED_BEFORE_SSH');
       }
       if (run?.status === 'in_progress') {
-        const tunnel = await this.relay.get(this.owner.reference, this.owner.tokens.connect);
+        const tunnel = await this.owner.readVerified(this.github.token);
         if (tunnel.endpoints?.length) {
           this.save('active-run.json', run);
           return;
@@ -364,7 +443,8 @@ class Controller {
   }
 
   async execute() {
-    const socket = await this.relay.client(this.owner.reference, this.owner.tokens.connect);
+    const currentRelay = await this.owner.readVerified(this.github.token);
+    const socket = await this.relay.client(this.owner.reference, this.owner.tokens.connect, currentRelay);
     this.ssh = new PinnedClient(this.identity.client.private, this.identity.hostHash);
     await this.ssh.connect(socket);
     const status = await this.command('status', null, 16384);
@@ -428,7 +508,38 @@ class Controller {
     } catch {
       failures.push('CLIENT_RELAY_CLOSE_FAILED');
     }
-    if (this.environmentCreated) {
+    try {
+      await this.owner.delete(entry => this.audit(entry));
+    } catch {
+      failures.push('TUNNEL_CLEANUP_UNVERIFIED');
+    }
+    const branchAttempted = this.auditRecords.some(entry =>
+      entry.phase === 'attempt' && entry.endpoint?.includes('/git/refs')
+    );
+    let jobTerminal = !branchAttempted;
+    if (branchAttempted) {
+      try {
+        const deadline = Date.now() + 40 * 60 * 1000;
+        while (Date.now() < deadline) {
+          const run = await this.findRun();
+          if (run?.status === 'completed') {
+            this.save('cleanup-terminal-run.json', {
+              id: run.id, status: run.status, conclusion: run.conclusion,
+              headSha: run.head_sha, observedAt: new Date().toISOString()
+            });
+            jobTerminal = true;
+            break;
+          }
+          await sleep(5000);
+        }
+        if (!jobTerminal) {
+          failures.push('JOB_TERMINATION_UNVERIFIED');
+        }
+      } catch {
+        failures.push('JOB_TERMINATION_UNVERIFIED');
+      }
+    }
+    if (this.environmentCreated && jobTerminal) {
       try {
         await this.github.request('DELETE', this.prefix + '/environments/' + this.environment);
         const remaining = await this.github.request('GET', this.prefix + '/environments/' + this.environment, undefined, true);
@@ -439,11 +550,6 @@ class Controller {
       } catch {
         failures.push('ENVIRONMENT_CLEANUP_UNVERIFIED');
       }
-    }
-    try {
-      await this.owner.delete(entry => this.audit(entry));
-    } catch {
-      failures.push('TUNNEL_CLEANUP_UNVERIFIED');
     }
     this.identity?.discard();
     this.github?.discard();
