@@ -47,3 +47,13 @@ The next candidate collects style and audit failures, then continues independent
 installation checks on the same qualified input. Every nonzero check still fails
 the overall result. Syntax, installation and runtime failures remain fail-fast;
 this does not disable an audit or convert its failure into success.
+
+The third run passed syntax, style and audit, fetched the exact tarball and lock,
+and reached the formula install method. Homebrew's protected `Pathname#write`
+refused to overwrite the existing staged `package.json`; the candidate now uses
+the documented `atomic_write` API. That run also exposed a stock runner command
+link from `/opt/homebrew/bin/openssl` to the old `openssl@1.1` keg while installing
+the Node dependency's OpenSSL 3. A proposed next bundle temporarily removes only
+that verified alias and restores its original target during cleanup. It does
+not remove an OpenSSL package/library, use overwrite flags, or trust other taps.
+Those changes require approval of the next run; none has been executed yet.
