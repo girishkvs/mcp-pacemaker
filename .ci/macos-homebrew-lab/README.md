@@ -57,3 +57,13 @@ the Node dependency's OpenSSL 3. A proposed next bundle temporarily removes only
 that verified alias and restores its original target during cleanup. It does
 not remove an OpenSSL package/library, use overwrite flags, or trust other taps.
 Those changes require approval of the next run; none has been executed yet.
+
+The fourth approved run installed the formula successfully and restored the
+stock OpenSSL link during cleanup. The first CLI invocation then failed with
+ENOENT. Inspection of Homebrew's helper source established that
+`env_script_all_files` wraps files already in its receiver directory; it does
+not create wrappers from the argument directory. The empty public `bin` therefore
+produced no commands. The local formula now writes both explicit wrappers to
+the npm-created `libexec/bin` entrypoints. The next candidate also records the
+installed layout and verifies the dependency graph before invoking the CLI.
+No fifth run has been approved or started.
