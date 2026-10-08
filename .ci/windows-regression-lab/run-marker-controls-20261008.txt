@@ -1,0 +1,12 @@
+Windows regression lab run marker
+=================================
+
+Run purpose: corrected stock-loopback controls pass (methodology fixes from the
+two independent critiques, 2026-10-08).
+
+Corrected private bundle (transferred over SSH, not committed):
+  stock-loopback-bundle-controls-20261008.zip
+  sha256 6edd647ad87d900b771565bf9f2f8cd9f2b98b23b3a22bee5d33acdae67ad1a4
+
+This marker only exists to trigger one fresh Windows job on the lab branch. It
+contains no secrets and no private results.
