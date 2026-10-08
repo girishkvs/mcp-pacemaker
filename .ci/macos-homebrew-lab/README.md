@@ -36,3 +36,14 @@ extraction permissions, CRLF and formula-helper/hash-alignment issues before
 installation began. Results and cleanup receipts are retained in the first run
 directory. The local fixes need a separately approved follow-up job; that first
 run is not installation or lifecycle evidence.
+
+The second run passed Ruby syntax and Homebrew style. Audit then found one
+redundant `version "2.0.2"` stanza, since the immutable tarball URL already
+identifies that version. The local formula now lets Homebrew infer it from
+that URL. Both failed-run results and verified cleanup receipts are preserved;
+installation and functional checks have not yet run.
+
+The next candidate collects style and audit failures, then continues independent
+installation checks on the same qualified input. Every nonzero check still fails
+the overall result. Syntax, installation and runtime failures remain fail-fast;
+this does not disable an audit or convert its failure into success.
