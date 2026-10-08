@@ -1,0 +1,15 @@
+Windows regression lab run marker
+=================================
+
+Run purpose: deep UNC stress matrix (2026-10-08). Validates whether ANY configuration
+fetches a UNC DT_NEEDED library — forward/back/mixed/device/redundant/dotdot/subdir
+absolute UNC, UNC configured search path with a relative name, depth-2 recursion,
+mirror-layout, disk-off controls, nested decoy, plus a read-only comparator/component
+diagnostic and an SMB-client ETW trace.
+
+Corrected private bundle (transferred over SSH, not committed):
+  stock-loopback-bundle-stress-20261008.zip
+  sha256 c5b13d19f93354956fc04eba9e656b693025648c469bff33c267a18e944fc03c
+
+This marker only exists to trigger one fresh Windows job on the lab branch. It contains
+no secrets and no private results.
