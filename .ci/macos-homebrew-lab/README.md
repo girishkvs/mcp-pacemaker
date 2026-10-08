@@ -81,3 +81,12 @@ The new local candidate uses `npm ci` with the original root `package-lock.json`
 inside `libexec`, retains the existing expected versions/checksum, and records
 all dependency differences before failing. Homebrew's script suppression and
 cooldown stay enabled. No new job is approved merely by preparing this fix.
+
+The sixth actual macOS run passed the exact 48-dependency comparison, CLI help,
+and `brew test`, in addition to syntax/style/audit/install/uninstall. The final
+MCP smoke test queried a nonexistent `/health` path although the bridge was
+listening; the released readiness endpoint is `/status`. That harness error is
+fixed locally with service/version/port/config checks. The identical corrected
+initialize/notification/tool-call/delete sequence passed locally against the
+retained published bridge without downloads or global configuration changes.
+That local check is not substituted for a clean macOS round trip.
