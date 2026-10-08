@@ -1,0 +1,15 @@
+Windows regression lab run marker
+=================================
+
+Run purpose: PE (Windows DLL) UNC validation (2026-10-08). Confirms dynamically whether
+PeLoader fetches a UNC-referenced DLL import — forward/back absolute UNC and a UNC
+configured search path with a relative DLL name — using real PE32+ fixtures whose import
+table carries the UNC DLL name. Includes an ELF positive anchor, PE positive control, the
+read-only comparator/component diagnostic, and an SMB-client ETW trace.
+
+Corrected private bundle (transferred over SSH, not committed):
+  stock-loopback-bundle-pe-20261008.zip
+  sha256 b6dddb92d40b5ee40b30e7a7cd1e85b8b6e1cd0f19443ab2b2d4a647220d3ea6
+
+This marker only exists to trigger one fresh Windows job on the lab branch. It contains no
+secrets and no private results.
