@@ -12,7 +12,7 @@ branch on a first-attempt `macos-15` ARM64 GitHub-hosted job.
 The bundle stages the formula with LF line endings and public source permissions
 (`0644`) inside the temporary tap; private SSH extraction stays `0600`.
 It validates the exact local Homebrew formula: Ruby syntax, style/audit,
-installation, retained shrinkwrap and all 48 production versions, isolated
+installation, retained source root lock and all 48 production versions, isolated
 `brew test`, a real synthetic MCP initialize/tool-call/delete round trip, no
 automatic per-user setup, package removal and local tap cleanup.
 
@@ -29,6 +29,10 @@ or result archive. The test bundle and results travel privately over SSH.
 Local testing reuses the already installed transport dependencies via `NODE_PATH`;
 it performs no new dependency acquisition on the work machine. The hosted
 runner uses the source lock as an ordinary public CI dependency install.
+
+## Retained execution history
+
+The following paragraphs describe successive checkpoints, not current approval.
 
 The first macOS run reached Homebrew 6.0.22 on macOS 15.7.9 ARM64 through the
 verified SSH session. Ruby syntax passed, but Homebrew style found private
@@ -67,3 +71,13 @@ produced no commands. The local formula now writes both explicit wrappers to
 the npm-created `libexec/bin` entrypoints. The next candidate also records the
 installed layout and verifies the dependency graph before invoking the CLI.
 No fifth run has been approved or started.
+
+The fifth approved run confirmed both executable wrappers, then caught a real
+dependency mismatch: 0.3.1 installed where the qualified source lock requires
+`@alcalzone/ansi-tokenize` 0.3.0. Current npm documentation says npm v12 ignores
+shrinkwrap. The prior build-npm version was not recorded, so the evidence claim
+is the observed drift, not an inferred exact installer version.
+The new local candidate uses `npm ci` with the original root `package-lock.json`
+inside `libexec`, retains the existing expected versions/checksum, and records
+all dependency differences before failing. Homebrew's script suppression and
+cooldown stay enabled. No new job is approved merely by preparing this fix.
