@@ -268,29 +268,24 @@ No exemptions are supplied by this tool. Review metadata is not echoed; input ha
 public finding coordinates are recorded. This gate does not prove safe manifest ranges,
 consumer behavior, licenses, notices, cryptographic provenance or registry signatures.
 
-The existing generic `exemptionsPath` contract is separate from the narrowly
-reviewed **2.0.2 producer-root and producer-UI** exception documented in
+The existing generic `exemptionsPath` contract is separate from the retired
+**2.0.2 producer-root and producer-UI** exception documented in
 [npm publishing](../../docs/npm-publishing.md#temporary-202-producer-risk-acceptance).
-The publication source adapter supplies an explicit `producerContext` with phase,
-release version and `producer-root-and-ui` scope. The shared evaluator requires
-both exact physical producer locks, the four reviewed package/version/advisory
-tuples in their original scopes, and the
-approval/expiry window ending **2026-10-12T00:00:00Z**. It is never forwarded as
-a global exemption or applied to fresh-consumer graphs. The `smol-toml` root
-finding is explicitly **CLI runtime**, not a build-only risk. The other three
-findings must remain UI-build-only. A coordinate shared across scopes cannot
-use this exception. Both locks are rehashed after
-queries and expiry is checked again before accepting the result.
+Fresh native audits require zero findings, and fresh OSV scans no longer consult
+that release-specific review, even for its original lock bytes and approval window.
+It is never forwarded as a global exemption or applied to fresh-consumer graphs.
+Both locks are rehashed after queries. Historical receipt validation retains the
+exact original scopes, reports and **2026-10-12T00:00:00Z** expiry; it does not
+authorize a new scan.
 
-OSV raw findings remain in `findings`, including ID and modified timestamp; only
-eligible findings are labeled `reviewed-exemption` and carry public
-`riskAcceptance` details. `rawFindingCount`, `remainingFindings`, graph hashes,
-raw-response SHA256 and bytes are retained. A policy pass with this exception
-is **RISK-ACCEPTED**, not advisory-free. Native npm audit uses the same review and
-retains exit1/one moderate root entry and exit1/six high plus two moderate UI
-entries, with distinct exact report fingerprints. Unknown/extra findings, changed reports, execution
-failures or expired review are not accepted. No CLI flag or ambient variable
-enables the release-specific exception for other scopes.
+OSV raw findings remain in `findings`, including ID and modified timestamp;
+`rawFindingCount`, `remainingFindings`, graph hashes, raw-response SHA256 and
+bytes are retained. Old **RISK-ACCEPTED** receipts must never be relabeled as
+advisory-free. Their native exit1/one moderate root entry and exit1/six high plus
+two moderate UI entries remain bound to distinct exact report fingerprints.
+Unknown/extra findings, changed reports, execution failures or expired historical
+reviews are rejected. No CLI flag or ambient variable re-enables the retired
+release-specific exception.
 
 ## Separate private-content policy and owner review
 

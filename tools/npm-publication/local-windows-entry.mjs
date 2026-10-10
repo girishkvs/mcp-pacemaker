@@ -8,9 +8,10 @@ import { bindGuestIdentity, windowsSystemEnvironment } from './local-environment
 
 mkdirSync('C:\\output');
 const [mode, owner, manifestSha256, nodeSha256, publisherSha256] = process.argv.slice(2);
+const sourceMode = mode === 'gate' || mode === 'audit';
 assert.match(owner, /^[a-f0-9-]{36}$/);
 assert.equal(sha256(readFileSync(process.execPath)), nodeSha256, 'Guest Node bytes differ');
-if (mode === 'gate') assert.equal(sha256(readFileSync('C:\\publisher-node.exe')), publisherSha256);
+if (sourceMode) assert.equal(sha256(readFileSync('C:\\publisher-node.exe')), publisherSha256);
 const runtime = {
   platform: process.platform, os: release(), node: process.version, cpu: availableParallelism(),
   network: networkInterfaces(), pid: process.pid, owner, manifestSha256, nodeSha256, publisherSha256,
@@ -73,7 +74,7 @@ if (mode === 'fail') {
   assert.ok(child.pid > 0);
   setInterval(() => {}, 1000);
 } else {
-  assert.equal(mode, 'gate');
+  assert.equal(sourceMode, true);
   const manifestBytes = readFileSync('C:\\input\\manifest.json');
   assert.equal(sha256(manifestBytes), manifestSha256, 'Host-to-guest manifest changed');
   const manifest = JSON.parse(manifestBytes);
@@ -112,6 +113,19 @@ if (mode === 'fail') {
     cpSync(join('C:\\input\\source', name), join('C:\\source', name), { recursive: true, dereference: false });
   }
   process.chdir('C:\\source');
+  const current = manifest.version.startsWith('2.');
+  if (mode === 'audit') assert.equal(current, true);
+  if (mode === 'gate' &&
+      current) {
+    const { queryCliCallerContext, requireOrdinaryUpgradeCaller } =
+      await import('file:///C:/source/bin/windows-task-channel.mjs');
+    const { validateOrdinarySourceContext } =
+      await import('file:///C:/source/tools/npm-publication/local-audit-report.mjs');
+    runtime.ordinaryContext = await queryCliCallerContext();
+    validateOrdinarySourceContext(runtime.ordinaryContext, runtime.identity, runtime.pid);
+    await requireOrdinaryUpgradeCaller();
+    writeFileSync('C:\\output\\runtime.json', JSON.stringify(runtime), { flush: true });
+  }
   const { LocalGate } = await import('file:///C:/source/tools/npm-publication/local-gate.mjs');
   const gate = new LocalGate({
     root: 'C:\\source', npmCli: 'C:\\input\\npm\\bin\\npm-cli.js', output: 'C:\\output\\gate',
@@ -120,7 +134,8 @@ if (mode === 'fail') {
     containment: { kind: 'hyperv-network-none', root: 'C:\\source', output: 'C:\\output', manifestSha256 },
   });
   try {
-    await gate.run();
+    if (mode === 'audit') await gate.runAudit();
+    else await gate.run();
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

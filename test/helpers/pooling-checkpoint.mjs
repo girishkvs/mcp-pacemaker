@@ -53,11 +53,13 @@ export class PoolingCheckpoint {
     }
     return new Promise((resolve, reject) => {
       let watcher;
+      let pollTimer;
       let settled = false;
       const finish = (error) => {
         if (settled) return;
         settled = true;
         watcher?.close();
+        clearTimeout(pollTimer);
         this.signal.removeEventListener('abort', aborted);
         if (error) reject(error);
         else resolve();
@@ -76,6 +78,9 @@ export class PoolingCheckpoint {
           : new Error(`Expected checkpoint ${this.phase}, received ${phase}`));
         return true;
       };
+      const recheck = () => {
+        if (!observe()) pollTimer = setTimeout(recheck, 10);
+      };
       const aborted = () => finish(this.signal.reason);
 
       // Completion can arrive before delivery of the filesystem notification.
@@ -90,16 +95,14 @@ export class PoolingCheckpoint {
         return;
       }
       try {
-        watcher = fs.watch(fs.realpathSync.native(this.directory), (_event, filename) => {
-          if (filename === null ||
-              filename.toString() === 'entered') observe();
-        });
+        watcher = fs.watch(fs.realpathSync.native(this.directory), () => observe());
         watcher.on('error', finish);
       } catch (error) {
         finish(error);
         return;
       }
-      observe();
+      // Filesystem notifications can be coalesced or lost; the marker and fixture abort remain authoritative.
+      recheck();
     });
   }
 }

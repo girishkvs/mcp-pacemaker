@@ -7,12 +7,20 @@
       "version": "5.2.0"
     },
     {
-      "name": "autoprefixer",
-      "version": "10.5.4"
+      "name": "@tailwindcss/postcss",
+      "version": "4.3.3"
+    },
+    {
+      "name": "@tailwindcss/node",
+      "version": "4.3.3"
+    },
+    {
+      "name": "@tailwindcss/oxide",
+      "version": "4.3.3"
     },
     {
       "name": "postcss",
-      "version": "8.5.26"
+      "version": "8.5.28"
     },
     {
       "name": "rollup",
@@ -20,19 +28,19 @@
     },
     {
       "name": "tailwindcss",
-      "version": "3.4.19"
+      "version": "4.3.3"
     },
     {
       "name": "vite",
       "version": "7.3.6"
     }
   ],
-  "producerLockSha256": "b88a73a6212e26f4c4dde985d84eadf39870c8758e4698cdd5544b8a55eb8cca",
+  "producerLockSha256": "5ac61562ea1bd680a2326aeee0967814839cb3c1a632907572ff1cf7c6bb1703",
   "projectLicenseSha256": "590ad9c29ee5580f83b9c05e403ca259d89e8366d1ed4c7207aa5e0a07afbf79",
-  "noticesSha256": "11abb641d5175ce3817909603274fd0675b222ed53fae98d3513fd3f25eb56fc",
+  "noticesSha256": "2843c26d27582cd029efa8d82408817ac82af0d5b9c4e7cd7962103b70244dfe",
   "chunks": [
     {
-      "file": "assets/index-CgPruWYi.js",
+      "file": "assets/index-CcwMo2sI.js",
       "modules": [
         {
           "id": "commonjs:node_modules/react-dom/cjs/react-dom.production.min.js?commonjs-exports",
@@ -210,7 +218,7 @@
         {
           "id": "src/components/LogDrawer.tsx",
           "package": null,
-          "renderedLength": 2090
+          "renderedLength": 2092
         },
         {
           "id": "src/components/PoolingBatchStatus.tsx",
@@ -283,8 +291,13 @@
   ],
   "generated": [
     {
-      "id": "node_modules/tailwindcss/lib/css/preflight.css",
-      "package": "tailwindcss@3.4.19",
+      "id": "node_modules/tailwindcss/index.css",
+      "package": "tailwindcss@4.3.3",
+      "kind": "css-source"
+    },
+    {
+      "id": "node_modules/tailwindcss/preflight.css",
+      "package": "tailwindcss@4.3.3",
       "kind": "tailwind-preflight",
       "evidence": "emitted CSS selectors"
     }
@@ -359,8 +372,12 @@
       "sha256": "b413b3aac7bd209fd82cbe2241fda1467558daaef830744f45ed8396fac9185e"
     },
     {
-      "path": "node_modules/tailwindcss/lib/css/preflight.css",
-      "sha256": "1d85e5cc0262f68a4f1313c4754a61c7ff56da4cc24866e76bcde9d4e467feac"
+      "path": "node_modules/tailwindcss/index.css",
+      "sha256": "175f88737ecb7e033059eac4a3b22a3b5f971d5a05d9fd50811610a0714633b2"
+    },
+    {
+      "path": "node_modules/tailwindcss/preflight.css",
+      "sha256": "ace8310eed6dc5568a56fc16e1d695cf58da7528d81d66d81649e93cce644df6"
     },
     {
       "path": "src/App.tsx",
@@ -372,7 +389,7 @@
     },
     {
       "path": "src/components/LogDrawer.tsx",
-      "sha256": "73566b320bcc4fd75f748722cfe4e31b7c4dd4fc8a39cc92d48ae707012bf4c1"
+      "sha256": "6db8c955f2b90ae2df1afd70ea4fd1e67b0252bae595af50c3109cf599538d00"
     },
     {
       "path": "src/components/PoolingBatchStatus.tsx",
@@ -412,7 +429,7 @@
     },
     {
       "path": "src/index.css",
-      "sha256": "bc95d7b1d366906702bdb2837f942390771967e718d6eff9773bb6c915badbc5"
+      "sha256": "0c88c1a76ffd48889c5ad526f6d9d7df31ac2768604593f83eaf4056e978e94a"
     },
     {
       "path": "src/lib/api.ts",
@@ -502,7 +519,7 @@
     },
     {
       "name": "tailwindcss",
-      "version": "3.4.19",
+      "version": "4.3.3",
       "license": "MIT",
       "lockPath": "node_modules/tailwindcss",
       "licenses": [
@@ -510,11 +527,6 @@
           "file": "LICENSE",
           "sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
           "text": "MIT License\n\nCopyright (c) Tailwind Labs, Inc.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
-        },
-        {
-          "file": "lib/css/LICENSE",
-          "sha256": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
-          "text": "MIT License\n\nCopyright (c) Nicolas Gallagher\nCopyright (c) Jonathan Neal\nCopyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)\nCopyright (c) Adam Wathan\nCopyright (c) Jonathan Reinink\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
         }
       ],
       "comments": []
@@ -582,16 +594,16 @@
   ],
   "artifacts": [
     {
-      "file": "assets/index-CaLPg0c-.css",
-      "sha256": "2c1e1814f4ff96369e13f0a605eab41d84c99182156fc256bd83bfd7719abd20"
+      "file": "assets/index-CcwMo2sI.js",
+      "sha256": "63059492db638d0df1ced0b5aa47c495ea62dfee97a968172249403d8f5121b2"
     },
     {
-      "file": "assets/index-CgPruWYi.js",
-      "sha256": "4aed07c744802b58cb7b90256f0d88094069487a8182ae8de3047837f2be6198"
+      "file": "assets/index-PVcuDNrN.css",
+      "sha256": "687518779fd005259f512c23e97f139fdddebca0d8af9aa800afeebd65cb7fd8"
     },
     {
       "file": "index.html",
-      "sha256": "28f57669b7d32f4892aa99c3c58a6579f6b8ca7ec03ba74f15564fed1c43d6e6"
+      "sha256": "9c92a92e705466d50692a04c8e1b1672f9d430cda459fff1b93654edf3b9270b"
     }
   ]
 }

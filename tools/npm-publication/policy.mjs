@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { isCanonicalUnsigned, releaseRole, validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
 import { assertCollectionJobSkipped, secretHash, secretId, sourceCiAttempt, validateSecretCollection, validateSecretReview } from './secret-report.mjs';
-import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
+import { requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const POLICY = Object.freeze({
   name: 'mcp-pacemaker',
@@ -339,7 +339,12 @@ export function validatePackage(pkg, approval) {
     assert.ok(Object.hasOwn(allowed, key), `Unreviewed publishConfig: ${key}`);
     assert.equal(value, allowed[key], `Conflicting publishConfig.${key}`);
   }
-  assert.equal(pkg.dependencies?.['smol-toml'], '^1.8.0', 'Reviewed safe direct TOML floor is required');
+  const tomlFloor = pkg.dependencies?.['smol-toml'];
+  // Historical published releases that shipped the older reviewed floor. Narrower than the
+  // advisory exception list in publication-scanners/advisories.mjs, which retired 2.0.2.
+  const isHistoricalPublishedVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(pkg.version);
+  assert.ok(tomlFloor === '^1.9.0' ||
+    isHistoricalPublishedVersion && tomlFloor === '^1.8.0', 'Reviewed direct TOML floor is required');
   if (Object.hasOwn(pkg, 'gitHead')) {
     assert.match(pkg.gitHead, /^[a-f0-9]{40}$/, 'Malformed packed gitHead');
     assert.equal(pkg.gitHead, approval.commit);
@@ -396,7 +401,7 @@ export function validateGates(report, approval, artifact) {
   validateProducerAdvisories(report.gates?.['producer-advisories'], {
     version: subject.version, source: report.source, checks: report.sourceChecks, complete: true,
   });
-  if (subject.version === '2.0.2') assert.equal(report.source.commit, approval.commit);
+  if (requiresProducerAdvisoryEvidence(subject.version)) assert.equal(report.source.commit, approval.commit);
   for (const name of REQUIRED_GATES) {
     const gate = report.gates?.[name];
     validateGateStatus(name, gate);
@@ -435,9 +440,14 @@ export function validateCi(run, jobs, approval) {
   assert.equal(run.status, 'completed');
   assert.equal(run.conclusion, 'success');
   const required = ['Lockfiles resolve to the public registry', 'ui'];
-  for (const os of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
+  // A stock hosted Windows runner signs in as the built-in Administrator, so its own context cannot
+  // host the ordinary user-runtime contract. That lane provisions a disposable standard account and
+  // runs every registered file except the four that bind a real interactive logon session, which
+  // remain required from the local ordinary-session gate.
+  for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) required.push(`test (${os}, ${node})`);
   }
+  for (const node of [20, 22, 24]) required.push(`windows-ordinary (${node})`);
   for (const name of required) {
     const matches = jobs.filter(job => job.name === name);
     assert.equal(matches.length, 1, `CI job missing or ambiguous: ${name}`);

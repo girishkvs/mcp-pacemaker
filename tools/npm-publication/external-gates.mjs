@@ -15,6 +15,9 @@ import { inspectTarball } from './tarball.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
 import { readSecretAdmission } from './secret-admission.mjs';
 import { releaseRole, releaseVersions } from './local-regression.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime, LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST, LIFETIME_REQUIRED_TESTS } from '../windows-process-lifetime/inventory.mjs';
+import { verifyLegacyFeature, verifyLegacyExecution } from './legacy-broker-gate.mjs';
+import { verifyTaskChannelFeature, verifyTaskChannelExecution } from './task-channel-gate.mjs';
 
 export const SOURCE_GATES = Object.freeze([
   'source-gitleaks', 'source-trufflehog', 'source-private-identifiers', 'producer-advisories',
@@ -161,7 +164,11 @@ export async function verifyNativeIdentity(request, { run = command } = {}) {
       } else equal(hash(bytes), actual.sha256);
     }
     return { baselineCommit, files: local.sort((a, b) => a.path.localeCompare(b.path)),
-      buildScript, reproducibilityBuild: 'not-executed-in-this-run' };
+      buildScript, reproducibilityBuild: 'not-executed-in-this-run',
+      ...(verifyLegacyFeature(request.sourceRoot) ? { legacyBroker: verifyLegacyFeature(request.sourceRoot) } : {}),
+      ...(verifyTaskChannelFeature(request.sourceRoot) ? { taskChannel: verifyTaskChannelFeature(request.sourceRoot) } : {}),
+      ...(requiresProcessLifetime(request.version)
+        ? { processLifetime: verifyProcessLifetimeAssets(request.sourceRoot, request.version) } : {}) };
   } finally {
     if (owned) rmSync(owned, { recursive: true });
   }
@@ -300,6 +307,34 @@ export function verifyWindowsExecution(request, nativeIdentity) {
       lane.npm === toolchain.npm &&
       id(lane.artifactId) === id(report.artifactId)));
     equal(report.status, 'actual-windows-execution');
+    const legacyBroker = verifyLegacyFeature(request.extractedRoot);
+    const taskChannel = verifyTaskChannelFeature(request.extractedRoot);
+    if (taskChannel) {
+      equal(nativeIdentity.taskChannel, taskChannel);
+      equal(report.taskChannel, taskChannel);
+      verifyTaskChannelExecution(report, { files: taskChannel.files.concat([{ path: 'bin/account-upgrade-worker.mjs' }]) });
+    }
+    if (legacyBroker) {
+      equal(nativeIdentity.legacyBroker, legacyBroker);
+      equal(report.legacyBroker, legacyBroker);
+      verifyLegacyExecution(report, { files: legacyBroker.files.concat([{ path: 'bin/legacy-upgrade.mjs' }]) });
+    }
+    if (requiresProcessLifetime(request.version)) {
+      const lifetime = verifyProcessLifetimeAssets(request.extractedRoot, request.version);
+      equal(nativeIdentity.processLifetime, lifetime);
+      equal(report.processLifetime, lifetime);
+      assert.ok(report.evidence.command.args.includes(LIFETIME_TEST),
+        'Native execution must run the actual Windows lifetime regression');
+      assert.ok(report.evidence.command.args.includes(LIFETIME_STARTUP_TEST),
+        'Native execution must run the containment startup/failure tests');
+      assert.ok(report.evidence.command.args.includes(LIFETIME_IDENTITY_TEST),
+        'Native execution must run the packaged identity rejection tests');
+      for (const name of LIFETIME_REQUIRED_TESTS) {
+        assert.ok(report.stdout.split(/\r?\n/).some(line =>
+          /^ok \d+ - /.test(line) && line.endsWith(name)),
+        `Missing executed lifetime/observer test: ${name}`);
+      }
+    }
     equal(report.files.toSorted((a, b) => a.path.localeCompare(b.path)), expected);
     equal(report.rebuild, 'not-performed');
     equal(report.ordinaryDesktopToken, 'not-proven');
@@ -326,7 +361,10 @@ export function verifyWindowsExecution(request, nativeIdentity) {
       counts, stdoutSha256: report.evidence.stdoutSha256, artifactId: id(report.artifactId),
       jobId: id(report.jobId), baselineCommit: nativeIdentity.baselineCommit,
       inheritedBaseline: 'matched-source-release-identity', rebuild: 'not-performed',
-      ordinaryDesktopToken: 'not-proven' };
+      ordinaryDesktopToken: 'not-proven',
+      ...(legacyBroker ? { legacyBroker } : {}),
+      ...(taskChannel ? { taskChannel } : {}),
+      ...(requiresProcessLifetime(request.version) ? { processLifetime: nativeIdentity.processLifetime } : {}) };
   });
 }
 
@@ -340,6 +378,13 @@ export function verifyRuntimeClosure(request, consumers) {
   if (releaseRole(request.version) === 'current') required.push('bin/pooling-execution.mjs', 'bin/pooling-batches.mjs',
     'bin/pooling-batch-scheduler.mjs');
   const files = required.flatMap(path => filesUnder(request.extractedRoot, path));
+  const legacyBroker = verifyLegacyFeature(request.extractedRoot);
+  if (legacyBroker) files.push(...legacyBroker.files);
+  const taskChannel = verifyTaskChannelFeature(request.extractedRoot);
+  if (taskChannel) files.push(...taskChannel.files);
+  if (requiresProcessLifetime(request.version)) {
+    files.push(...verifyProcessLifetimeAssets(request.extractedRoot, request.version).files);
+  }
   assert.ok(files.some(file => file.path === 'ui/dist/index.html'));
   assert.ok(files.some(file => /^ui\/dist\/assets\/.+\.js$/.test(file.path)));
   for (const consumer of consumers) {
@@ -547,7 +592,7 @@ export async function aggregateExternalGates(request, {
           { commit: request.commit, historySha256: report.authorIdentity.evidenceSha256 })] };
       active = 'native-release-identity';
       report.nativeIdentity = await verifyNativeIdentity(request, { run });
-      report.gates[active] = pass('Native helper bytes match immutable same-major release; build script matches its Git blob and declared CRLF checkout; no rebuild', report.nativeIdentity);
+      report.gates[active] = pass('Config helper matches immutable release and declared build-script checkout; separate lifetime helper matches recorded source/build/binary hashes; no rebuild', report.nativeIdentity);
     } else {
       report.consumerLanes = consumers.map(({ licenseEvidence, ...consumer }) => ({
         ...consumer, licenseEvidenceSha256: hash(JSON.stringify(licenseEvidence)),

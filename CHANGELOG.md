@@ -7,7 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Target release: **2.0.2**. This candidate has not yet been published.
+## [2.1.0] - 2026-10-12
+
+Target release: 2.1.0. This candidate has not yet been published.
+
+### Added
+
+- Explicit managed `upgrade --to`, read-only plans, isolated `--sxs` instances with
+  retained OS-assigned listeners, stable launchers, admission control and a durable
+  activation/recovery journal. Bare `upgrade` and `--self` remain compatible.
+- Preserve ports and host wiring during managed replacement; retain the previous
+  package and restrict rollback to verified, unchanged pre-admission state.
+- Add one-time restart-only migration for the exact Windows 1.3.0 registration,
+  with interactive uncertainty acknowledgement, held process identities, partial
+  observed-descendant receipts and scoped task/CLI rollback. No machine reboot.
+- Refuse unsupported or unknown supervisor/autostart identities before interruption.
+- Add explicit Windows original-account upgrades with a task-only administrator
+  controller and authenticated original-user worker. Keep current-user scope as
+  the default, preserve task security/account settings, and refuse unavailable or
+  changed logged-on session identity. Real elevated two-account qualification
+  remains required; `--all-users` is unsupported.
+
+### Fixed
+
+- Contain Windows bridge descendants in a kill-on-close Job Object before any
+  workload starts, preventing nested cmd/Node trees from surviving abrupt bridge
+  loss. Fail startup if containment cannot be established.
+- Preserve existing task security during legacy migration instead of resubmitting
+  its owner, allowing an ordinary user to update an eligible Administrators-owned
+  task without changing its permissions.
+- Handle Task Scheduler's equivalent XML serialization during post-write checks
+  and restoration, including rediscovery after rollback. Keep raw revision
+  preconditions, original backups and complete resource-security checks intact.
+- Avoid Windows upgrade-authorization failures caused by slow thread enumeration
+  and already-terminated thread records while retaining complete identity and
+  authority checks.
+- Capture larger legacy process trees with bounded discovery and distinguish
+  reused parent PIDs from proven descendant relationships.
+- Recheck shared-session test cooldown deadlines after early timer delivery before
+  acquiring a replacement generation.
+- Wait for the metrics test process and its stdio to close before removing fixture files.
+- Pin the Windows process-lifetime and task-channel helpers to their own packaged directory
+  instead of inheriting the caller's working directory. A process's working directory cannot
+  be removed on Windows, so a detached helper previously blocked removal of the instance,
+  configuration and staging directories with `EPERM`.
+- Report the native refusal reason when the task channel declines a request, instead of a
+  bare refusal with no cause.
+
+### Security
+
+- Refuse elevated or unverified default Windows upgrade and recovery before
+  staging, task writes or runtime launch, preserving the original runtime authority.
+- Raise the CLI's `smol-toml` floor to `1.9.0`.
+- Move the dashboard build to Tailwind CSS `4.3.3`, removing the vulnerable
+  `braces` and `postcss-selector-parser` dependency paths, and pin `source-map-js`
+  to `1.2.2`.
+- Retire the 2.0.2 producer exception from fresh native and OSV scans. New releases
+  require complete clean producer evidence; historical receipts retain their
+  original source bindings and expiry.
+
+### Changed
+
+- **Breaking for privileged callers.** The bridge, supervisor and default upgrades now verify
+  the caller before any runtime work and refuse an elevated or root caller at startup with
+  `User-runtime execution refused: …`. This is not Windows-only and not upgrade-only: on Linux
+  and macOS a `root` process is refused, which includes the default user in most container
+  images. There is no override; run as an ordinary account. Shipping this in a minor release is
+  deliberate — the previous behaviour let a bridge run with authority it could not verify.
+- Update the Tailwind PostCSS adapter, class-merging dependency, generated dashboard
+  assets and license attribution while retaining the existing theme configuration.
+
+## [2.0.2] - 2026-10-06
 
 ### Fixed
 
@@ -475,6 +545,10 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
+[Unreleased]: https://github.com/girishkvs/mcp-pacemaker/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.0
+[2.0.2]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.2
+[2.0.1]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.1
 [2.0.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.0
 [1.3.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.3.0
 [1.2.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v1.2.0

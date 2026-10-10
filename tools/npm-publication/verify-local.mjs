@@ -8,12 +8,13 @@ import { LocalCaseReplay } from './local-case-evidence.mjs';
 import { digest, sameDigests, npm12Contents } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import {
-  LOCAL_CONTRACT, localCases, localReportVersions, releaseRole, LOCAL_NODES, localHash, localCommitment,
+  LOCAL_CONTRACT, localCases, localCaseUser, localReportVersions, releaseRole, LOCAL_NODES, LOCAL_NATIVE_PACKAGES, localHash, localCommitment,
   validateLocalRegression,
 } from './local-regression.mjs';
 import { readLocalBytes, readLocalJson, controllerBinding, evidenceInventory, evidenceTar } from './local-evidence.mjs';
 import { validateContainer } from './local-windows.mjs';
 import { bindStageProofCheckout, requireStageProofCheckout } from './stage-proof-contract.mjs';
+import { AUDIT_COMMAND_TIMEOUT_MS, validateOrdinarySourceContext } from './local-audit-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
@@ -21,7 +22,7 @@ const sameFiles = (a, b) => assert.deepEqual([...a].sort((x, y) => x.path.locale
   [...b].sort((x, y) => x.path.localeCompare(y.path)));
 
 export function verifyLocalHeader(report) {
-  assert.equal(report?.schemaVersion, 2, 'A fresh schema 2 outer local report is required');
+  assert.equal(report?.schemaVersion, 3, 'A fresh schema 3 outer local report with audit companions is required');
   assert.equal(report.kind, 'private-local-publication-run');
   assert.equal(report.contract, LOCAL_CONTRACT);
   assert.equal(report.status, 'passed', 'Original complete local run did not pass');
@@ -37,23 +38,22 @@ export function verifyLocalHeader(report) {
   assert.deepEqual(report.nodes.map(item => item.version), LOCAL_NODES);
   assert.deepEqual(report.cases.map(item => item.name).sort(),
     localCases(localReportVersions(report)).map(item => item.name).sort());
-  assert.equal(report.cases.length, 9);
+  assert.equal(report.cases.length, 12);
   return report;
 }
 
 export function verifyCommandTimeout(command) {
   assert.equal(typeof command.label, 'string');
   assert.ok(Number.isSafeInteger(command.timeoutMs), 'Missing or invalid recorded local command timeoutMs');
-  const expected = command.label === 'Complete source suite' ? 25 * 60_000 : 15 * 60_000;
+  const expected = command.label === 'Complete source suite' ? 25 * 60_000
+    : command.label === 'Required privileged audit' ? AUDIT_COMMAND_TIMEOUT_MS : 15 * 60_000;
   assert.equal(command.timeoutMs, expected, 'Recorded local command timeoutMs differs from the reviewed harness budget');
   assert.ok(Number.isSafeInteger(command.elapsedMs) &&
     command.elapsedMs >= 0, 'Missing or invalid original command duration');
 }
 
 // Component replay also supports retained schema-1/2/3 diagnostics. It does not qualify a case or report.
-export async function verifyRecordedSteps(directory, gate, sourceRoot, version, options = {}) {
-  assert.equal(gate.kind, 'local-publication-regression');
-  assert.ok([1, 2, 3, 4].includes(gate.schemaVersion));
+function readCommands(directory, gate) {
   assert.equal(gate.status, 'passed');
   assert.equal(gate.releaseReady, false);
   assert.equal(gate.publicationCandidate, false);
@@ -83,11 +83,23 @@ export async function verifyRecordedSteps(directory, gate, sourceRoot, version, 
   });
   assert.deepEqual(readdirSync(directory).filter(name => /^command-/.test(name)).sort(),
     gate.steps.map(step => step.file).sort(), 'Missing or extra raw command receipts');
-  return new LocalCaseReplay(commands, gate, sourceRoot, version, options).verify(directory);
+  return commands;
+}
+
+export async function verifyRecordedSteps(directory, gate, sourceRoot, version, options = {}) {
+  assert.equal(gate.kind, 'local-publication-regression');
+  assert.ok([1, 2, 3, 4, 5].includes(gate.schemaVersion));
+  return new LocalCaseReplay(readCommands(directory, gate), gate, sourceRoot, version, options).verify(directory);
+}
+
+export function verifyAuditSteps(directory, gate, sourceRoot, version) {
+  assert.equal(gate.kind, 'local-privileged-audit');
+  assert.equal(gate.schemaVersion, 1);
+  new LocalCaseReplay(readCommands(directory, gate), gate, sourceRoot, version).verifyAudit();
 }
 
 export async function verifyRawSteps(directory, gate, sourceRoot, version, options = {}) {
-  assert.equal(gate.schemaVersion, 4, 'Fresh inner schema 4 with an explicit checkout policy is required');
+  assert.ok([4, 5].includes(gate.schemaVersion), 'Fresh inner schema 4/5 with an explicit checkout policy is required');
   const packOutput = await verifyRecordedSteps(directory, gate, sourceRoot, version, options);
   requireStageProofCheckout(options.checkout, sourceRoot, gate.source.head, version);
   const artifact = gate.checks['checkout-false'].artifact;
@@ -119,7 +131,8 @@ export async function verifyLocalCase(root, result, expected, report, input, com
   const lastPresent = inspections.filter(item => item.status === 0).at(-1);
   assert.ok(lastPresent, 'Missing original stopped-container inspection');
   const container = JSON.parse(lastPresent.stdout)[0];
-  validateContainer(container, { id, owner: report.runId, image: report.image });
+  validateContainer(container, { id, owner: report.runId, image: report.image,
+    user: localCaseUser(expected.mode, expected.version) });
   assert.deepEqual(container.State, result.container.state);
   assert.deepEqual(container.HostConfig, result.container.hostConfig);
   const absent = inspections.at(-1);
@@ -150,9 +163,10 @@ export async function verifyLocalCase(root, result, expected, report, input, com
   const node = report.nodes.find(item => item.version === version);
   assert.equal(guest.node, `v${version}`);
   assert.equal(guest.nodeSha256, node.sha256);
-  assert.equal(guest.publisherSha256, expected.mode === 'gate' ? report.nodes[2].sha256 : '-');
+  const sourceMode = expected.mode === 'gate' || expected.mode === 'audit';
+  assert.equal(guest.publisherSha256, sourceMode ? report.nodes[2].sha256 : '-');
   assert.equal(guest.manifestSha256, input?.sha256 ?? '-');
-  if (expected.mode === 'gate') {
+  if (sourceMode) {
     assert.equal(result.wait.error, null);
     assert.equal(result.wait.status, 0);
     assert.equal(result.container.state.ExitCode, 0);
@@ -164,8 +178,16 @@ export async function verifyLocalCase(root, result, expected, report, input, com
     assert.equal(gate.source.head, input.manifest.head);
     assert.equal(gate.containment.manifestSha256, input.sha256);
     assert.deepEqual(gate.source.files, input.manifest.sourceIdentity.files.map(({ path, sha256 }) => ({ path, sha256 })));
-    await verifyRawSteps(join(directory, 'guest/gate'), gate, join(input.directory, 'source'), expected.version,
-      { checkout: input.checkout });
+    if (expected.mode === 'audit') {
+      verifyAuditSteps(join(directory, 'guest/gate'), gate, join(input.directory, 'source'), expected.version);
+    } else {
+      if (releaseRole(expected.version) === 'current') {
+        assert.equal(gate.schemaVersion, 5, 'Current source requires ordinary execution and an audit companion');
+        validateOrdinarySourceContext(guest.ordinaryContext, guest.identity, guest.pid);
+      } else assert.equal(gate.schemaVersion, 4);
+      await verifyRawSteps(join(directory, 'guest/gate'), gate, join(input.directory, 'source'), expected.version,
+        { checkout: input.checkout });
+    }
   } else if (expected.mode === 'fail') {
     assert.equal(result.wait.error, null);
     assert.equal(result.wait.status, 0);
@@ -232,7 +254,12 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
       report.controller.files.find(item => item.path === path).sha256);
   }
   assert.deepEqual(Object.keys(sourceRoots).sort(), versions);
-  assert.deepEqual(Object.keys(toolRoots).sort(), ['git', 'node', 'npm', 'pwsh']);
+  assert.deepEqual(Object.keys(toolRoots).sort(), ['git', 'native', 'node', 'npm', 'pwsh']);
+  assert.deepEqual(readdirSync(toolRoots.native).sort(), Object.keys(LOCAL_NATIVE_PACKAGES).sort());
+  for (const [name, hash] of Object.entries(LOCAL_NATIVE_PACKAGES)) {
+    assert.equal(localHash(readLocalBytes(join(toolRoots.native, name), 128 * 1024 ** 2)), hash,
+      'Native archive differs from the pinned CI input');
+  }
   assert.equal(process.platform, 'win32', 'Verify the private Windows receipt on Windows');
   assert.equal(process.arch, 'x64');
   assert.equal(process.versions.node, '24.21.0', 'Use the retained publisher Node for final verification');
@@ -260,6 +287,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
       [...manifest.sourcePaths, 'node_modules', 'ui/node_modules']);
     compareInputSelection(toolRoots.npm, 'npm', manifest);
     compareInputSelection(toolRoots.pwsh, 'pwsh', manifest);
+    compareInputSelection(toolRoots.native, 'native', manifest);
     compareInputSelection(toolRoots.git, 'git', manifest,
       ['cmd', 'mingw64/bin', 'mingw64/libexec/git-core', 'usr/bin', 'usr/share']);
     const checkout = bindStageProofCheckout({ root: join(input, 'source'), identity,
@@ -284,6 +312,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
       [...input.manifest.sourcePaths, 'node_modules', 'ui/node_modules']);
     compareInputSelection(toolRoots.npm, 'npm', input.manifest);
     compareInputSelection(toolRoots.pwsh, 'pwsh', input.manifest);
+    compareInputSelection(toolRoots.native, 'native', input.manifest);
     compareInputSelection(toolRoots.git, 'git', input.manifest,
       ['cmd', 'mingw64/bin', 'mingw64/libexec/git-core', 'usr/bin', 'usr/share']);
   }
@@ -301,7 +330,8 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
 }
 
 export async function main(args) {
-  const names = ['--report', '--legacy-root', '--current-root', '--npm-root', '--git-root', '--pwsh-root', '--node-root'];
+  const names = ['--report', '--legacy-root', '--current-root', '--npm-root', '--git-root', '--pwsh-root', '--node-root',
+    '--native-packages'];
   assert.equal(args.length, names.length * 2);
   assert.deepEqual(args.filter((_, index) => index % 2 === 0), names);
   for (let index = 1; index < args.length; index += 2) assert.ok(isAbsolute(args[index]));
@@ -311,7 +341,7 @@ export async function main(args) {
     return [version, root];
   }));
   const result = await verifyLocalEvidence({ directory: args[1], sourceRoots,
-    toolRoots: { npm: args[7], git: args[9], pwsh: args[11], node: args[13] } });
+    toolRoots: { npm: args[7], git: args[9], pwsh: args[11], node: args[13], native: args[15] } });
   // No owner acceptance is generated. Full evidence and paths remain private.
   console.log(JSON.stringify(result, null, 2));
 }

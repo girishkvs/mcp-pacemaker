@@ -402,6 +402,29 @@ test('npm12 official name-keyed pack/stage schema is distinct from npm11 array o
   assert.throws(() => npm12Contents(JSON.stringify(noId), a, bytes, true));
 });
 
+for (const version of ['1.3.2', '2.0.3']) {
+  test(`patched TOML floor accepts the reviewed dependency for ${version}`, () => {
+    const a = approval(version);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+
+  test(`patched TOML floor refuses vulnerable or unreviewed ranges for ${version}`, () => {
+    const a = approval(version);
+    for (const floor of ['^1.8.0', '^1.7.0', '*', '>=1.8.0', '^1.9.0 || ^1.8.0']) {
+      assert.throws(() => validatePackage({ ...pkg(a), dependencies: { 'smol-toml': floor } }, a),
+        /TOML floor/);
+    }
+  });
+}
+
+for (const version of ['1.3.1', '2.0.1', '2.0.2']) {
+  test(`patched TOML floor retains published ${version} metadata verification`, () => {
+    const a = approval(version);
+    validatePackage(pkg(a), a);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+}
+
 test('T22-T28/T42: missing, generic-pending or unbound gates fail without changing designated owner-pending states', () => {
   const a = approval();
   const report = { schemaVersion: 1, commit: a.commit, artifact: digest(bytes), localRegression: a.localRegression,
@@ -455,11 +478,16 @@ test('T42: exact CI attempt and complete successful required matrix are mandator
     repository: { full_name: POLICY.repository }, path: '.github/workflows/ci.yml',
     event: 'push', status: 'completed', conclusion: 'success' };
   const names = ['Lockfiles resolve to the public registry', 'ui'];
-  for (const os of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
+  for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) names.push(`test (${os}, ${node})`);
   }
+  for (const node of [20, 22, 24]) names.push(`windows-ordinary (${node})`);
   const jobs = names.map(name => ({ name, head_sha: a.commit, status: 'completed', conclusion: 'success' }));
   validateCi(run, jobs, a);
+  assert.throws(() => validateCi(run, jobs.filter(job => job.name !== 'windows-ordinary (22)'), a),
+    /CI job missing or ambiguous: windows-ordinary \(22\)/);
+  assert.throws(() => validateCi(run, jobs.filter(job => job.name !== 'test (macos-latest, 24)'), a),
+    /CI job missing or ambiguous: test \(macos-latest, 24\)/);
   assert.throws(() => validateCi({ ...run, head_sha: 'd'.repeat(40) }, jobs, a));
   assert.throws(() => validateCi({ ...run, event: 'pull_request' }, jobs, a));
   assert.throws(() => validateCi(run, jobs.slice(1), a));

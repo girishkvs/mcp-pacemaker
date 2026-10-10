@@ -10,6 +10,11 @@ import { POLICY, digest, publicationTagName, sameDigests, validatePackage, valid
 import { inspectTarball } from './tarball.mjs';
 import { consumerSummary } from './gates.mjs';
 import { sourceCiAttempt } from './secret-report.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime, LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST, LIFETIME_FILES } from '../windows-process-lifetime/inventory.mjs';
+import { verifyLegacyFeature, legacyBrokerRequired, verifyLegacyExecution } from './legacy-broker-gate.mjs';
+import { LEGACY_BROKER_TEST } from '../windows-legacy/inventory.mjs';
+import { verifyTaskChannelFeature, taskChannelRequired, verifyTaskChannelExecution } from './task-channel-gate.mjs';
+import { TASK_CHANNEL_TEST } from '../windows-task-channel/inventory.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const LIMIT = 128 * 1024 * 1024;
@@ -496,11 +501,39 @@ export async function runMatrix({
         'Checkout helper bytes differ from the tarball');
     }
     const args = ['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs'];
+    const taskChannel = verifyTaskChannelFeature(root);
+    if (taskChannel) {
+      for (const file of taskChannel.files) {
+        assert.equal(bundle.inspection.files.find(item => item.path === file.path)?.sha256, file.sha256,
+          'Task channel checkout differs from the exact candidate tarball');
+      }
+      args.push(TASK_CHANNEL_TEST);
+    }
+    const legacyBroker = verifyLegacyFeature(root);
+    if (legacyBroker) {
+      for (const file of legacyBroker.files) {
+        assert.equal(bundle.inspection.files.find(item => item.path === file.path)?.sha256, file.sha256,
+          'Legacy broker checkout differs from the exact candidate tarball');
+      }
+      args.push(LEGACY_BROKER_TEST);
+    }
+    let processLifetime;
+    if (requiresProcessLifetime(approval.version)) {
+      processLifetime = verifyProcessLifetimeAssets(root, approval.version);
+      for (const file of processLifetime.files) {
+        assert.equal(bundle.inspection.files.find((item) => item.path === file.path)?.sha256, file.sha256,
+          'Lifetime helper checkout differs from the exact candidate tarball');
+      }
+      args.push(LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST);
+    }
     const output = invoke(paths.node, args);
     nativeWindows = {
       status: 'actual-windows-execution', files, counts: nativeTap(output.stdout), stdout: output.stdout,
       evidence: commandEvidence(command(args), output), rebuild: 'not-performed',
       ordinaryDesktopToken: 'not-proven', inheritedBaseline: 'not-verified-by-matrix',
+      ...(legacyBroker ? { legacyBroker } : {}),
+      ...(taskChannel ? { taskChannel } : {}),
+      ...(processLifetime ? { processLifetime } : {}),
     };
   }
   assert.equal(sha256(readFileSync(join(root, 'package-lock.json'))), lockHash, 'Producer lock changed');
@@ -565,8 +598,20 @@ export function validateConsumerReport(report, {
     assert.equal(native.ordinaryDesktopToken, 'not-proven');
     assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
     assert.deepEqual(native.counts, nativeTap(native.stdout));
-    checkEvidence(native.evidence,
-      command(['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs']), native.stdout);
+    const nativeArgs = ['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs'];
+    if (taskChannelRequired(inspection.files)) nativeArgs.push(TASK_CHANNEL_TEST);
+    verifyTaskChannelExecution(native, inspection);
+    if (legacyBrokerRequired(inspection.files)) nativeArgs.push(LEGACY_BROKER_TEST);
+    verifyLegacyExecution(native, inspection);
+    if (requiresProcessLifetime(approval.version)) {
+      nativeArgs.push(LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST);
+      assert.equal(native.processLifetime?.status, 'source-and-binary-hashes-verified');
+      assert.deepEqual(native.processLifetime.files.map((file) => file.path), [...LIFETIME_FILES]);
+      for (const file of native.processLifetime.files) {
+        assert.equal(inspection.files.find((item) => item.path === file.path)?.sha256, file.sha256);
+      }
+    }
+    checkEvidence(native.evidence, command(nativeArgs), native.stdout);
     nativeWindowsEvidence.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
       ...native, artifactId: id(artifactId), jobId: id(job.id) });
   } else {

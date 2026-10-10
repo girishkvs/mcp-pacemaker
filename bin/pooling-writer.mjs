@@ -65,6 +65,10 @@ export class PoolingConfigWriter {
     this.#configPath = configPath;
   }
 
+  upgradeState() {
+    return { pending: this.#pending.size, failed: Boolean(this.#failure) };
+  }
+
   apply(request, options = {}) {
     return this.#send('apply', request, options);
   }

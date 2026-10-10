@@ -52,6 +52,10 @@ export class LocalGitConfig {
   }
 
   options() {
-    return ['-c', `core.worktree=${this.root}`, '-c', 'extensions.worktreeConfig=false'];
+    // Ownership is not a trust signal here: every executable configuration path this repository
+    // could inherit is rejected above and re-verified after each command, so a checkout owned by
+    // another account (a CI workspace, a shared agent) is read under the same guarantees.
+    return ['-c', `safe.directory=${this.root}`, '-c', `core.worktree=${this.root}`,
+      '-c', 'extensions.worktreeConfig=false'];
   }
 }

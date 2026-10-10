@@ -2,17 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  LocalGate, HOSTED_BOUNDARIES, SOURCE_SUITE_TIMEOUT_MS, localEnvironment, testArguments, testTotals,
+  LocalGate, HOSTED_BOUNDARIES, SOURCE_SUITE_TIMEOUT_MS, localEnvironment, selectedTestFiles, testArguments, testTotals,
 } from '../../tools/npm-publication/local-gate.mjs';
 import { evidenceEntryFilter, validateContainer, WindowsLocalGate } from '../../tools/npm-publication/local-windows.mjs';
 import { InputSnapshot, safeName, verifyManifest, writeManifest } from '../../tools/npm-publication/local-inputs.mjs';
 import { LocalGitConfig } from '../../tools/npm-publication/local-git.mjs';
 import { LocalSourceReader } from '../../tools/npm-publication/local-source.mjs';
 import { bindGuestIdentity, windowsSystemEnvironment } from '../../tools/npm-publication/local-environment.mjs';
+import { localCaseUser, localCases, LOCAL_NATIVE_PACKAGES } from '../../tools/npm-publication/local-regression.mjs';
 
 function totals(overrides = {}) {
   return Object.entries({ tests: 3, pass: 2, fail: 0, cancelled: 0, skipped: 1, todo: 0, ...overrides })
@@ -40,11 +41,18 @@ function runner(t) {
 test('local gate selects complete explicit Node files without shell or name-filter substitutions', () => {
   assert.deepEqual(testArguments('node --test test/a.test.mjs test/b.test.mjs'),
     ['--test', '--test-reporter=tap', 'test/a.test.mjs', 'test/b.test.mjs']);
+  assert.deepEqual(testArguments('node --test --test-concurrency=6 test/a.test.mjs test/b.test.mjs'),
+    ['--test', '--test-concurrency=6', '--test-reporter=tap', 'test/a.test.mjs', 'test/b.test.mjs']);
+  assert.deepEqual(selectedTestFiles(testArguments('node --test --test-concurrency=6 test/a.test.mjs')),
+    ['test/a.test.mjs']);
   for (const script of [
     'node --test', 'echo passed', 'node --test --test-name-pattern=missing test/a.test.mjs',
     'node --test test/a.test.mjs && exit 0', 'node --test test/a.test.mjs test/a.test.mjs',
     'node --test test/a.test.mjs;exit', 'node --test ../test/a.test.mjs',
-    'node --test test/../a.test.mjs',
+    'node --test test/../a.test.mjs', 'node --test --test-concurrency=6',
+    'node --test --test-concurrency=0 test/a.test.mjs',
+    'node --test --test-concurrency=100 test/a.test.mjs',
+    'node --test --concurrency=6 test/a.test.mjs',
   ]) assert.throws(() => testArguments(script));
 });
 
@@ -60,7 +68,8 @@ test('local environment excludes owner credentials, hosted identity, proxies, in
   const parent = { ...process.env, NPM_TOKEN: 'never-issued', GITHUB_TOKEN: 'never-issued',
     NODE_OPTIONS: '--bad', HTTPS_PROXY: 'https://invalid.invalid', GITHUB_ACTIONS: 'true',
     RUNNER_ENVIRONMENT: 'github-hosted', MCP_BRIDGE_PORT: '8792',
-    MCP_POOLING_TRACE_ARTIFACT_DIR: 'unowned', DOCKER_HOST: 'tcp://invalid.invalid' };
+    MCP_POOLING_TRACE_ARTIFACT_DIR: 'unowned', DOCKER_HOST: 'tcp://invalid.invalid',
+    PSModuleAnalysisCachePath: 'unowned-cache' };
   const env = localEnvironment(parent, join(directory(t), 'home'));
   for (const key of ['NPM_TOKEN', 'GITHUB_TOKEN', 'NODE_OPTIONS', 'HTTPS_PROXY', 'GITHUB_ACTIONS',
     'RUNNER_ENVIRONMENT', 'MCP_BRIDGE_PORT', 'MCP_POOLING_TRACE_ARTIFACT_DIR', 'DOCKER_HOST']) {
@@ -68,6 +77,7 @@ test('local environment excludes owner credentials, hosted identity, proxies, in
   }
   assert.equal(env.npm_config_offline, 'true');
   assert.equal(env.npm_config_ignore_scripts, 'true');
+  assert.equal(env.PSModuleAnalysisCachePath, join(env.HOME, 'powershell-module-cache'));
   assert.equal(readFileSync(env.npm_config_userconfig, 'utf8'), '');
   assert.equal(readFileSync(env.npm_config_globalconfig, 'utf8'), '');
 });
@@ -127,15 +137,30 @@ test('source-suite harness budget is explicit while ordinary commands and timeou
     gate.root, false, SOURCE_SUITE_TIMEOUT_MS);
   const records = gate.steps.map(step => JSON.parse(readFileSync(join(gate.output, step.file))));
   assert.equal(records[0].timeoutMs, 15 * 60_000);
-  assert.equal(records[1].timeoutMs, 25 * 60_000);
+  assert.equal(records[1].timeoutMs, 60 * 60_000);
   assert.throws(() => gate.command('over-budget command', process.execPath, ['-e', 'process.exit(0)'],
     gate.root, false, SOURCE_SUITE_TIMEOUT_MS + 1), /Invalid command deadline/);
   assert.equal(gate.steps.length, 2);
   const outer = Object.create(WindowsLocalGate.prototype);
-  assert.equal(outer.caseTimeout('gate'), 30 * 60_000);
+  assert.ok(outer.caseTimeout('gate') > SOURCE_SUITE_TIMEOUT_MS,
+    'The outer case must outlast the complete source suite it contains');
+  assert.equal(outer.caseTimeout('gate'), SOURCE_SUITE_TIMEOUT_MS + 30 * 60_000);
+  assert.equal(outer.caseTimeout('audit'), 5 * 60_000);
   assert.equal(outer.caseTimeout('fail'), 20 * 60_000);
   for (const mode of ['timeout', 'timeout-early-exit']) assert.equal(outer.caseTimeout(mode), 15_000);
   assert.throws(() => outer.caseTimeout('unknown'), /Unsupported local case mode/);
+});
+
+test('qualification keeps all six source cases and requires an audit companion for each current runtime', () => {
+  const cases = localCases(['1.3.1', '2.1.0']);
+  assert.equal(cases.length, 12);
+  assert.equal(cases.filter(item => item.mode === 'gate').length, 6);
+  assert.equal(cases.filter(item => item.mode === 'audit').length, 3);
+  for (const item of cases) {
+    const ordinary = item.mode === 'gate' && item.version === '2.1.0';
+    assert.equal(localCaseUser(item.mode, item.version), ordinary ? 'ContainerUser' : '');
+  }
+  assert.throws(() => localCaseUser('audit', '1.3.1'));
 });
 
 test('the local Windows launcher rejects uncontained, wrong-owner or credential-bearing containers', () => {
@@ -148,6 +173,11 @@ test('the local Windows launcher rejects uncontained, wrong-owner or credential-
       StorageOpt: { size: '4GB' }, IOMaximumBandwidth: 32 * 1024 ** 2 },
   };
   validateContainer(value, binding);
+  const ordinary = structuredClone(value);
+  ordinary.Config.User = 'ContainerUser';
+  validateContainer(ordinary, { ...binding, user: 'ContainerUser' });
+  assert.throws(() => validateContainer(value, { ...binding, user: 'ContainerUser' }));
+  assert.throws(() => validateContainer(ordinary, binding));
   for (const mutate of [
     v => { v.Config.Labels['pacemaker.local-gate'] = 'someone-else'; },
     v => { v.Image = 'wrong'; },
@@ -224,8 +254,8 @@ test('retained directory re-enumeration rejects newly added package or tool file
   assert.throws(() => snapshot.verify(), /Input inventory or content changed/);
 });
 
-test('actual tool input wiring rejects top-level npm and pwsh additions, including empty directories', t => {
-  for (const tool of ['npm', 'pwsh']) {
+test('actual tool input wiring rejects top-level npm, pwsh and native additions, including empty directories', t => {
+  for (const tool of ['npm', 'pwsh', 'native']) {
     for (const kind of ['file', 'directory']) {
       const home = directory(t);
       const root = join(home, 'source');
@@ -237,7 +267,7 @@ test('actual tool input wiring rejects top-level npm and pwsh additions, includi
       mkdirSync(gate.output);
       gate.snapshots = [];
       gate.sourceBindings = [];
-      for (const name of ['npm', 'pwsh', 'git']) {
+      for (const name of ['npm', 'pwsh', 'git', 'native']) {
         gate[`${name}Root`] = join(home, name);
         mkdirSync(gate[`${name}Root`]);
       }
@@ -276,6 +306,38 @@ test('actual tool input wiring rejects top-level npm and pwsh additions, includi
       assert.throws(() => gate.verifyInputs(), /Input inventory or content changed/, `${tool}/${kind}`);
     }
   }
+});
+
+test('local native archives match the unchanged CI restore pins', () => {
+  const script = readFileSync(new URL('../../tools/windows-ci/restore-toolchain.ps1', import.meta.url), 'utf8');
+  for (const [name, hash] of Object.entries(LOCAL_NATIVE_PACKAGES)) {
+    assert.ok(script.includes(`Name = '${name}'`));
+    assert.ok(script.includes(`Sha256 = '${hash}'`));
+  }
+  const gate = Object.create(WindowsLocalGate.prototype);
+  assert.throws(() => gate.run(), /--native-packages/);
+});
+
+test('native archive admission bounds files and rejects links before hashing', t => {
+  const root = directory(t);
+  const names = Object.keys(LOCAL_NATIVE_PACKAGES);
+  const gate = Object.create(WindowsLocalGate.prototype);
+  for (const name of names) writeFileSync(join(root, name), '');
+  truncateSync(join(root, names[0]), 129 * 1024 ** 2);
+  assert.throws(() => gate.nativeInputs(root), /Oversized/);
+  rmSync(join(root, names[0]));
+  const target = join(directory(t), 'archive-directory');
+  mkdirSync(target);
+  symlinkSync(target, join(root, names[0]), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => gate.nativeInputs(root), /Linked/);
+  // Windows junctions report as directories, so the link itself needs the recursive form to
+  // unlink on every supported Node version. Removal never follows the link to its target.
+  rmSync(join(root, names[0]), { recursive: true });
+  mkdirSync(join(root, names[0]));
+  assert.throws(() => gate.nativeInputs(root), /regular files/);
+  rmSync(join(root, names[0]), { recursive: true });
+  writeFileSync(join(root, names[0]), 'wrong archive');
+  assert.throws(() => gate.nativeInputs(root), /hash differs/);
 });
 
 test('actual source identity binds a clean Git tree and declared checkout bytes before rejecting edits', t => {
@@ -398,7 +460,8 @@ test('Git key parsing never follows includes and rejects parser failure or chang
   }), /Git configuration changed/);
   writeFileSync(config, allowed);
   const binding = new LocalGitConfig(gate.root, gate.gitEmpty, parse);
-  assert.deepEqual(binding.options(), ['-c', `core.worktree=${gate.root}`, '-c', 'extensions.worktreeConfig=false']);
+  assert.deepEqual(binding.options(), ['-c', `safe.directory=${gate.root}`,
+    '-c', `core.worktree=${gate.root}`, '-c', 'extensions.worktreeConfig=false']);
   writeFileSync(config, '[core] fsmonitor = changed\n');
   assert.throws(() => binding.verify(), /Git configuration changed/);
   writeFileSync(config, '[invalid syntax');

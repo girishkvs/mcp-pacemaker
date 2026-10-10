@@ -6,14 +6,17 @@ import { CURRENT_REF, LEGACY_REF, checkLockfile } from '../compatibility/fixture
 import { verifyArtifacts } from '../third-party-notices/inventory.mjs';
 import { captureConsumerLicenseEvidence } from '../npm-consumer/license-evidence.mjs';
 import { inspectRuntimeLicenses } from './runtime-licenses.mjs';
-import { retainedDependencies, testArguments, testTotals, uiTestArguments } from './local-gate.mjs';
+import { retainedDependencies, selectedTestFiles, testArguments, testTotals, uiTestArguments, nativeRestoreArguments, LOCAL_NATIVE_PATHS } from './local-gate.mjs';
 import { validatePackage } from './policy.mjs';
 import { safeName, physical } from './local-inputs.mjs';
 import { treeEntries } from './local-source.mjs';
 import { readLocalBytes, readLocalJson } from './local-evidence.mjs';
 import { exactLocalKeys, localHash, localSha, LOCAL_NODES, releaseRole } from './local-regression.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
-import { auditEvidence } from './local-audit-report.mjs';
+import { auditArguments, auditEvidence } from './local-audit-report.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../windows-process-lifetime/inventory.mjs';
+import { verifyLegacyFeature } from './legacy-broker-gate.mjs';
+import { verifyTaskChannelFeature } from './task-channel-gate.mjs';
 
 const SOURCE = 'C:\\source';
 const EMPTY_GIT = 'C:\\work\\empty-git-config';
@@ -43,7 +46,7 @@ function decode(command, field) {
 
 export function validateLocalArtifact(artifact, schemaVersion) {
   exactLocalKeys(artifact, ['sha256', 'sha512', 'integrity', 'files', 'publicationCandidate',
-    'fixtureCommit', 'kind', 'releaseReady', ...([2, 3, 4].includes(schemaVersion) ? ['evidenceFile'] : [])]);
+    'fixtureCommit', 'kind', 'releaseReady', ...([2, 3, 4, 5].includes(schemaVersion) ? ['evidenceFile'] : [])]);
   localSha(artifact.sha256);
   lowerHex(artifact.sha512, 128);
   assert.equal(artifact.integrity, `sha512-${Buffer.from(artifact.sha512, 'hex').toString('base64')}`);
@@ -51,7 +54,7 @@ export function validateLocalArtifact(artifact, schemaVersion) {
   assert.equal(artifact.publicationCandidate, false);
   assert.equal(artifact.releaseReady, false);
   assert.equal(artifact.kind, 'offline-npm12-pack-fixture');
-  if ([2, 3, 4].includes(schemaVersion)) assert.equal(artifact.evidenceFile, 'fixture.tgz');
+  if ([2, 3, 4, 5].includes(schemaVersion)) assert.equal(artifact.evidenceFile, 'fixture.tgz');
   assert.ok(Array.isArray(artifact.files) &&
     artifact.files.length > 0 &&
     artifact.files.length <= 10_000, 'Missing canonical package inventory');
@@ -223,7 +226,11 @@ export class LocalCaseReplay {
       files.push({ path: entry.path, sha256: localHash(checkout) });
     }
     return { baselineCommit: baseline, files: files.sort((a, b) => a.path.localeCompare(b.path)),
-      buildScript, reproducibilityBuild: 'not-executed-in-this-run' };
+      buildScript, reproducibilityBuild: 'not-executed-in-this-run',
+      ...(verifyLegacyFeature(this.root) ? { legacyBroker: verifyLegacyFeature(this.root) } : {}),
+      ...(verifyTaskChannelFeature(this.root) ? { taskChannel: verifyTaskChannelFeature(this.root) } : {}),
+      ...(requiresProcessLifetime(this.version)
+        ? { processLifetime: verifyProcessLifetimeAssets(this.root, this.version) } : {}) };
   }
 
   filesUnder(name) {
@@ -354,7 +361,8 @@ export class LocalCaseReplay {
       const fields = ['kind', 'autocrlf', 'sourceNode', 'uiNode', 'publisherNode', 'nativeIdentity', 'uiRebuild'];
       exactLocalKeys(checks, [...fields, ...(autocrlf === 'false'
         ? ['sourceTests', 'uiTests', 'artifact', 'extractedFiles', 'notices', 'sdk', 'retainedGraphLicenseContract',
-          ...(this.gate.schemaVersion >= 3 ? ['stageCapture'] : [])] : [])]);
+          ...(this.gate.schemaVersion >= 3 ? ['stageCapture'] : []),
+          ...(this.gate.schemaVersion === 5 ? ['auditExecution'] : [])] : [])]);
       assert.equal(checks.kind, 'unpublishable-local-checkout-fixture');
       assert.equal(checks.autocrlf, autocrlf);
       assert.equal(checks.sourceNode, this.gate.node);
@@ -369,11 +377,23 @@ export class LocalCaseReplay {
       this.snapshot(cwd);
       if (autocrlf === 'true') continue;
       const selected = testArguments(this.pkg.scripts.test);
-      assert.deepEqual(selected.slice(2).sort(), readdirSync(join(this.root, 'test'))
+      assert.deepEqual(selectedTestFiles(selected).sort(), readdirSync(join(this.root, 'test'))
         .filter(name => name.endsWith('.test.mjs')).map(name => `test/${name}`).sort());
+      if (this.gate.schemaVersion === 5) {
+        const context = this.take('Verify user-runtime execution contract', 'C:\\node.exe',
+          ['tools/ci/run-tests.mjs', 'source', '--check'], cwd).toString('utf8');
+        assert.deepEqual(JSON.parse(context), { contract: 'source', platform: 'win32', role: 'user-runtime',
+          verified: true, sessionVerified: true });
+        const restored = this.take('Restore pinned native fixture toolchain', 'C:\\input\\pwsh\\pwsh.exe',
+          nativeRestoreArguments(), cwd).toString('utf8');
+        assert.deepEqual(JSON.parse(restored), LOCAL_NATIVE_PATHS);
+      }
       const sourceOutput = this.take('Complete source suite', 'C:\\node.exe', selected, cwd).toString('utf8');
       assert.deepEqual(checks.sourceTests, testTotals(sourceOutput));
-      if (this.gate.schemaVersion >= 3) auditEvidence(sourceOutput, this.version, this.gate.node);
+      if (this.gate.schemaVersion === 5) {
+        assert.equal(releaseRole(this.version), 'current');
+        assert.equal(checks.auditExecution, 'required-privileged-companion');
+      } else if (this.gate.schemaVersion >= 3) auditEvidence(sourceOutput, this.version, this.gate.node);
       this.take('UI typecheck', 'C:\\publisher-node.exe',
         ['node_modules/typescript/bin/tsc', '--noEmit'], `${cwd}\\ui`);
       const ui = uiTestArguments(this.root, this.version);
@@ -415,5 +435,22 @@ export class LocalCaseReplay {
     assert.equal(this.git(SOURCE, ['rev-parse', 'HEAD']), this.gate.source.head);
     assert.equal(this.index, this.commands.length, 'Unused or extra command receipts');
     return packOutput;
+  }
+
+  verifyAudit() {
+    assert.equal(releaseRole(this.version), 'current');
+    assert.equal(this.take('Pinned publisher runtime', 'C:\\publisher-node.exe',
+      ['-p', 'process.version'], SOURCE).toString('utf8').trim(), 'v24.21.0');
+    this.snapshot(SOURCE);
+    assert.equal(this.git(SOURCE, ['rev-parse', 'HEAD']), this.gate.source.head);
+    const context = this.take('Verify privileged fixture execution contract', 'C:\\node.exe',
+      ['tools/ci/run-tests.mjs', 'audit', '--check'], SOURCE).toString('utf8');
+    assert.deepEqual(JSON.parse(context), { contract: 'audit', platform: 'win32', role: 'privileged-fixture', verified: true });
+    const output = this.take('Required privileged audit', 'C:\\node.exe', auditArguments(), SOURCE).toString('utf8');
+    assert.deepEqual(testTotals(output), this.gate.tests);
+    assert.deepEqual(auditEvidence(output, this.version, this.gate.node), this.gate.audit);
+    this.snapshot(SOURCE);
+    assert.equal(this.git(SOURCE, ['rev-parse', 'HEAD']), this.gate.source.head);
+    assert.equal(this.index, this.commands.length, 'Unused or extra audit command receipts');
   }
 }

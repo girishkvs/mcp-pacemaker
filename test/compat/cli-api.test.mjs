@@ -1,21 +1,34 @@
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { loadFixtures } from '../../tools/compatibility/fixtures.mjs';
 import { CompatibilityBridge, assertImmediate, assertPending } from './bridge.mjs';
-import { assertWritableDowngrade } from './downgrade.mjs';
+import { assertWritableDowngrade, legacyScope, AUDIT_UNAVAILABLE } from './downgrade.mjs';
 
 const fixtures = loadFixtures();
 const { legacyVersion, candidateVersion } = fixtures;
+
+// Reading a SACL needs SeSecurityPrivilege, which only administrators hold, so the ordinary
+// Windows lane always reports partial audit visibility and the release refuses pooling writes.
+// Linux and macOS have no audit scope and exercise the full write path. Declaring the expected
+// value keeps a lane from silently swapping branches and reporting green under the other name.
+const EXPECTED_SCOPE = process.platform === 'win32' ? 'P' : 'posix';
+const assertLaneScope = (scope) => assert.equal(scope, EXPECTED_SCOPE,
+  `Unexpected legacy audit visibility ${scope} for this lane`);
 
 test(`actual ${legacyVersion} write capability survives a settled ${candidateVersion} roundtrip under unchanged authority`,
   { timeout: 120000 }, async (t) => {
     await assertWritableDowngrade(t, fixtures);
   });
 
-test(`${candidateVersion} CLI and API -> real ${legacyVersion}: immediate 200 enable and Undo`, { timeout: 90000 }, async (t) => {
+test(`${candidateVersion} CLI and API -> real ${legacyVersion}: immediate 200 enable and Undo`, {
+  skip: EXPECTED_SCOPE === 'P' && 'the release refuses pooling writes without readable audit policy',
+  timeout: 90000,
+}, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
     await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
+    assertLaneScope(await legacyScope(bridge, fixtures.legacy));
     const enabled = JSON.parse((await bridge.cli(fixtures.candidate,
       ['--enable', 'alpha', '--count', '1', '--json'])).stdout);
     assertImmediate(enabled, legacyVersion);
@@ -31,6 +44,25 @@ test(`${candidateVersion} CLI and API -> real ${legacyVersion}: immediate 200 en
     const apiUndo = await bridge.mutation({ undoId: apiEnabled.body.undoId });
     assert.equal(apiUndo.status, 200, apiUndo.text);
     assert.equal(apiUndo.body.ok, true);
+    await bridge.assertUnchanged();
+  });
+});
+
+test(`${candidateVersion} CLI and API -> real ${legacyVersion}: refused without readable audit policy`, {
+  skip: EXPECTED_SCOPE !== 'P' && 'this lane can read audit policy, so the release accepts the write',
+  timeout: 90000,
+}, async (t) => {
+  await new CompatibilityBridge().run(t, async (bridge) => {
+    await bridge.start(fixtures.legacy, legacyVersion);
+    await bridge.seedAdvice();
+    assertLaneScope(await legacyScope(bridge, fixtures.legacy));
+    const refused = await bridge.cli(fixtures.candidate,
+      ['--enable', 'alpha', '--count', '1', '--json'], 1);
+    assert.match(refused.stdout + refused.stderr, /readable audit policy/);
+    await bridge.assertUnchanged();
+    const api = await bridge.mutation({ mode: 'pool', minWarm: 1 }, false);
+    assert.equal(api.status, 403, api.text);
+    assert.deepEqual(api.body, { error: AUDIT_UNAVAILABLE });
     await bridge.assertUnchanged();
   });
 });
@@ -80,10 +112,22 @@ test(`${candidateVersion} CLI -> real ${candidateVersion}: queued save, Cancel, 
 
 test(`safe ${legacyVersion} -> ${candidateVersion} -> ${legacyVersion} restarts preserve active config bytes`, { timeout: 120000 }, async (t) => {
   await new CompatibilityBridge().run(t, async (bridge) => {
+    // Seed pooled state before starting, the way assertWritableDowngrade does, so no external
+    // write races a live bridge. Where the release cannot write it, the refusal has its own test.
+    const scope = await legacyScope(bridge, fixtures.legacy);
+    assertLaneScope(scope);
+    if (scope === 'P') {
+      const seeded = JSON.parse(bridge.original);
+      seeded.alpha.sharing = 'pool';
+      seeded.alpha.minWarm = 1;
+      writeFileSync(bridge.config, JSON.stringify(seeded, null, 2) + '\n');
+    }
     const old = await bridge.start(fixtures.legacy, legacyVersion);
     await bridge.seedAdvice();
-    const enabled = await bridge.mutation({ mode: 'pool', minWarm: 1 }, false);
-    assert.equal(enabled.status, 200, enabled.text);
+    if (scope !== 'P') {
+      const enabled = await bridge.mutation({ mode: 'pool', minWarm: 1 }, false);
+      assert.equal(enabled.status, 200, enabled.text);
+    }
     const pooledBytes = bridge.text();
     await bridge.stop();
     const current = await bridge.start(fixtures.candidate, candidateVersion);

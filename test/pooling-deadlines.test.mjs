@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import childProcess, { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as realSetTimeout, clearTimeout as realClearTimeout } from 'node:timers';
+import { EventEmitter } from 'node:events';
 import { DeadlineFixture as Fixture } from './helpers/pooling-deadline-fixture.mjs';
 import { PoolingCheckpoint, FIXTURE_DEADLOCK_MS } from './helpers/pooling-checkpoint.mjs';
 import { PoolingFiles } from '../bin/pooling-files.mjs';
@@ -250,6 +252,69 @@ test('phase checkpoint observes a subsequently published signal', async (t) => {
     join(fixture.directory, 'entered')));
   await entered;
 });
+
+for (const notification of ['missing', 'rename-source-only']) {
+  test(`phase checkpoint observes a marker with ${notification} filesystem notification`, async (t) => {
+    const fixture = new Fixture(t, 'commit-completed', { controlledClock: true });
+    const watcher = new EventEmitter();
+    let listener;
+    let closed = false;
+    watcher.close = () => { closed = true; };
+    t.mock.method(fs, 'watch', (_directory, callback) => {
+      listener = callback;
+      return watcher;
+    });
+    const controller = new AbortController();
+    const guard = realSetTimeout(() => controller.abort(new Error('Checkpoint notification was lost')), 1000);
+    try {
+      const checkpoint = new PoolingCheckpoint(fixture.directory, fixture.stage, controller.signal);
+      const before = process.hrtime.bigint();
+      const entered = checkpoint.wait(new Promise(() => {}));
+      fs.writeFileSync(join(fixture.directory, 'entered'), fixture.stage);
+      if (notification === 'rename-source-only') listener('rename', 'entered-next');
+      await entered;
+      assert.equal(process.hrtime.bigint(), before, 'Fixture observation must not advance the operation clock.');
+      assert.equal(closed, true);
+    } finally {
+      realClearTimeout(guard);
+    }
+  });
+}
+
+for (const outcome of ['checkpoint', 'abort', 'watcher-error']) {
+  test(`phase checkpoint stops observation after ${outcome}`, async (t) => {
+    const fixture = new Fixture(t, 'commit-completed', { controlledClock: true });
+    const watcher = new EventEmitter();
+    let closed = 0;
+    let reads = 0;
+    watcher.close = () => { closed++; };
+    t.mock.method(fs, 'watch', () => watcher);
+    const read = fs.readFileSync;
+    const marker = join(fixture.directory, 'entered');
+    t.mock.method(fs, 'readFileSync', (path, ...args) => {
+      if (path === marker) reads++;
+      return read(path, ...args);
+    });
+    const controller = new AbortController();
+    const checkpoint = new PoolingCheckpoint(fixture.directory, fixture.stage,
+      AbortSignal.any([controller.signal, t.signal]));
+    const entered = checkpoint.wait(new Promise(() => {}));
+    const failure = new Error('Controlled checkpoint failure');
+    if (outcome === 'checkpoint') {
+      fs.writeFileSync(marker, fixture.stage);
+      await entered;
+    } else {
+      if (outcome === 'abort') controller.abort(failure);
+      else watcher.emit('error', failure);
+      await assert.rejects(entered, (error) => error === failure);
+    }
+    assert.equal(closed, 1);
+    const settledReads = reads;
+    await delay(50);
+    assert.equal(reads, settledReads, 'A settled checkpoint must not keep reading its marker.');
+    assert.equal(closed, 1);
+  });
+}
 
 test('phase checkpoint rejects an operation completed before the selected phase', async (t) => {
   const fixture = new Fixture(t, 'commit-completed');

@@ -9,7 +9,7 @@ import {
 } from '../tools/npm-publication/local-regression.mjs';
 import { treeEntries, captureSourceIdentity, validateSourceSubject } from '../tools/npm-publication/local-source.mjs';
 import { readOwnerLocalAcceptance, publicationHelperEnvironment } from '../tools/npm-publication/local-regression-hosted.mjs';
-import { verifyLocalHeader, verifyRawSteps, verifyRecordedSteps, verifyLocalEvidence, compareInputSelection,
+import { verifyLocalHeader, verifyRawSteps, verifyRecordedSteps, verifyLocalEvidence, verifyAuditSteps, compareInputSelection,
   verifyCommandTimeout } from '../tools/npm-publication/verify-local.mjs';
 import { evidenceTar } from '../tools/npm-publication/local-evidence.mjs';
 import { submitOnce, validateCi } from '../tools/npm-publication/policy.mjs';
@@ -18,6 +18,9 @@ import { LocalCaseFixture } from './helpers/local-case-fixture.mjs';
 import { syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { physical } from '../tools/npm-publication/local-inputs.mjs';
 import './helpers/npm-publication-local-audit.mjs';
+import { syntheticAuditReport } from './helpers/npm-publication-local-audit.mjs';
+import { auditArguments, AUDIT_COMMAND_TIMEOUT_MS } from '../tools/npm-publication/local-audit-report.mjs';
+import { nativeRestoreArguments, LOCAL_NATIVE_PATHS } from '../tools/npm-publication/local-gate.mjs';
 import { CheckoutProofFixture } from './helpers/npm-publication-checkout-proof.mjs';
 import {
   PUBLISHED_LEGACY_STAGE_CONTRACT, STAGE_PROOF_FILES, sourceStageContract, validateStageProof,
@@ -349,17 +352,20 @@ test('selected input binding includes implied parents, additions and empty-direc
 });
 
 test('outer schema rejects actual failure shapes, controls-only, old, partial and duplicate cases', () => {
-  const report = { schemaVersion: 2, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
+  const report = { schemaVersion: 3, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
     status: 'passed', scope: 'both-release-lines-local-only', releaseReady: false, ciImageEquivalent: false,
     image: fixture.statement().image, runId: fixture.statement().runId,
     startedAt: new Date(Date.now() - 1000).toISOString(), completedAt: new Date().toISOString(),
     nodes: fixture.statement().runtimes, cases: localCases(['1.3.1', '2.0.1']).map(item => ({ name: item.name })) };
-  // Header-only fixture, not a nine-green execution report.
+  // Header-only fixture, not execution evidence.
   verifyLocalHeader(report);
   for (const mutate of [
     value => { delete value.schemaVersion; }, value => { value.status = 'failed'; },
     value => { value.scope = 'containment-controls-only'; }, value => { value.cases.pop(); },
     value => { value.cases[1] = value.cases[0]; }, value => { value.error = 'original timeout'; },
+    value => { value.schemaVersion = 2; },
+    value => { value.cases = value.cases.filter(item => !item.name.startsWith('audit-')); },
+    value => { value.cases.find(item => item.name.startsWith('audit-')).name = 'audit-v2.0.2-node20.20.2'; },
   ]) {
     const copy = structuredClone(report);
     mutate(copy);
@@ -372,11 +378,126 @@ test('raw timeout metadata requires the dedicated source budget without extendin
   const other = { label: 'Local Git', timeoutMs: 15 * 60_000, elapsedMs: 10 };
   verifyCommandTimeout(source);
   verifyCommandTimeout(other);
+  verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: AUDIT_COMMAND_TIMEOUT_MS, elapsedMs: 1000 });
+  assert.throws(() => verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: 15 * 60_000, elapsedMs: 1000 }));
   for (const timeoutMs of [undefined, null, '1500000', NaN, Infinity, -1, 0, 15 * 60_000, 26 * 60_000]) {
     assert.throws(() => verifyCommandTimeout({ ...source, timeoutMs }), /timeoutMs/);
   }
   assert.throws(() => verifyCommandTimeout({ ...other, timeoutMs: 25 * 60_000 }), /timeoutMs/);
   assert.throws(() => verifyCommandTimeout({ ...source, elapsedMs: -1 }), /duration/);
+});
+
+test('audit companion replay rejects altered selection, runtime, source, skipped evidence and raw failures', async t => {
+  const f = await new LocalCaseFixture(t).create();
+  const directory = join(f.base, 'audit-receipts');
+  mkdirSync(directory);
+  const command = {
+    label: 'Required privileged audit', executable: 'C:\\node.exe', args: auditArguments(), cwd: 'C:\\source',
+    timeoutMs: AUDIT_COMMAND_TIMEOUT_MS, elapsedMs: 40000, exitCode: 0, signal: null,
+    error: null, encoding: 'utf8', stdout: f.sourceTap, stderr: '',
+  };
+  const preflight = { ...command, label: 'Verify privileged fixture execution contract',
+    args: ['tools/ci/run-tests.mjs', 'audit', '--check'], timeoutMs: 15 * 60_000,
+    stdout: JSON.stringify({ contract: 'audit', platform: 'win32', role: 'privileged-fixture', verified: true }) };
+  const original = [...f.commands.slice(0, 5), preflight, command, ...f.commands.slice(-4)];
+  const report = {
+    schemaVersion: 1, kind: 'local-privileged-audit', version: f.version, node: f.gate.node,
+    publisherNode: f.gate.publisherNode, npm: f.gate.npm, platform: 'win32',
+    source: f.gate.source, status: 'passed', releaseReady: false, publicationCandidate: false,
+    originalPreserved: true, tests: f.totals, audit: syntheticAuditReport(f.gate.node),
+  };
+  const save = commands => {
+    report.steps = commands.map((value, index) => {
+      const file = `command-${index + 1}.json`;
+      const bytes = JSON.stringify(value);
+      writeFileSync(join(directory, file), bytes);
+      return { label: value.label, file, sha256: localHash(bytes),
+        exitCode: value.exitCode, signal: value.signal, error: value.error };
+    });
+
+  };
+  save(original);
+  verifyAuditSteps(directory, report, f.root, f.version);
+  for (const mutate of [
+    value => { value.args = ['--test', '--test-name-pattern', 'missing']; },
+    value => { value.executable = 'C:\\other-node.exe'; },
+    value => { value.cwd = 'C:\\other-source'; },
+    value => { value.stdout = value.stdout.replace('ok 1 - ', 'ok 1 - skipped # SKIP '); },
+    value => { value.stdout = value.stdout.replace('"cases":19', '"cases":18'); },
+    value => { value.stdout = value.stdout.replace('v24.21.0', 'v20.20.2'); },
+    value => { value.stdout = value.stdout.replace('# fail 0', '# fail 1'); },
+    value => { value.stdout = value.stdout.replace('# cancelled 0', '# cancelled 1'); },
+    value => { value.stdout = value.stdout.split('\n').filter(line =>
+      !/^# (tests|pass|fail|cancelled|skipped|todo) /.test(line)).join('\n'); },
+    value => { value.exitCode = 1; },
+    value => { value.signal = 'SIGTERM'; },
+  ]) {
+    const commands = structuredClone(original);
+    mutate(commands[6]);
+    save(commands);
+    assert.throws(() => verifyAuditSteps(directory, report, f.root, f.version));
+  }
+  for (const mutate of [
+    value => { value.args = ['tools/ci/run-tests.mjs', 'source', '--check']; },
+    value => { value.stdout = value.stdout.replace('"verified":true', '"verified":false'); },
+    value => { value.stdout = value.stdout.replace('privileged-fixture', 'user-runtime'); },
+    value => { value.executable = 'C:\\other-node.exe'; },
+  ]) {
+    const commands = structuredClone(original);
+    mutate(commands[5]);
+    save(commands);
+    assert.throws(() => verifyAuditSteps(directory, report, f.root, f.version));
+  }
+  save(original.filter(value => value.label !== preflight.label));
+  assert.throws(() => verifyAuditSteps(directory, report, f.root, f.version));
+  save(original);
+  assert.throws(() => verifyAuditSteps(directory, { ...report, version: '2.1.0' }, f.root, f.version));
+  const source = structuredClone(report.source);
+  source.head = '0'.repeat(40);
+  assert.throws(() => verifyAuditSteps(directory, { ...report, source }, f.root, f.version));
+});
+
+test('current schema-5 source replay requires ordinary session preflight and exact offline native restore', async t => {
+  const f = await new LocalCaseFixture(t).create();
+  f.gate.schemaVersion = 5;
+  f.gate.checks['checkout-false'].auditExecution = 'required-privileged-companion';
+  const index = f.commands.findIndex(command => command.label === 'Complete source suite');
+  const restore = { label: 'Restore pinned native fixture toolchain', executable: 'C:\\input\\pwsh\\pwsh.exe',
+    args: nativeRestoreArguments(), cwd: 'C:\\work\\checkout-false', timeoutMs: 15 * 60_000,
+    elapsedMs: 1000, exitCode: 0, signal: null, error: null, encoding: 'utf8',
+    stdout: JSON.stringify(LOCAL_NATIVE_PATHS), stderr: '' };
+  const context = { ...restore, label: 'Verify user-runtime execution contract', executable: 'C:\\node.exe',
+    args: ['tools/ci/run-tests.mjs', 'source', '--check'],
+    stdout: JSON.stringify({ contract: 'source', platform: 'win32', role: 'user-runtime',
+      verified: true, sessionVerified: true }) };
+  f.commands.splice(index, 0, context, restore);
+  f.save();
+  const verify = () => verifyRawSteps(f.directory, f.gate, f.root, f.version, { checkout: f.checkoutBinding });
+  await verify();
+  const originalContext = structuredClone(context);
+  for (const mutate of [
+    value => { value.stdout = value.stdout.replace('"sessionVerified":true', '"sessionVerified":false'); },
+    value => { value.stdout = value.stdout.replace('"verified":true', '"verified":false'); },
+    value => { value.args = ['tools/ci/run-tests.mjs', 'service-context', '--check']; },
+    value => { value.executable = 'C:\\other-node.exe'; },
+  ]) {
+    mutate(context);
+    f.save();
+    await assert.rejects(verify);
+    Object.assign(context, structuredClone(originalContext));
+  }
+  f.commands.splice(index, 1);
+  f.save();
+  await assert.rejects(verify);
+  f.commands.splice(index, 0, context);
+  const original = structuredClone(restore);
+  restore.stdout = JSON.stringify({ ...LOCAL_NATIVE_PATHS, CompilerPath: 'C:\\unowned\\csc.exe' });
+  f.save();
+  await assert.rejects(verify);
+  Object.assign(restore, original);
+  restore.args = ['-Command', 'download-an-unpinned-compiler'];
+  f.save();
+  await assert.rejects(verify);
 });
 
 test('missing root and failed/changed raw command receipts reject without executing anything', async t => {

@@ -11,6 +11,7 @@ import {
 } from '../bin/pooling-config.mjs';
 import { PoolingFiles, MAX_TRANSACTION_BYTES } from '../bin/pooling-files.mjs';
 import { PoolingExecution } from '../bin/pooling-execution.mjs';
+import { queryCliCallerContext } from '../bin/windows-task-channel.mjs';
 import { FileReplacement } from './helpers/pooling-identity-fixture.mjs';
 
 const BEFORE = '{\r\n  "alpha": {"command":"node","env":{"TOKEN":"private-canary"}},\r\n  "beta": {"command":"node"},\r\n  "other": {"command":"node"}\r\n}\r\n';
@@ -497,10 +498,10 @@ test('a failed helper that leaves an unverified candidate never grants cleanup o
   assert.deepEqual(f.inspect(f.files.paths.pending), candidate);
 });
 
-test('source WRITE_DATA denial is not bypassed using writable parent replacement rights', (t) => {
+test('source WRITE_DATA denial is not bypassed using writable parent replacement rights', async (t) => {
   const f = new Fixture(t);
   if (process.platform === 'win32') {
-    const account = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
+    const account = `*${(await queryCliCallerContext()).identity.ownerSid}`;
     const deny = childProcess.spawnSync('icacls.exe', [f.path, '/deny', `${account}:(WD)`], { encoding: 'utf8' });
     assert.equal(deny.status, 0, deny.stderr);
     try {
@@ -522,10 +523,10 @@ test('source WRITE_DATA denial is not bypassed using writable parent replacement
 
 test('source DACL changes after staging conflict before the active move', {
   skip: process.platform !== 'win32',
-}, (t) => {
+}, async (t) => {
   const f = new Fixture(t);
   const receipt = f.stage();
-  const account = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
+  const account = `*${(await queryCliCallerContext()).identity.ownerSid}`;
   const deny = childProcess.spawnSync('icacls.exe', [f.path, '/deny', `${account}:(WD)`], { encoding: 'utf8' });
   assert.equal(deny.status, 0, deny.stderr);
   try {

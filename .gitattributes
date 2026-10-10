@@ -24,6 +24,12 @@ ui/index.html text eol=crlf
 ui/dist/** -text
 bin/windows/*.exe binary
 bin/windows/src/*.cs text eol=lf
+bin/windows-lifetime/*.exe binary
+bin/windows-lifetime/src/*.cs text eol=lf
+bin/windows-legacy/*.exe binary
+bin/windows-legacy/src/*.cs text eol=lf
+bin/windows-task-channel/*.exe binary
+bin/windows-task-channel/src/*.cs text eol=lf
 
 # Images are binary — never line-ending converted.
 *.png   binary

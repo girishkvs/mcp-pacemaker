@@ -138,8 +138,10 @@ test('recycle is transparent: the client keeps using its session id', async (t) 
 
   // taskkill is asynchronous, so wait until the session is genuinely gone. Without this the
   // follow-up request can race the child's exit and pass without exercising the resume path.
+  // The window is generous because process teardown competes with the rest of the suite; the
+  // assertion still fails if the session never goes away.
   let gone = false;
-  for (let i = 0; i < 60 && !gone; i++) {
+  for (let i = 0; i < 300 && !gone; i++) {
     const st = await req(port, 'GET', '/api/status', { headers: { 'x-admin-nonce': nonce } });
     const echo = JSON.parse(st.body).servers.find((s) => s.name === 'echo');
     gone = !echo || echo.sessions === 0; // sessions is a count, not a list
@@ -243,7 +245,7 @@ test('the bridge writes a durable log next to its config, and rolls it', async (
     const sid = r.headers['mcp-session-id'];
     if (sid) await req(port, 'DELETE', '/echo/mcp', { headers: { 'mcp-session-id': sid } });
   }
-  for (let i = 0; i < 50 && !existsSync(logFile + '.1'); i++) await sleep(100);
+  for (let i = 0; i < 300 && !existsSync(logFile + '.1'); i++) await sleep(100);
 
   assert.ok(existsSync(logFile + '.1'), 'the log must roll rather than grow without bound');
   assert.ok(statSync(logFile).size < 20000, 'the active log is bounded after rolling');

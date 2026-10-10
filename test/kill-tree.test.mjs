@@ -22,6 +22,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { killBridge } from './helpers/kill-bridge.mjs';
+import { observeWindowsProcessLifetime } from '../bin/windows-process-lifetime.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
@@ -140,6 +141,16 @@ class KillDispatchRun {
       join(__dirname, 'fixtures', 'kill-dispatch-recorder.mjs'), mode, outcome,
     ], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
     const closed = once(child, 'close');
+    let lifetime;
+    child.on('message', (message) => {
+      if (message.type !== 'upgrade-lifetime') return;
+      lifetime = observeWindowsProcessLifetime(message.lifetime).then((observer) => {
+        child.send('upgrade-lifetime-observed');
+        return observer.done;
+      });
+      // The original error is awaited below, including failed-start cleanup.
+      lifetime.catch(() => {});
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -148,8 +159,10 @@ class KillDispatchRun {
       if (child.exitCode == null &&
           child.signalCode == null) child.send({ cleanup: true });
       await closed;
+      if (lifetime) await lifetime;
     });
     const [code, signal] = await closed;
+    if (lifetime) await lifetime;
     assert.equal(signal, null, stderr);
     assert.equal(code, 0, `${stdout}\n${stderr}`);
     const result = JSON.parse(stdout);

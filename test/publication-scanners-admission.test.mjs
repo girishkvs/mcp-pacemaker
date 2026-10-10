@@ -87,6 +87,13 @@ for (const [version, generation, proofRequired, corruption] of [['2.0.2', ''], [
       return;
     }
     const prepared = await candidate.prepare(admitted);
+    const producer = prepared.prepared.producerAdvisories;
+    assert.equal(producer.source.version, version);
+    assert.equal(producer.gate.disposition, 'advisory-free');
+    assert.equal(producer.gate.rawFindingCount, 0);
+    assert.equal(producer.gate.riskAcceptance, undefined);
+    assert.deepEqual(producer.gate.nativeAudits.map(audit => [audit.scope, audit.rawExitCode]),
+      [['producer-root', 0], ['producer-ui', 0]]);
     const matrix = await candidate.consumers();
     assert.equal(matrix.consumerLanes.length, 12);
     assert.equal(matrix.artifactEvidence.length, 6);

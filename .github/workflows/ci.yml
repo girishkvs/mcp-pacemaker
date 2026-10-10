@@ -5,6 +5,9 @@ on:
     branches: [main, 'maintenance/**', 'dev/**']
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   lockfiles:
     name: Lockfiles resolve to the public registry
@@ -18,14 +21,18 @@ jobs:
           checkLockfile('package-lock.json'); checkLockfile('ui/package-lock.json');"
 
   test:
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         node: [20, 22, 24]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -58,22 +65,106 @@ jobs:
           node --check bin/prewarm.mjs
           node --check bin/logs.mjs
           node --check bin/shared-sessions.mjs
+          node --check bin/windows-process-lifetime.mjs
+          node --check bin/windows-legacy-process.mjs
+          node --check bin/legacy-upgrade.mjs
+          node --check bin/legacy-installation.mjs
+          node --check bin/account-upgrade-controller.mjs
+          node --check bin/account-upgrade-worker.mjs
+          node --check bin/windows-task-channel.mjs
+      - name: Verify user-runtime execution contract
+        id: user_context
+        run: npm run test:contract -- source --check
       - name: Test
-        run: npm test
-      - name: Pooling failure evidence regressions
-        if: always() && runner.os == 'Windows'
-        env:
-          MCP_POOLING_TRACE_RUN_FAULTS: '1'
-        run: >-
-          node --test --test-concurrency=1 --test-reporter=tap
-          --test-name-pattern="real deadline diagnostics" test/pooling-api.test.mjs
+        run: npm run test:contract -- source
       - name: Prepare the exact release and patch compatibility pair
         run: npm run compat:prepare
       - name: Real-version CLI and API compatibility
-        run: npm run test:compat
+        run: npm run test:contract -- compatibility
       - name: Clean owned compatibility fixtures
         if: always()
         run: npm run compat:clean
+
+  windows-ordinary:
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: |
+          node --check bin/mcp-bridge.mjs
+          node --check bin/cli.mjs
+          node --check bin/windows-process-lifetime.mjs
+          node --check bin/windows-legacy-process.mjs
+          node --check bin/windows-task-channel.mjs
+          node --check bin/runtime-context.mjs
+          node --check bin/legacy-upgrade.mjs
+          node --check bin/account-upgrade-controller.mjs
+          node --check bin/account-upgrade-worker.mjs
+      - name: Restore pinned Windows native toolchain
+        shell: pwsh
+        run: |
+          $toolchain = ./tools/windows-ci/restore-toolchain.ps1 -DestinationDirectory "$env:RUNNER_TEMP/native-toolchain"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "MCP_NATIVE_COMPILER=$($toolchain.CompilerPath)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "MCP_NATIVE_REFERENCES=$($toolchain.ReferenceAssemblyPath)"
+          ./tools/windows-ci/test-toolchain.ps1 -PackageDirectory $toolchain.PackageDirectory -TestDirectory "$env:RUNNER_TEMP/native-toolchain-tests"
+      - name: Verify process lifetime helper reproducible build
+        shell: pwsh
+        run: ./tools/windows-process-lifetime/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Verify separate legacy broker reproducible build
+        shell: pwsh
+        run: ./tools/windows-legacy/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Verify query-only task channel reproducible build
+        shell: pwsh
+        run: ./tools/windows-task-channel/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Record Windows native caller context
+        shell: pwsh
+        run: |
+          $diagnostic = [ordered]@{ registryAccess = 'unknown' }
+          foreach ($name in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'FilterAdministratorToken')) {
+            $diagnostic["${name}Present"] = $null
+            $diagnostic[$name] = $null
+          }
+          try {
+            $policy = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+            $names = @($policy.GetValueNames())
+            foreach ($name in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'FilterAdministratorToken')) {
+              $diagnostic["${name}Present"] = $names -contains $name
+              $diagnostic[$name] = $policy.GetValue($name)
+            }
+            $diagnostic.registryAccess = 'read'
+          } catch {
+            $diagnostic.registryAccess = if ($_.CategoryInfo.Category -eq 'PermissionDenied') { 'denied' } else { 'unavailable' }
+          }
+          $diagnostic | ConvertTo-Json -Compress
+      - name: Classify runner role and verify the elevated-caller refusal
+        run: node tools/ci/windows-runner-role.mjs
+      - name: Ordinary user-runtime source lane
+        shell: pwsh
+        env:
+          # The only switch that un-skips the pooling fault-injection regressions; the worker
+          # forwards it, so without this they would silently never run anywhere.
+          MCP_POOLING_TRACE_RUN_FAULTS: '1'
+        run: |
+          $node = (Get-Command node).Source
+          ./tools/windows-ci/ci-ordinary-user.ps1 -Contract source-ordinary -Repository $env:GITHUB_WORKSPACE -NodePath $node
+      - name: Ordinary user-runtime compatibility lane
+        shell: pwsh
+        run: |
+          $node = (Get-Command node).Source
+          ./tools/windows-ci/ci-ordinary-user.ps1 -Contract compatibility -Repository $env:GITHUB_WORKSPACE -NodePath $node
 
   ui:
     runs-on: ubuntu-latest
@@ -101,7 +192,7 @@ jobs:
       - name: Prepare the exact release and patch pair with built dashboard
         run: npm run compat:prepare
       - name: Real-version browser compatibility
-        run: npm run test:compat:browser
+        run: npm run test:contract -- browser
       - name: Clean owned compatibility fixtures
         if: always()
         run: npm run compat:clean
