@@ -47,6 +47,19 @@ export class PoolingBatches {
     };
   }
 
+  upgradeState() {
+    const writer = this.#writer.upgradeState();
+    return {
+      busy: this.#queued > 0 ||
+        Boolean(this.#applying) ||
+        Boolean(this.#watchReload) ||
+        writer.pending > 0,
+      unsafe: writer.failed ||
+        Boolean(this.#pending) ||
+        [...this.#records.values()].some(record => !['applied', 'cancelled'].includes(record.status)),
+    };
+  }
+
   stage(request, options = {}) {
     if (this.#closed) return Promise.reject(this.#closedError());
     if (this.#queued >= 16) {

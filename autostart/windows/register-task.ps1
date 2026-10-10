@@ -6,13 +6,18 @@
   logon AND on workstation unlock (unlock covers sleep/wake, where logon never fires).
 .PARAMETER Port  Port to pass through to the supervisor (default 8791).
 .PARAMETER TaskName  Selected per-user task name (default McpPacemaker-<port>).
+.PARAMETER LauncherPath  Stable per-instance launcher, when using managed upgrades.
 .OUTPUTS
   Registration result.
 .EXAMPLE
   .\register-task.ps1 -Port 8791
 #>
 [CmdletBinding()]
-param([ValidateRange(1, 65535)][int]$Port = 8791, [string]$TaskName = "McpPacemaker-$Port")
+param(
+  [ValidateRange(1, 65535)][int]$Port = 8791,
+  [string]$TaskName = "McpPacemaker-$Port",
+  [string]$LauncherPath
+)
 
 $ErrorActionPreference = 'Stop'
 try {
@@ -21,6 +26,10 @@ try {
     throw 'Cache-backed npx roots cannot host autostart. Install in a durable root first.'
   }
   $vbs  = Join-Path $PSScriptRoot 'launcher.vbs'
+  if ($LauncherPath) {
+    $vbs = (Resolve-Path -LiteralPath $LauncherPath).Path
+    if ($vbs -match '["\r\n]') { throw 'Unsupported launcher path.' }
+  }
   $user = "$env:USERDOMAIN\$env:USERNAME"
 
   $svc = New-Object -ComObject Schedule.Service
@@ -48,7 +57,7 @@ try {
 
   $action = $def.Actions.Create(0)               # TASK_ACTION_EXEC
   $action.Path = 'wscript.exe'
-  $action.Arguments = "`"$vbs`" $Port"
+  $action.Arguments = if ($LauncherPath) { "`"$vbs`"" } else { "`"$vbs`" $Port" }
 
   $def.Principal.UserId = $user
   $def.Principal.LogonType = 3                    # interactive token (no stored password)

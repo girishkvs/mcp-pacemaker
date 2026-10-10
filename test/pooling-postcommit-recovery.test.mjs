@@ -11,10 +11,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { PoolingConfigStore, recoverPoolingConfig } from '../bin/pooling-config.mjs';
 import { PoolingFiles, hashBytes } from '../bin/pooling-files.mjs';
 import { PoolingExecution, POOLING_BUDGET_MS } from '../bin/pooling-execution.mjs';
+import { observeWindowsProcessLifetime } from '../bin/windows-process-lifetime.mjs';
 import { PostCommitFault } from './fixtures/pooling-postcommit-fault.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const BRIDGE = fileURLToPath(new URL('./fixtures/pooling-postcommit-bridge.mjs', import.meta.url));
+const BRIDGE = fileURLToPath(new URL('../supervisor/bridge-child.mjs', import.meta.url));
 const PRELOAD = new URL('./fixtures/pooling-postcommit-preload.mjs', import.meta.url).href;
 
 class Fixture {
@@ -139,47 +140,85 @@ class Fixture {
       MCP_RESUME: '0', MCP_CONFIG_WATCH: '0', MCP_RECYCLE_MINUTES: '0',
       MCP_IDLE_TIMEOUT_MS: '0', MCP_HEALTH_INTERVAL_MS: '0', MCP_LOG_MAX_BYTES: '0',
       MCP_TEST_POSTCOMMIT_EXPIRY: realExpiry ? '1' : '0',
+      MCP_PACEMAKER_MANAGED_INSTANCE: this.dir,
     });
     const args = [...(fault ? ['--import', PRELOAD] : []), BRIDGE,
       '--config', this.path, '--host', '127.0.0.1', '--port', '0'];
     const child = spawn(process.execPath, args, {
       cwd: this.dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
-    child.stdout.resume();
-    child.stderr.resume();
-    const entry = { child, exit: once(child, 'exit'), evidence: [] };
+    const entry = { child, exit: once(child, 'close'), evidence: [], stdout: '', stderr: '' };
+    entry.exit.catch(() => {});
+    child.stdout.on('data', bytes => { entry.stdout += bytes; });
+    child.stderr.on('data', bytes => { entry.stderr += bytes; });
     this.children.push(entry);
     child.on('message', (message) => {
       if (message.postcommitTestEvidence) entry.evidence.push(message);
     });
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Owned bridge startup watchdog expired')), 15000);
+      const fail = error => {
+        clearTimeout(timer);
+        reject(new Error(`${error.message}\n${entry.stdout}\n${entry.stderr}`, { cause: error }));
+      };
+      const timer = setTimeout(() => fail(new Error('Owned bridge startup watchdog expired')), 15000);
       child.on('message', (message) => {
-        if (message.startupFailure) {
-          clearTimeout(timer);
-          reject(new Error(`Owned startup refused: ${message.startupFailure}`));
-        } else if (message.ready) {
-          clearTimeout(timer);
-          entry.port = message.port;
-          resolve();
+        try {
+          if (message.type === 'upgrade-lifetime') {
+            assert.equal(entry.lifetime, undefined, 'One lifetime owner per bridge');
+            entry.lifetimeIdentity = message.lifetime;
+            const armed = observeWindowsProcessLifetime(message.lifetime).then(observer => {
+              entry.lifetimeObserved = true;
+              child.send('upgrade-lifetime-observed');
+              return observer;
+            });
+            entry.lifetime = armed.then(observer => observer.done);
+            entry.lifetime.catch(() => {});
+            armed.catch(fail);
+          } else if (message.type === 'upgrade-ready') {
+            assert.equal(message.protocol, 1);
+            assert.ok(Number.isInteger(message.port) &&
+              message.port > 0 &&
+              message.port <= 65535);
+            if (process.platform === 'win32') {
+              assert.equal(entry.lifetimeObserved, true, 'Readiness must follow verified lifetime observation');
+              assert.deepEqual(message.lifetime, entry.lifetimeIdentity);
+            }
+            entry.ready = message;
+            entry.port = message.port;
+            clearTimeout(timer);
+            resolve();
+          }
+        } catch (error) {
+          fail(error);
         }
       });
-      child.once('exit', () => {
-        clearTimeout(timer);
-        reject(new Error('Owned bridge exited before startup'));
-      });
+      child.once('error', fail);
+      entry.exit.then(([code, signal]) =>
+        fail(new Error(`Owned bridge exited before startup (code ${code}, signal ${signal})`)), fail);
     });
     this.bridge = entry;
     this.nonce = fs.readFileSync(join(this.dir, 'admin.nonce'), 'utf8').trim();
-    return this.status();
+    const snapshot = await this.status();
+    assert.equal(snapshot.instanceId, entry.ready.instanceId);
+    assert.equal(snapshot.version, entry.ready.version);
+    return snapshot;
   }
 
-  async stop(entry = this.bridge) {
-    if (!entry) return;
+  async stop(entry = this.bridge, force = false) {
+    if (!entry ||
+        entry.cleanup) return;
     if (entry.child.exitCode === null &&
-        entry.child.signalCode === null &&
-        entry.child.connected) entry.child.send({ shutdown: true });
-    await entry.exit;
+        entry.child.signalCode === null) {
+      if (force) assert.equal(entry.child.kill('SIGKILL'), true);
+      else if (entry.child.connected) entry.child.send('stop');
+    }
+    const [code, signal] = await entry.exit;
+    const lifetime = entry.lifetime ? await entry.lifetime : null;
+    if (entry.lifetime) {
+      assert.deepEqual(lifetime, { verified: true, ownerExited: true, activeProcesses: 0 });
+    }
+    entry.cleanup = { pid: entry.child.pid, code, signal, lifetime };
+    this.t.diagnostic(JSON.stringify({ ownedPostcommitCleanup: entry.cleanup }));
   }
 
   async request(path, body, headers = {}) {
@@ -270,6 +309,24 @@ test('startup verifies a transient post-placement failure before loading and per
   assert.equal(after.servers.find((server) => server.name === 'alpha').minWarm, 3);
 });
 
+test('managed post-placement startup failure retains the actual error and drains its owned lifetime', async (t) => {
+  const f = new Fixture(t);
+  f.store.close();
+  fs.writeFileSync(f.path, '{');
+  await assert.rejects(f.start(), error => {
+    assert.match(error.message, /Owned bridge exited before startup/);
+    assert.match(error.message, /SyntaxError/);
+    assert.match(error.message, /mcp-bridge\.mjs/);
+    return true;
+  });
+  const entry = f.children[0];
+  assert.equal(entry.ready, undefined);
+  assert.equal(fs.existsSync(join(f.dir, 'admin.nonce')), false);
+  await f.stop(entry);
+  assert.notEqual(entry.cleanup.code, 0);
+  if (process.platform === 'win32') assert.equal(entry.cleanup.lifetime.activeProcesses, 0);
+});
+
 test('HTTP post-placement expiry stays failed and reconciled; restart keeps the placed bytes', {
   skip: process.platform !== 'win32',
 }, async (t) => {
@@ -312,8 +369,12 @@ test('HTTP post-placement expiry stays failed and reconciled; restart keeps the 
     writerCode: evidence.code, writerCommitState: evidence.commitState,
     phaseAfterFailure: f.record().value.state.phase, activeSessionPreserved: true,
   }));
-  await f.stop();
-  await f.start();
+  const previous = f.bridge;
+  await f.stop(previous, true);
+  assert.equal(previous.cleanup.signal, 'SIGKILL');
+  snapshot = await f.start();
+  assert.notEqual(snapshot.instanceId, previous.ready.instanceId);
+  assert.deepEqual(snapshot.servers.find((server) => server.name === 'alpha').pids, []);
   f.verifyRecovered();
 });
 

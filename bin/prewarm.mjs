@@ -1,16 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-function portNumber(value) {
-  const port = Number(value);
-  if (!Number.isInteger(port) ||
-      port < 1 ||
-      port > 65535) {
-    throw new Error('Port must be an integer between 1 and 65535');
-  }
-  return port;
-}
+import { canonicalPort } from './cli-selection.mjs';
 
 async function jsonRequest(port, path, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -118,25 +109,45 @@ function shellArgument(text) {
   return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
-export function formatUndoCommand(port, name, undoId, config) {
+function windowsArgument(value) {
+  let result = '"';
+  let slashes = 0;
+  for (const character of value) {
+    if (character === '\\') {
+      slashes++;
+      continue;
+    }
+    result += '\\'.repeat(character === '"' ? slashes * 2 + 1 : slashes) + character;
+    slashes = 0;
+  }
+  return result + '\\'.repeat(slashes * 2) + '"';
+}
+
+export function formatUndoCommand(port, name, undoId, config, instance) {
+  port = canonicalPort(port);
   const executable = process.execPath;
   const entry = fileURLToPath(new URL('./cli.mjs', import.meta.url));
-  const values = [executable, entry, name, undoId, ...(config ? [config] : [])];
+  const values = [executable, entry, name, undoId, ...(config ? [config] : []), ...(instance ? [instance] : [])];
   const needsExplicitShell = process.platform === 'win32' &&
-    values.some((value) => /[%!$`"^\r\n]|\\$/.test(value));
+    (Boolean(instance) || values.some((value) => /[%!$`"^\r\n]|\\$/.test(value)));
   if (needsExplicitShell) {
     const quote = (value) => `'${value.replaceAll("'", "''")}'`;
-    const configArg = config ? ` --config ${quote(config)}` : '';
-    const command = `& ${quote(executable)} ${quote(entry)} prewarm --port ${port}${configArg} --server ${quote(name)} --undo ${quote(undoId)}`;
+    const argumentsList = [entry, ...(instance ? ['--instance', instance] : []),
+      'prewarm', '--port', String(port), ...(config ? ['--config', config] : []), '--server', name, '--undo', undoId];
+    const commandLine = argumentsList.map(windowsArgument).join(' ');
+    const command = `$info = New-Object System.Diagnostics.ProcessStartInfo; $info.FileName = ${quote(executable)}; ` +
+      `$info.UseShellExecute = $false; $info.Arguments = ${quote(commandLine)}; ` +
+      '$child = [System.Diagnostics.Process]::Start($info); $child.WaitForExit(); exit $child.ExitCode';
     return `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(command, 'utf16le').toString('base64')}`;
   }
   const configArg = config ? ` --config ${shellArgument(config)}` : '';
+  const instanceArg = instance ? ` --instance ${shellArgument(instance)}` : '';
   const node = process.platform === 'win32' ? 'node.exe' : shellArgument(executable);
-  return `${node} ${shellArgument(entry)} prewarm --port ${port}${configArg} --server ${shellArgument(name)} --undo ${undoId}`;
+  return `${node} ${shellArgument(entry)}${instanceArg} prewarm --port ${port}${configArg} --server ${shellArgument(name)} --undo ${instance ? shellArgument(undoId) : undoId}`;
 }
 
-export async function runPrewarm(options, { configPath, ports, write = console.log } = {}) {
-  const selectedPorts = options.port ? [portNumber(options.port)] : ports.map(portNumber);
+export async function runPrewarm(options, { configPath, ports, instance, write = console.log } = {}) {
+  const selectedPorts = options.port === undefined ? ports.map(canonicalPort) : [canonicalPort(options.port)];
   const actionCount = [options.enable, options.disable, options.undo].filter(Boolean).length;
   if (actionCount > 1) throw new Error('Choose only one of --enable, --disable or --undo');
   if (actionCount &&
@@ -156,6 +167,7 @@ export async function runPrewarm(options, { configPath, ports, write = console.l
   for (const port of selectedPorts) {
     const { body: snapshot } = await jsonRequest(port, '/api/status');
     if (snapshot.service !== 'mcp-pacemaker') throw new Error(`:${port} is not a pacemaker bridge`);
+    if (snapshot.port !== port) throw new Error('Bridge reported a different port; no admin nonce was sent.');
     snapshots.push(snapshot);
   }
 
@@ -194,7 +206,7 @@ export async function runPrewarm(options, { configPath, ports, write = console.l
       typeof snapshot.prewarm.saveWarning === 'string') {
     write(`File save notice: ${snapshot.prewarm.saveWarning}`);
   }
-  const response = await jsonRequest(snapshot.port, `/admin/servers/${encodeURIComponent(name)}/pooling`, {
+  const response = await jsonRequest(selectedPorts[0], `/admin/servers/${encodeURIComponent(name)}/pooling`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-mcp-nonce': nonce, 'x-mcp-pooling-batch': '1' },
     body: JSON.stringify(body),
@@ -220,14 +232,14 @@ export async function runPrewarm(options, { configPath, ports, write = console.l
     else action = 'pre-warming disable staged';
     write(`${name}: ${action}. Pending reload${timing}; not active yet.`);
     if (result.undoId) {
-      write(`Cancel while pending / undo after apply (entire batch: ${scope}): ${formatUndoCommand(snapshot.port, name, result.undoId, options.config)}`);
+      write(`Cancel while pending / undo after apply (entire batch: ${scope}): ${formatUndoCommand(selectedPorts[0], name, result.undoId, options.config, instance)}`);
     }
   } else if (result.cancelled) {
     write(`${name}: pending batch cancelled. Active settings were not changed.`);
   } else {
     write(`${name}: ${options.undo ? 'restored previous pooling settings' : body.mode === 'pool' ? `enabled ${body.minWarm} warm slot(s)` : 'disabled pre-warming'}`);
     if (result.undoId) {
-      write(`Undo: ${formatUndoCommand(snapshot.port, name, result.undoId, options.config)}`);
+      write(`Undo: ${formatUndoCommand(selectedPorts[0], name, result.undoId, options.config, instance)}`);
     }
   }
 }

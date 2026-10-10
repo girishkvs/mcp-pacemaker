@@ -1,5 +1,4 @@
 import { guarded, readJson, requireCondition, sha256 } from './core.mjs';
-import { readFile } from 'node:fs/promises';
 
 const ENDPOINT = 'https://api.osv.dev/v1/querybatch';
 const BATCH_SIZE = 100;
@@ -49,6 +48,10 @@ export function canonicalAdvisoryJson(value) {
     return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalAdvisoryJson(value[key])]));
   }
   return value;
+}
+
+export function requiresProducerAdvisoryEvidence(version) {
+  return !['1.3.1', '2.0.1'].includes(version);
 }
 
 export function validateProducerRiskEvidence(value, now = Date.now()) {
@@ -106,7 +109,7 @@ function validateNativeAdvisories(audits, now) {
 
 // A continuation validates retained records; it never reconstructs missing acceptance.
 export function validateProducerAdvisories(gate, { source, checks, version, complete = false, now = Date.now() } = {}) {
-  const required = complete && version === PRODUCER_RISK_REVIEW.release;
+  const required = complete && requiresProducerAdvisoryEvidence(version);
   if (!required &&
       !hasProducerAdvisoryEvidence(gate) &&
       !hasProducerAdvisoryEvidence(checks)) return false;
@@ -211,6 +214,7 @@ export function requireBuildOnlyRiskScope(rootLockBytes, bundleManifestBytes) {
     affectedPackageAbsentFromRuntimeAndBundle: true };
 }
 
+// Replay of the published 2.0.2 record only; fresh scans never consult this review.
 export function producerRiskAcceptance(context, now = Date.now(), review = PRODUCER_RISK_REVIEW) {
   if (!review ||
       JSON.stringify(review) !== JSON.stringify(PRODUCER_RISK_REVIEW) ||
@@ -240,9 +244,7 @@ export function producerRiskAcceptance(context, now = Date.now(), review = PRODU
     reviewRecordSha256: sha256(JSON.stringify(review)), advisoryFree: false };
 }
 
-// The native finding exit is accepted only with a complete, exact reviewed report.
-// The fingerprint binds every advisory field, ancestor edge/range/path and metadata count.
-export function classifyNativeAudit(output, execution = { exitCode: 0 }, context, now = Date.now()) {
+export function classifyNativeAudit(output, execution = { exitCode: 0 }) {
   requireCondition([0, 1].includes(execution.exitCode) &&
     !execution.error && !execution.signal && !execution.timedOut &&
     !execution.truncated && !execution.incomplete, 'native-audit-execution-failed');
@@ -258,20 +260,9 @@ export function classifyNativeAudit(output, execution = { exitCode: 0 }, context
   requireCondition(counts.total === findings.length &&
     ['info', 'low', 'moderate', 'high', 'critical'].reduce((sum, key) => sum + counts[key], 0) === counts.total,
   'Producer advisories: inconsistent native-audit-counts');
-  if (findings.length === 0) {
-    requireCondition(execution.exitCode === 0 && counts.total === 0, 'native-audit-clean-exit-mismatch');
-    return { disposition: 'advisory-free', rawExitCode: 0, rawCounts: counts, rawFindingCount: 0 };
-  }
-  const acceptance = producerRiskAcceptance(context, now);
-  requireCondition(acceptance && execution.exitCode === 1 && (execution.stderr ?? '') === '',
-    'Producer advisory findings remain unresolved');
-  const fingerprint = sha256(JSON.stringify(canonicalAdvisoryJson(report)));
-  requireCondition(fingerprint === acceptance.nativeReports[context.scope].sha256,
-    'native-audit-not-exact-reviewed-finding-report');
-  return { disposition: 'RISK-ACCEPTED', advisoryFree: false, rawExitCode: execution.exitCode,
-    rawCounts: counts, rawFindingCount: findings.length,
-    rawAdvisoryCount: acceptance.advisories.filter(item => item.scope === context.scope).length,
-    affectedAncestors: findings, reportSha256: sha256(output), canonicalReportSha256: fingerprint, acceptance };
+  requireCondition(findings.length === 0, 'Producer advisory findings remain unresolved');
+  requireCondition(execution.exitCode === 0 && counts.total === 0, 'native-audit-clean-exit-mismatch');
+  return { disposition: 'advisory-free', rawExitCode: 0, rawCounts: counts, rawFindingCount: 0 };
 }
 
 function coordinate(name, version) {
@@ -471,8 +462,6 @@ export async function scanAdvisories({
     }
     const graphs = [];
     const unique = new Map();
-    const coordinateScopes = new Map();
-    const producerInputs = [];
     for (const lock of locks ?? []) {
       const input = await readJson(lock.path);
       const candidate = lock.scope === 'fresh-consumer' ? localArtifact : undefined;
@@ -483,13 +472,6 @@ export async function scanAdvisories({
         graphSha256: sha256(JSON.stringify(packages)), packages: packages.length,
         ...(candidate ? { localArtifact: localArtifactBinding(candidate) } : {}) });
       for (const item of packages) unique.set(`${item.name}@${item.version}`, item);
-      for (const item of packages) {
-        const key = `${item.name}@${item.version}`;
-        coordinateScopes.set(key, [...(coordinateScopes.get(key) ?? []), lock.scope]);
-      }
-      if (lock.scope.startsWith('producer-')) producerInputs.push({
-        ...producerContext, scope: lock.scope, lockSha256: input.sha256, lockBytes: await readFile(lock.path),
-      });
     }
     const lanes = new Set();
     for (const consumer of consumers ?? []) {
@@ -516,10 +498,6 @@ export async function scanAdvisories({
     const packages = [...unique.values()];
     const findings = [];
     const evidence = [];
-    const reviewedProducer = producerContext?.scope === 'producer-root-and-ui' &&
-      producerInputs.length === 2 &&
-      producerInputs.every(context => producerRiskAcceptance(context));
-    const risk = reviewedProducer ? producerRiskAcceptance(producerInputs[0]) : null;
     // Cache/deduplication is deliberately scoped to this invocation; every new run queries OSV again.
     for (let offset = 0; offset < packages.length; offset += BATCH_SIZE) {
       const batch = packages.slice(offset, offset + BATCH_SIZE);
@@ -546,12 +524,7 @@ export async function scanAdvisories({
         for (const vulnerability of results[index]) {
           const item = batch[index];
           const exempted = exemptions.has(`${vulnerability.id}\0${item.name}\0${item.version}`);
-          const scopes = coordinateScopes.get(`${item.name}@${item.version}`);
-          const scoped = risk && scopes?.length === 1 && risk.advisories.some(reviewed =>
-            scopes[0] === reviewed.scope && item.name === reviewed.package &&
-            item.version === reviewed.version && vulnerability.id === reviewed.id);
-          findings.push({ ...item, ...vulnerability, status: exempted || scoped ? 'reviewed-exemption' : 'blocked',
-            ...(scoped ? { riskAcceptance: risk } : {}) });
+          findings.push({ ...item, ...vulnerability, status: exempted ? 'reviewed-exemption' : 'blocked' });
         }
       }
     }
@@ -560,10 +533,6 @@ export async function scanAdvisories({
       requireCondition((await readJson(lock.path)).sha256 === original.lockSha256, 'advisory-lock-changed');
     }
     requireCondition(JSON.stringify(producerContext) === contextBefore, 'advisory-release-context-changed');
-    if (findings.some(item => item.riskAcceptance)) {
-      requireCondition(producerInputs.every(context => producerRiskAcceptance(context)),
-        'producer-risk-expired-during-query');
-    }
     return { status: findings.some(item => item.status === 'blocked') ? 'findings' : 'passed',
       datasource: ENDPOINT, cache: 'this-run-only',
       ...(packages.length > 0 ? { queriedAt: new Date(now).toISOString() }
@@ -573,7 +542,6 @@ export async function scanAdvisories({
       ...(exemptionSha256 ? { exemptionSha256 } : {}), findings, evidence,
       rawFindingCount: findings.length,
       remainingFindings: findings.filter(item => item.status === 'blocked').length,
-      ...(findings.some(item => item.riskAcceptance) ? { advisoryFree: false, riskAcceptance: risk } : {}),
       limits: hasConsumers
         ? 'Exact resolved graph summaries supplied by the trusted consumer runner; no lock reconstructed. ' +
           'Summary authenticity, restore provenance and registry signatures are not independently certified.'

@@ -402,6 +402,29 @@ test('npm12 official name-keyed pack/stage schema is distinct from npm11 array o
   assert.throws(() => npm12Contents(JSON.stringify(noId), a, bytes, true));
 });
 
+for (const version of ['1.3.2', '2.0.3']) {
+  test(`patched TOML floor accepts the reviewed dependency for ${version}`, () => {
+    const a = approval(version);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+
+  test(`patched TOML floor refuses vulnerable or unreviewed ranges for ${version}`, () => {
+    const a = approval(version);
+    for (const floor of ['^1.8.0', '^1.7.0', '*', '>=1.8.0', '^1.9.0 || ^1.8.0']) {
+      assert.throws(() => validatePackage({ ...pkg(a), dependencies: { 'smol-toml': floor } }, a),
+        /TOML floor/);
+    }
+  });
+}
+
+for (const version of ['1.3.1', '2.0.1', '2.0.2']) {
+  test(`patched TOML floor retains published ${version} metadata verification`, () => {
+    const a = approval(version);
+    validatePackage(pkg(a), a);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+}
+
 test('T22-T28/T42: missing, generic-pending or unbound gates fail without changing designated owner-pending states', () => {
   const a = approval();
   const report = { schemaVersion: 1, commit: a.commit, artifact: digest(bytes), localRegression: a.localRegression,

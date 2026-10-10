@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { formatPrewarm, runPrewarm } from '../bin/prewarm.mjs';
+import { formatPrewarm, formatUndoCommand, runPrewarm } from '../bin/prewarm.mjs';
 
 async function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'pacemaker-prewarm-cli-'));
@@ -133,6 +133,27 @@ test('generated Undo retains the explicitly selected config directory', async (t
   assert.ok(undo.includes(`--server ${quote}alpha${quote} --undo undo-one`));
 });
 
+test('selected generated Cancel/Undo retains the instance and correct shell quoting', () => {
+  const instance = process.platform === 'win32' ? "C:\\Owned Instance's $Config\\selected" : "/owned/instance's config";
+  const command = formatUndoCommand(12345, 'alpha', 'undo-one', undefined, instance);
+  const encoded = command.match(/-EncodedCommand ([A-Za-z0-9+/=]+)$/);
+  const text = encoded ? Buffer.from(encoded[1], 'base64').toString('utf16le') : command;
+  assert.match(text, /--instance/);
+  assert.ok(text.includes(instance.replaceAll("'", process.platform === 'win32' ? "''" : "'\\''")));
+});
+
+test('a backend-reported port cannot redirect the admin nonce to another owned endpoint', async (t) => {
+  const selected = await fixture(t);
+  const foreign = await fixture(t);
+  const port = selected.snapshot.port;
+  selected.snapshot.port = foreign.snapshot.port;
+  await assert.rejects(runPrewarm({ enable: 'alpha' }, {
+    configPath: selected.configPath, ports: [port], write: () => {},
+  }), /reported a different port/);
+  assert.equal(selected.posts.length, 0);
+  assert.equal(foreign.posts.length, 0);
+});
+
 test('Windows Undo commands preserve arguments in Command Prompt', { skip: process.platform !== 'win32' }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'pacemaker-undo-shell-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -140,12 +161,14 @@ test('Windows Undo commands preserve arguments in Command Prompt', { skip: proce
   writeFileSync(join(dir, 'cli.mjs'), "import fs from 'node:fs'; fs.writeFileSync(process.env.CAPTURE_ARGS, JSON.stringify(process.argv.slice(2)));\n");
   const module = join(dir, 'prewarm.mjs');
   writeFileSync(module, readFileSync(new URL('../bin/prewarm.mjs', import.meta.url)));
+  writeFileSync(join(dir, 'cli-selection.mjs'), readFileSync(new URL('../bin/cli-selection.mjs', import.meta.url)));
   const { formatUndoCommand: isolatedFormat } = await import(pathToFileURL(module));
-  for (const [name, config] of [
+  for (const [name, config, instance] of [
     ['alpha', 'C:\\Config Dir\\servers.json'],
     ['special $name', 'C:\\Config %Dir%\\servers.json'],
+    ['quoted "alpha"', 'C:\\Config Dir\\servers.json', "C:\\Instance's $Dir \"quoted\"\\root"],
   ]) {
-    const command = isolatedFormat(12345, name, 'undo-one', config);
+    const command = isolatedFormat(12345, name, 'undo-one', config, instance);
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], {
       encoding: 'utf8',
       windowsVerbatimArguments: true,
@@ -153,6 +176,7 @@ test('Windows Undo commands preserve arguments in Command Prompt', { skip: proce
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), [
+      ...(instance ? ['--instance', instance] : []),
       'prewarm', '--port', '12345', '--config', config, '--server', name, '--undo', 'undo-one',
     ]);
     const powershell = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
@@ -161,6 +185,7 @@ test('Windows Undo commands preserve arguments in Command Prompt', { skip: proce
     });
     assert.equal(powershell.status, 0, powershell.stderr);
     assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), [
+      ...(instance ? ['--instance', instance] : []),
       'prewarm', '--port', '12345', '--config', config, '--server', name, '--undo', 'undo-one',
     ]);
   }

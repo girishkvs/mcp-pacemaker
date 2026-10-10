@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
+import { isDeepStrictEqual } from 'node:util';
 import { checkServerPaths, checkReservedName } from './config-checks.mjs';
 import { ServerMetrics } from './server-metrics.mjs';
 import { MAX_MIN_WARM, hasPoolingTransaction, recoverPoolingConfig } from './pooling-config.mjs';
@@ -39,6 +40,26 @@ import { PoolingBatches } from './pooling-batches.mjs';
 import { POOLING_BUDGET_MS } from './pooling-execution.mjs';
 import { poolingTrace } from './pooling-trace.mjs';
 import { SharedSessionManager, SHARED_DEFAULTS } from './shared-sessions.mjs';
+import { ensureWindowsProcessLifetime } from './windows-process-lifetime.mjs';
+import { PoolingFiles } from './pooling-files.mjs';
+
+// Assign the bridge before config can start pooled, shared, stdio or auth children.
+const windowsLifetime = await ensureWindowsProcessLifetime();
+if (windowsLifetime &&
+    process.connected &&
+    process.env.MCP_PACEMAKER_MANAGED_INSTANCE) {
+  await new Promise((resolveObserved, reject) => {
+    const timer = setTimeout(() => reject(new Error('Supervisor did not verify process lifetime ownership.')), 8000);
+    const observed = message => {
+      if (message !== 'upgrade-lifetime-observed') return;
+      clearTimeout(timer);
+      process.off('message', observed);
+      resolveObserved();
+    };
+    process.on('message', observed);
+    process.send({ type: 'upgrade-lifetime', lifetime: windowsLifetime });
+  });
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -53,14 +74,25 @@ const defaultConfig = existsSync(localConfig) || hasPoolingTransaction(localConf
   ? resolve(process.cwd(), 'servers.json')
   : resolve(HOME, 'servers.json');
 const CONFIG = resolve(process.cwd(), getArg('--config', defaultConfig));
-const PORT = parseInt(getArg('--port', '8791'), 10);
+let PORT = Number(getArg('--port', '8791'));
 const HOST = getArg('--host', '127.0.0.1');
+let upgradeHeld = process.env.MCP_PACEMAKER_UPGRADE_PENDING === '1';
+let upgradeRequests = 0;
+let upgradeTraffic = false;
+let upgradeUncertain = false;
+if (PORT === 0 &&
+    (!process.connected || !process.env.MCP_PACEMAKER_MANAGED_INSTANCE || HOST !== '127.0.0.1')) {
+  throw new Error('Port 0 requires a managed loopback startup with actual-port readiness.');
+}
 const VERSION = (() => { try { return JSON.parse(readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8')).version; } catch { return '0'; } })();
 // Base working directory for relative server commands/args. Defaults to the config's folder.
 const BASE_CWD = resolve(getArg('--cwd', dirname(CONFIG)));
 
 /** @type {Record<string, any>} */
-if (hasPoolingTransaction(CONFIG)) recoverPoolingConfig(CONFIG);
+if (hasPoolingTransaction(CONFIG)) {
+  if (upgradeHeld) throw new Error('Unresolved config transaction blocks managed startup.');
+  recoverPoolingConfig(CONFIG);
+}
 const servers = JSON.parse(readFileSync(CONFIG, 'utf8'));
 const poolingConfig = new PoolingBatches({
   configPath: CONFIG,
@@ -1159,6 +1191,7 @@ function spawnWarm(name) {
   return child;
 }
 function refillPool(name) {
+  if (upgradeHeld) return;
   const target = poolTarget(name);
   if (!target ||
       shuttingDown) {
@@ -1224,7 +1257,8 @@ const resumable = new Map(); // sessionId -> { server, initialize, at }
 const resuming = new Map(); // sessionId -> handshake promise, before any asynchronous admission
 
 function saveResumable() {
-  if (!RESUME_ENABLED) return;
+  if (!RESUME_ENABLED ||
+      upgradeHeld) return;
   try { writeFileSync(RESUME_FILE, JSON.stringify(Object.fromEntries(resumable))); } catch { /* best effort */ }
 }
 // Records past the TTL are dropped. Without this the window was only ever applied when the file
@@ -1376,6 +1410,7 @@ function ensureRecycleTimer() {
   // Check often enough to honour the shortest configured period, but never busier than needed.
   const tick = Math.max(200, Math.min(30_000, (Math.min(...periods) * 60_000) / 2));
   recycleTimer = setInterval(() => {
+    if (upgradeHeld) return;
     const now = Date.now();
     for (const name of Object.keys(servers)) {
       const mins = recycleMinutesFor(name);
@@ -1515,6 +1550,7 @@ if (process.env.MCP_CONFIG_WATCH !== '0') {
       watcher = watch(CONFIG, () => {
         clearTimeout(timer);
         timer = setTimeout(() => {
+          if (upgradeHeld) { rearm(); return; }
           poolingConfig.reloadSaved('file changed')
             .catch(() => log('config watcher could not reload the saved configuration'))
             .finally(rearm);
@@ -1540,12 +1576,14 @@ if (process.env.MCP_CONFIG_WATCH !== '0') {
 const HEALTH_INTERVAL_MS = Number(process.env.MCP_HEALTH_INTERVAL_MS || 0);
 
 function probeServer(name) {
+  if (upgradeHeld) return;
   const def = servers[name];
   if (!def || def.type !== 'http' || !def.url) return;
   // A server the client authenticates cannot be probed usefully: the bridge holds no credential
   // for it, so every probe would 401 and report a working server as broken.
   if (!resolveAuth(def) && !def.headers) return;
   stat(name).lastProbe = Date.now();
+  upgradeRequests++;
   const body = JSON.stringify({
     jsonrpc: '2.0', id: `probe-${Date.now()}`, method: 'initialize',
     params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'mcp-pacemaker-health', version: VERSION } },
@@ -1568,7 +1606,8 @@ function probeServer(name) {
       r.setTimeout(10_000, () => { r.destroy(new Error('timed out')); });
       r.end(body);
     });
-  })().catch((e) => noteFailure(name, `health probe: ${e.message}`));
+  })().catch((e) => noteFailure(name, `health probe: ${e.message}`))
+    .finally(() => { upgradeRequests--; });
 }
 
 if (HEALTH_INTERVAL_MS > 0) {
@@ -1600,6 +1639,7 @@ if (TOKEN_REFRESH_LEAD_MS > 0) {
   // Check often enough to act inside the lead window, but no busier than that requires.
   const tick = Math.max(500, Math.min(60_000, TOKEN_REFRESH_LEAD_MS / 2));
   setInterval(() => {
+    if (upgradeHeld) return;
     const now = Date.now();
     for (const [name, def] of Object.entries(servers)) {
       const key = authCacheKey(def);
@@ -2046,6 +2086,24 @@ function proxyHttp(name, def, req, res) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const [name, kind] = url.pathname.split('/').filter(Boolean);
+  const readOnlyStatus = (name === 'status' && !kind) ||
+    (name === 'api' && kind === 'status');
+  if (!readOnlyStatus) {
+    if (upgradeHeld) {
+      res.writeHead(503, { 'Retry-After': '2' }).end('Managed upgrade in progress; retry after the restart.');
+      return;
+    }
+    if (!['api', 'ui', '.well-known'].includes(name)) {
+      upgradeRequests++;
+      upgradeTraffic = true;
+      let finished = false;
+      res.once('finish', () => { finished = true; });
+      res.once('close', () => {
+        upgradeRequests--;
+        if (!finished) upgradeUncertain = true;
+      });
+    }
+  }
 
   if (name === 'status' && !kind) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2133,11 +2191,79 @@ server.keepAliveTimeout = 65_000;
 server.headersTimeout = 70_000;
 
 server.listen(PORT, HOST, () => {
+  PORT = server.address().port;
   try { writeFileSync(NONCE_FILE, ADMIN_NONCE); } catch { /* noop */ }
   log(`listening on http://${HOST}:${PORT}  (config ${CONFIG}, base cwd ${BASE_CWD})`);
   log(`dashboard: http://${HOST}:${PORT}/ui  ·  api /api/status|/api/events|/api/logs  ·  admin nonce -> ${NONCE_FILE}`);
   for (const [n, d] of Object.entries(servers)) {
     log(`  ${n}  ->  ${d.type === 'http' ? `http proxy ${d.url}` : `stdio  /${n}/sse | /${n}/mcp`}`);
+  }
+  if (process.connected) process.send({
+    type: 'upgrade-ready', protocol: 1, port: PORT, version: VERSION, instanceId, held: upgradeHeld,
+    lifetime: windowsLifetime,
+  });
+});
+
+function upgradeState() {
+  const pooling = poolingConfig.upgradeState();
+  const unsafe = upgradeUncertain ||
+    pooling.unsafe ||
+    hasPoolingTransaction(CONFIG);
+  const busy = pooling.busy ||
+    upgradeRequests > 0 ||
+    sessions.size > 0 ||
+    httpSessions.size > 0 ||
+    resuming.size > 0 ||
+    tokenInFlight.size > 0;
+  return { unsafe, busy, configBusy: pooling.busy, held: upgradeHeld, traffic: upgradeTraffic, port: PORT, version: VERSION, instanceId };
+}
+
+let upgradeControlBusy = false;
+process.on('message', async (message) => {
+  if (message?.type !== 'upgrade-control') return;
+  const reply = (result) => {
+    if (process.connected) process.send({ type: 'upgrade-result', requestId: message.requestId, ...result });
+  };
+  if (upgradeControlBusy) { reply({ ok: false, error: 'Admission operation already in progress.' }); return; }
+  upgradeControlBusy = true;
+  try {
+    if (message.action === 'quiesce') {
+      upgradeHeld = true;
+      const deadline = Date.now() + Math.min(8000, Math.max(0, message.timeoutMs ?? 8000));
+      while (upgradeState().busy &&
+          !upgradeState().unsafe &&
+          Date.now() < deadline) {
+        await new Promise(resolveWait => setTimeout(resolveWait, 25));
+      }
+      const state = upgradeState();
+      if (state.busy ||
+          state.unsafe) {
+        throw new Error('Active work or unresolved config transaction blocks upgrade. Settle work and retry; nothing was replayed.');
+      }
+    } else if (message.action === 'activate' ||
+        message.action === 'resume') {
+      if (upgradeState().unsafe) throw new Error('Unresolved config transaction prevents admission.');
+      if (message.action === 'activate') {
+        const files = new PoolingFiles(CONFIG);
+        const sessions = existsSync(RESUME_FILE) ? files.inspect(RESUME_FILE) : null;
+        if (!isDeepStrictEqual(files.inspect(CONFIG), message.expectedAuthority) ||
+            !isDeepStrictEqual(sessions, message.expectedSessionState)) {
+          throw new Error('Configuration or persisted session state changed before admission; the bridge remains held.');
+        }
+      } else {
+        await poolingConfig.reloadSaved('upgrade resumed');
+      }
+      upgradeHeld = false;
+      for (const name of Object.keys(servers)) refillPool(name);
+    } else if (message.action !== 'inspect') {
+      throw new Error('Unknown upgrade action.');
+    }
+    const authority = new PoolingFiles(CONFIG).inspect(CONFIG);
+    reply({ ok: true, ...upgradeState(), authority });
+  } catch (error) {
+    reply({ ok: false, error: error.message, ...upgradeState() });
+  } finally {
+    upgradeControlBusy = false;
   }
 });
 

@@ -4,7 +4,8 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { PRODUCER_RISK_REVIEW, producerRiskAcceptance, classifyNativeAudit, scanAdvisories, requireBuildOnlyRiskScope } from '../../tools/publication-scanners/advisories.mjs';
+import { PRODUCER_RISK_REVIEW, canonicalAdvisoryJson, producerRiskAcceptance, classifyNativeAudit,
+  scanAdvisories, requireBuildOnlyRiskScope } from '../../tools/publication-scanners/advisories.mjs';
 import { digest, validateGateStatus, validateGates, REQUIRED_GATES } from '../../tools/npm-publication/policy.mjs';
 import { LOCAL_CONTROLLER, validateLocalManifest, validatePreparedLocal, localHash } from '../../tools/npm-publication/local-regression.mjs';
 import { syntheticLocalApproval, syntheticLocalReview } from './local-regression-fixture.mjs';
@@ -12,7 +13,7 @@ import { syntheticLocalApproval, syntheticLocalReview } from './local-regression
 const raw = readFileSync(new URL('../fixtures/npm-ui-202-risk-audit.json', import.meta.url), 'utf8');
 const rootRaw = readFileSync(new URL('../fixtures/npm-root-202-risk-audit.json', import.meta.url), 'utf8');
 const lockBytes = readFileSync(new URL('../fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
-const rootLockBytes = readFileSync(new URL('../../package-lock.json', import.meta.url));
+const rootLockBytes = readFileSync(new URL('../fixtures/producer-root-risk-2.0.2-lock.json', import.meta.url));
 const review = PRODUCER_RISK_REVIEW;
 const time = Date.parse(review.notBefore) + 60_000;
 const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui',
@@ -21,9 +22,54 @@ const rootContext = { ...context, scope: 'producer-root',
   lockSha256: review.locks['producer-root'], lockBytes: rootLockBytes };
 const execution = { exitCode: 1, signal: null, error: null };
 
-test('Exact native UI report preserves exit1/eight affected nodes and is never called clean', () => {
+function recordedNativeAudit(scope) {
+  const text = scope === 'producer-root' ? rootRaw : raw;
+  const historicalContext = scope === 'producer-root' ? rootContext : context;
+  const report = JSON.parse(text);
+  const acceptance = producerRiskAcceptance(historicalContext, time);
+  const canonicalReportSha256 = digest(Buffer.from(JSON.stringify(canonicalAdvisoryJson(report)))).sha256;
+  assert.equal(canonicalReportSha256, review.nativeReports[scope].sha256);
+  return {
+    disposition: 'RISK-ACCEPTED', advisoryFree: false, rawExitCode: 1,
+    rawCounts: report.metadata.vulnerabilities,
+    rawFindingCount: Object.keys(report.vulnerabilities).length,
+    rawAdvisoryCount: review.advisories.filter(item => item.scope === scope).length,
+    affectedAncestors: Object.keys(report.vulnerabilities),
+    reportSha256: digest(Buffer.from(text)).sha256, canonicalReportSha256, acceptance,
+  };
+}
+
+test('Retired producer review cannot authorize a new native audit', () => {
+  assert.throws(() => classifyNativeAudit(raw, execution, context, time), /remain unresolved/);
+  assert.throws(() => classifyNativeAudit(rootRaw, execution, rootContext, time), /remain unresolved/);
+});
+
+test('Retired producer review cannot exempt a new OSV scan', async t => {
+  const f = new OsvFixture().setup(t);
+  const result = await scanAdvisories({ ...f.options, fetchImpl: new OsvFixture().fetch() });
+  assert.equal(result.status, 'findings');
+  assert.equal(result.remainingFindings, 4);
+  assert.equal(result.riskAcceptance, undefined);
+  assert.ok(result.findings.every(finding => finding.status === 'blocked' &&
+    finding.riskAcceptance === undefined));
+});
+
+test('Current producer locks cannot reuse the published 2.0.2 risk acceptance', () => {
+  for (const [path, original] of [['../../package-lock.json', rootContext],
+    ['../../ui/package-lock.json', context]]) {
+    const current = readFileSync(new URL(path, import.meta.url));
+    const lockSha256 = digest(current).sha256;
+    assert.notEqual(lockSha256, original.lockSha256);
+    const candidate = { ...original, lockBytes: current, lockSha256 };
+    assert.equal(producerRiskAcceptance(candidate, time), null);
+    assert.throws(() => classifyNativeAudit(original.scope === 'producer-root' ? rootRaw : raw,
+      execution, candidate, time), /remain unresolved/);
+  }
+});
+
+test('Historical native UI evidence preserves exit1/eight affected nodes and is never called clean', () => {
   assert.throws(() => classifyNativeAudit(raw, execution, undefined, time));
-  const result = classifyNativeAudit(raw, execution, context, time);
+  const result = recordedNativeAudit('producer-ui');
   assert.equal(result.disposition, 'RISK-ACCEPTED');
   assert.equal(result.advisoryFree, false);
   assert.equal(result.rawExitCode, 1);
@@ -34,8 +80,8 @@ test('Exact native UI report preserves exit1/eight affected nodes and is never c
   assert.equal(result.acceptance.reviewRecordSha256, digest(Buffer.from(JSON.stringify(review))).sha256);
 });
 
-test('Exact root audit records CLI-runtime exposure separately from build-only findings', () => {
-  const result = classifyNativeAudit(rootRaw, execution, rootContext, time);
+test('Historical root audit records CLI-runtime exposure separately from build-only findings', () => {
+  const result = recordedNativeAudit('producer-root');
   assert.equal(result.rawFindingCount, 1);
   assert.equal(result.rawAdvisoryCount, 1);
   assert.equal(result.rawCounts.moderate, 1);
@@ -198,23 +244,35 @@ class OsvFixture {
 }
 
   class ContinuationFixture {
-    async setup(t, clean = false, clock = Date.parse(review.expiresAt) - 60_000) {
+    async setup(t, clean = false, clock = Date.parse(review.expiresAt) - 60_000, version = '2.0.2') {
       const f = new OsvFixture().setup(t);
       const fetchImpl = clean ? async (_url, options) => new Response(JSON.stringify({
         results: JSON.parse(options.body).queries.map(() => ({})),
       }), { headers: { 'Content-Type': 'application/json' } }) : new OsvFixture().fetch();
       const osv = await scanAdvisories({ ...f.options, fetchImpl });
+      if (!clean) {
+        // This is a retained-record fixture, not permission for a fresh scan.
+        assert.equal(osv.status, 'findings');
+        const acceptance = producerRiskAcceptance(context, time);
+        osv.status = 'passed';
+        osv.remainingFindings = 0;
+        osv.advisoryFree = false;
+        osv.riskAcceptance = acceptance;
+        osv.findings = osv.findings.map(finding => ({
+          ...finding, status: 'reviewed-exemption', riskAcceptance: acceptance,
+        }));
+      }
       const zero = classifyNativeAudit(JSON.stringify({ auditReportVersion: 2, vulnerabilities: {},
         metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } }));
       const nativeAudits = [{ scope: 'producer-root',
-        ...(clean ? zero : classifyNativeAudit(rootRaw, execution, rootContext, time)) }, { scope: 'producer-ui',
-        ...(clean ? zero : classifyNativeAudit(raw, execution, context, time)) }];
+        ...(clean ? zero : recordedNativeAudit('producer-root')) }, { scope: 'producer-ui',
+        ...(clean ? zero : recordedNativeAudit('producer-ui')) }];
       this.clock = clock;
       Date.now.mock.mockImplementation(() => this.clock);
-      this.approval = syntheticLocalApproval({ scope: 'stage', version: '2.0.2', commit: 'a'.repeat(40),
-        tree: 'b'.repeat(40), ref: 'refs/tags/v2.0.2', tagObject: 'c'.repeat(40),
+      this.approval = syntheticLocalApproval({ scope: 'stage', version, commit: 'a'.repeat(40),
+        tree: 'b'.repeat(40), ref: `refs/tags/v${version}`, tagObject: 'c'.repeat(40),
         approvedAt: new Date(this.clock).toISOString(), ownerPreflight: { privateContentReview: {} }, artifact: {} });
-      const source = { version: '2.0.2', commit: this.approval.commit,
+      const source = { version, commit: this.approval.commit,
         rootLockSha256: osv.scope[0].lockSha256, uiLockSha256: review.locks['producer-ui'] };
       const evidence = [{ description: 'Controlled OSV report', sha256: localHash(JSON.stringify(osv)) },
         { description: 'Controlled root audit', sha256: '1'.repeat(64), exitCode: clean ? 0 : 1,
@@ -231,7 +289,7 @@ class OsvFixture {
         gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, { status: 'passed',
           evidence: [{ description: 'Controlled other gate', sha256: '3'.repeat(64) }] }])) };
       this.report.gates['producer-advisories'] = gate;
-      this.manifest = { version: '2.0.2', source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree']
+      this.manifest = { version, source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree']
         .map(key => [key, this.approval[key]])), producerLocks: { root: source.rootLockSha256, ui: source.uiLockSha256 },
         localRegression: this.approval.localRegression,
         preparationApproval: { approver: 'girishkvs', scope: 'prepare', approvedAt: this.approval.approvedAt },
@@ -273,6 +331,21 @@ class OsvFixture {
     f.manifestCheck();
     validatePreparedLocal(JSON.parse(f.bytes), f.approval);
   });
+
+  for (const version of ['1.3.2', '2.0.3']) {
+    test(`New ${version} continuations require complete clean producer evidence`, async t => {
+      const f = await new ContinuationFixture().setup(t, true, Date.parse(review.expiresAt) + 60_000, version);
+      f.gateCheck();
+      f.manifestCheck();
+      validatePreparedLocal(JSON.parse(f.bytes), f.approval);
+      const missing = JSON.parse(f.bytes);
+      delete missing.producerAdvisories;
+      assert.throws(() => validatePreparedLocal(missing, f.approval), /producer advisory evidence required/);
+      const stripped = structuredClone(f.report);
+      stripped.gates['producer-advisories'] = { status: 'passed', evidence: [] };
+      assert.throws(() => f.gateCheck(stripped));
+    });
+  }
 
   for (const clock of [Date.parse(review.notBefore) - 1, Date.parse(review.expiresAt), Date.parse(review.expiresAt) + 1]) {
     test(`Every serialized continuation boundary rejects the risk outside its window: ${clock}`, async t => {
@@ -384,17 +457,16 @@ class OsvFixture {
       assert.throws(() => f.manifestCheck(changed));
     }
   });
-test('OSV exact root and UI scopes retain all four findings and raw response evidence', async t => {
+test('New OSV scans retain all four retired findings without exempting them', async t => {
   const f = new OsvFixture().setup(t);
   const result = await scanAdvisories({ ...f.options, fetchImpl: new OsvFixture().fetch() });
-  assert.equal(result.status, 'passed');
+  assert.equal(result.status, 'findings');
   assert.equal(result.rawFindingCount, 4);
-  assert.equal(result.remainingFindings, 0);
-  assert.equal(result.findings[0].status, 'reviewed-exemption');
+  assert.equal(result.remainingFindings, 4);
+  assert.equal(result.findings[0].status, 'blocked');
   assert.equal(result.findings[0].modified, '2026-10-06T00:00:08.430664Z');
-  assert.equal(result.riskAcceptance.scope, 'producer-root-and-ui');
+  assert.equal(result.riskAcceptance, undefined);
   assert.deepEqual(result.findings.map(item => item.id).sort(), review.advisories.map(item => item.id).sort());
-  assert.equal(result.advisoryFree, false);
   assert.ok(result.evidence.every(item => item.rawResponseSha256.length === 64 && item.responseBytes > 0));
 });
 

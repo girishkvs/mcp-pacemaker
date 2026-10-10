@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { isCanonicalUnsigned, releaseRole, validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
 import { assertCollectionJobSkipped, secretHash, secretId, sourceCiAttempt, validateSecretCollection, validateSecretReview } from './secret-report.mjs';
-import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
+import { requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const POLICY = Object.freeze({
   name: 'mcp-pacemaker',
@@ -339,7 +339,10 @@ export function validatePackage(pkg, approval) {
     assert.ok(Object.hasOwn(allowed, key), `Unreviewed publishConfig: ${key}`);
     assert.equal(value, allowed[key], `Conflicting publishConfig.${key}`);
   }
-  assert.equal(pkg.dependencies?.['smol-toml'], '^1.8.0', 'Reviewed safe direct TOML floor is required');
+  const tomlFloor = pkg.dependencies?.['smol-toml'];
+  const publishedVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(pkg.version);
+  assert.ok(tomlFloor === '^1.9.0' ||
+    publishedVersion && tomlFloor === '^1.8.0', 'Reviewed direct TOML floor is required');
   if (Object.hasOwn(pkg, 'gitHead')) {
     assert.match(pkg.gitHead, /^[a-f0-9]{40}$/, 'Malformed packed gitHead');
     assert.equal(pkg.gitHead, approval.commit);
@@ -396,7 +399,7 @@ export function validateGates(report, approval, artifact) {
   validateProducerAdvisories(report.gates?.['producer-advisories'], {
     version: subject.version, source: report.source, checks: report.sourceChecks, complete: true,
   });
-  if (subject.version === '2.0.2') assert.equal(report.source.commit, approval.commit);
+  if (requiresProducerAdvisoryEvidence(subject.version)) assert.equal(report.source.commit, approval.commit);
   for (const name of REQUIRED_GATES) {
     const gate = report.gates?.[name];
     validateGateStatus(name, gate);

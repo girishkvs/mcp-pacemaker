@@ -1,7 +1,8 @@
 // Synthetic bridges and owned temporary roots only. No OS service registration or fixed ports.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { get } from 'node:http';
 import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -13,14 +14,45 @@ import { servicePaths, stopManagedService, resumeService } from '../bin/service-
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const fakeBridge = `
 import { createServer } from 'node:http';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
+import { ensureWindowsProcessLifetime } from './windows-process-lifetime.mjs';
+import { execFileSync } from 'node:child_process';
 const { values } = parseArgs({ options: { port: { type: 'string' }, config: { type: 'string' } } });
 const log = values.config + '.lifetime';
 const settings = JSON.parse(readFileSync(values.config, 'utf8'));
 const instanceId = randomUUID();
-appendFileSync(log + '.processes', JSON.stringify({ pid: process.pid, instanceId }) + '\\n');
+if (settings.gateLifetime) {
+  appendFileSync(log, 'before-native\\n');
+  while (!existsSync(values.config + '.continue')) await new Promise(resolve => setTimeout(resolve, 10));
+}
+const lifetime = await ensureWindowsProcessLifetime();
+if (lifetime) {
+  writeFileSync(log + '.owner', JSON.stringify(lifetime));
+  await new Promise(resolve => {
+    const observed = message => {
+      if (message !== 'upgrade-lifetime-observed') return;
+      process.off('message', observed);
+      resolve();
+    };
+    process.on('message', observed);
+    process.send({ type: 'upgrade-lifetime', lifetime });
+  });
+}
+let creationTicks;
+if (process.platform === 'win32') {
+  const captured = JSON.parse(execFileSync('pwsh.exe', [
+    '-NoProfile', '-NonInteractive', '-File', process.env.MCP_SUPERVISOR_TEST_IDENTITY,
+    '-ProcessId', String(process.pid),
+  ], { encoding: 'utf8', windowsHide: true }));
+  if (captured.gone || !captured.creationTicks) throw new Error('Owned creation identity was not captured.');
+  creationTicks = captured.creationTicks;
+}
+appendFileSync(log + '.processes', JSON.stringify({
+  pid: process.pid, instanceId, creationTicks,
+  supervisorGeneration: process.env.MCP_SUPERVISOR_TEST_GENERATION,
+}) + '\\n');
 const status = { service: 'mcp-pacemaker', version: '1.3.0', instanceId, servers: [], sessions: 0 };
 let requests = 0;
 const server = createServer((req, res) => {
@@ -67,6 +99,30 @@ function processAlive(pid) {
     if (error.code === 'ESRCH') return false;
     throw error;
   }
+}
+
+function recordedProcessAlive(record) {
+  if (process.platform !== 'win32') return processAlive(record.pid);
+  if (typeof record.creationTicks !== 'string' ||
+      !record.creationTicks) throw new Error('Missing owned process creation identity; retain its fixture.');
+  const result = JSON.parse(execFileSync('pwsh.exe', [
+    '-NoProfile', '-NonInteractive', '-File',
+    fileURLToPath(new URL('./fixtures/windows-process-lifetime/identity.ps1', import.meta.url)),
+    '-ProcessId', String(record.pid), '-CreationTicks', record.creationTicks,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 10000 }));
+  return result.gone !== true;
+}
+
+function ownedBridgesExited(records, supervisors, probe = recordedProcessAlive) {
+  return records.every(record => {
+    if (!Number.isSafeInteger(record.pid) ||
+        record.pid < 1 ||
+        typeof record.supervisorGeneration !== 'string' ||
+        (process.platform === 'win32' && !record.creationTicks)) throw new Error('Invalid captured bridge identity.');
+    const supervisor = supervisors.find(child => child.fixtureGeneration === record.supervisorGeneration);
+    if (!supervisor) throw new Error('Unrecognized fixture supervisor generation.');
+    return !probe(record);
+  });
 }
 
 function listenerAlive(port) {
@@ -118,30 +174,35 @@ function httpStatus(port, path = '/api/status') {
   });
 }
 
-async function fixture({ removeHold = false, deferStop = false, separateTemp = false } = {}) {
+async function fixture({ removeHold = false, deferStop = false, separateTemp = false, gateLifetime = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mcp-supervisor-test-'));
   const processes = [];
   mkdirSync(join(root, 'supervisor'));
   mkdirSync(join(root, 'bin'));
+  mkdirSync(join(root, 'bin', 'windows-lifetime'));
   mkdirSync(join(root, 'state'));
   const childTemp = join(root, 'child-temp');
   mkdirSync(childTemp);
   writeFileSync(join(root, 'package.json'), JSON.stringify(pkg));
-  for (const file of ['supervisor/supervise.mjs', 'supervisor/bridge-child.mjs', 'bin/service-control.mjs']) {
+  for (const file of [
+    'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs', 'bin/service-control.mjs',
+    'bin/windows-process-lifetime.mjs', 'bin/windows-lifetime/ProcessLifetimeHelper.exe',
+    'bin/windows-lifetime/ProcessLifetimeHelper.build.json',
+  ]) {
     copyFileSync(new URL(`../${file}`, import.meta.url), join(root, file));
   }
   if (removeHold) {
     const path = join(root, 'supervisor', 'supervise.mjs');
     const source = readFileSync(path, 'utf8');
     const line = "writeFileSync(paths.hold, JSON.stringify({ id: identity.id, root, config, port }) + '\\n', { mode: 0o600 });";
-    const receipt = "writeFileSync(paths.hold, JSON.stringify({ id: identity.id, root, config, port, stopped: true }) + '\\n', { mode: 0o600 });";
+    const receipt = "writeFileSync(paths.hold, JSON.stringify({ id: identity.id, root, config, port, stopped: true,\n          ...(stopAuthorization ? { quiescedInstanceId: stopAuthorization } : {}) }) + '\\n', { mode: 0o600, flush: true });";
     assert.equal(source.includes(line), true, 'regression must remove the real hold write');
     assert.equal(source.includes(receipt), true, 'regression must remove the completed hold too');
     writeFileSync(path, source.replace(line, '').replace(receipt, ''));
   }
   writeFileSync(join(root, 'bin', 'mcp-bridge.mjs'), fakeBridge);
   const config = join(root, 'state', 'servers.json');
-  writeFileSync(config, JSON.stringify({ deferStop }));
+  writeFileSync(config, JSON.stringify({ deferStop, gateLifetime }));
   const port = await freePort();
   const paths = servicePaths(config, port);
   const log = () => existsSync(config + '.lifetime') ? readFileSync(config + '.lifetime', 'utf8') : '';
@@ -151,21 +212,23 @@ async function fixture({ removeHold = false, deferStop = false, separateTemp = f
   async function verifyExit() {
     const observed = bridgeProcesses();
     assert.notEqual(observed.length, 0, 'a bridge PID must be recorded before shutdown can be verified');
-    await waitFor(async () => {
-      const running = observed.filter(({ pid }) => processAlive(pid));
-      return running.length === 0 && !(await listenerAlive(port));
-    }, `recorded bridge PIDs [${observed.map(({ pid }) => pid).join(', ')}] to exit and :${port} to close (root ${root})`);
+    await waitFor(() => ownedBridgesExited(observed, processes),
+      `captured bridge identities [${observed.map(({ pid }) => pid).join(', ')}] to exit (root ${root})`);
     return observed;
   }
   function launch() {
+    const generation = randomUUID();
     const child = spawn(process.execPath, [join(root, 'supervisor', 'supervise.mjs'), '--port', String(port), '--config', config], {
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
       env: {
         ...process.env, HOME: root, USERPROFILE: root,
+        MCP_SUPERVISOR_TEST_GENERATION: generation,
+        MCP_SUPERVISOR_TEST_IDENTITY: fileURLToPath(new URL('./fixtures/windows-process-lifetime/identity.ps1', import.meta.url)),
         ...(separateTemp ? { TMPDIR: childTemp, TMP: childTemp, TEMP: childTemp } : {}),
       },
     });
     child.output = '';
+    child.fixtureGeneration = generation;
     child.stdout.on('data', (chunk) => { child.output += chunk; });
     child.stderr.on('data', (chunk) => { child.output += chunk; });
     child.finished = new Promise((resolveExit, reject) => {
@@ -269,6 +332,30 @@ test('T33 stop during crash backoff does not depend on a listening bridge', { ti
   });
 });
 
+test('owned Windows stop during child import waits for subsequently armed native lifetime', {
+  timeout: 30000, skip: process.platform !== 'win32',
+}, async () => {
+  const service = await fixture({ gateLifetime: true });
+  await withFixtures([service], async () => {
+    const supervisor = service.launch();
+    await waitFor(() => service.log().includes('before-native'));
+    let completed = false;
+    const stopping = stopManagedService(service).then(receipt => { completed = true; return receipt; });
+    await waitFor(() => existsSync(service.paths.hold));
+    assert.equal(completed, false);
+    assert.equal(JSON.parse(readFileSync(service.paths.hold, 'utf8')).stopped, undefined);
+    writeFileSync(service.config + '.continue', 'continue');
+    await stopping;
+    assert.deepEqual(await supervisor.finished, { code: 0, signal: null }, supervisor.output);
+    const owner = JSON.parse(readFileSync(service.config + '.lifetime.owner', 'utf8'));
+    const ownerTicks = (BigInt(owner.ownerCreationTime) + 504911232000000000n).toString();
+    assert.equal(recordedProcessAlive({ pid: owner.ownerPid, creationTicks: ownerTicks }), false,
+      'The captured native owner must finish drain before stop completes.');
+    assert.equal(JSON.parse(readFileSync(service.paths.hold, 'utf8')).stopped, true);
+    await service.verifyExit();
+  });
+});
+
 test('targeted control reaches a supervisor with a different TMPDIR on each supported OS', { timeout: 20000 }, async () => {
   const service = await fixture({ separateTemp: true });
   await withFixtures([service], async () => {
@@ -314,7 +401,7 @@ test('supervisor termination closes the recorded bridge without requiring a JS s
     child.kill();
     await child.finished;
     const observed = await service.verifyExit();
-    t.diagnostic(`Native exit and closed listener verified for bridge PID ${observed[0].pid}; JS stopped marker: ${service.log().includes('stopped')}.`);
+    t.diagnostic(`Captured bridge identity exited for PID ${observed[0].pid}; JS stopped marker: ${service.log().includes('stopped')}.`);
     assert.equal(existsSync(service.paths.hold), false);
     const restarted = service.launch();
     await waitFor(() => (service.log().match(/started/g)?.length || 0) === 2);
@@ -368,4 +455,70 @@ test('unreadable lifetime evidence retains the real fixture root without masking
     assert.match(diagnostics.join('\n'), /shutdown\/cleanup unverified/);
   });
   assert.equal(existsSync(service.root), false);
+});
+
+test('an exited supervisor cannot certify a still-live captured bridge identity', () => {
+  const record = { pid: 123, creationTicks: '1', supervisorGeneration: 'owned-generation' };
+  const originalExited = [{ fixtureGeneration: 'owned-generation', exitCode: 0 }];
+  let probes = 0;
+  const sameIdentityAlive = captured => {
+    probes++;
+    assert.deepEqual(captured, record);
+    return true;
+  };
+  assert.equal(ownedBridgesExited([record], originalExited, sameIdentityAlive), false);
+  assert.equal(probes, 1, 'Always probe the captured identity, even after supervisor exit 0.');
+  assert.equal(ownedBridgesExited([record], [{ ...originalExited[0], exitCode: null }], sameIdentityAlive), false);
+  assert.throws(() => ownedBridgesExited([{ ...record, supervisorGeneration: 'unknown' }], originalExited));
+});
+
+test('a reused PID passes cleanup only when the captured creation identity is gone', () => {
+  const record = { pid: 123, creationTicks: '1', supervisorGeneration: 'owned-generation' };
+  let probes = 0;
+  const differentIdentity = captured => {
+    probes++;
+    assert.deepEqual(captured, record);
+    return false;
+  };
+  assert.equal(ownedBridgesExited([record], [
+    { fixtureGeneration: 'owned-generation', exitCode: 0 },
+  ], differentIdentity), true);
+  assert.equal(probes, 1);
+});
+
+test('a different Windows creation identity is not an owned survivor and is not touched', {
+  skip: process.platform !== 'win32',
+}, () => {
+  assert.equal(recordedProcessAlive({ pid: process.pid, creationTicks: '1' }), false);
+  assert.equal(processAlive(process.pid), true);
+});
+
+test('verified fixture cleanup leaves a new foreign listener on the reused port untouched', { timeout: 30000 }, async () => {
+  const service = await fixture();
+  const foreign = createServer(socket => {
+    socket.on('error', error => { if (error.code !== 'ECONNRESET') throw error; });
+    socket.end();
+  });
+  const resources = [
+    { cleanup: async () => { if (existsSync(service.root)) await service.cleanup(); } },
+    { cleanup: async () => {
+      if (!foreign.listening) return;
+      await new Promise((resolveClose, reject) => foreign.close(error => error ? reject(error) : resolveClose()));
+    } },
+  ];
+  await withFixtures(resources, async () => {
+    const supervisor = service.launch();
+    await waitFor(() => service.log().includes('started'));
+    await stopManagedService(service);
+    assert.deepEqual(await supervisor.finished, { code: 0, signal: null });
+    await new Promise((resolveListen, reject) => {
+      foreign.once('error', reject);
+      foreign.listen(service.port, '127.0.0.1', resolveListen);
+    });
+    assert.equal(await listenerAlive(service.port), true,
+      'RED: the original cleanup predicate requires this unrelated listener to disappear.');
+    await service.cleanup();
+    assert.equal(existsSync(service.root), false);
+    assert.equal(await listenerAlive(service.port), true, 'Do not stop or wait on the foreign listener.');
+  });
 });

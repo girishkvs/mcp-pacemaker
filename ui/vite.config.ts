@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import tailwindcss from 'tailwindcss';
-import autoprefixer from 'autoprefixer';
+import tailwindcss from '@tailwindcss/postcss';
 import { bundledNotices } from '../tools/third-party-notices/vite-plugin.mjs';
 
 const notices = bundledNotices();
@@ -10,7 +9,7 @@ const notices = bundledNotices();
 export default defineConfig({
   plugins: [react(), notices.vitePlugin],
   css: {
-    postcss: { plugins: [notices.cssPlugin, tailwindcss(), autoprefixer()] },
+    postcss: { plugins: [notices.cssPlugin, tailwindcss({ optimize: false })] },
   },
   base: '/ui/',
   build: { outDir: 'dist', emptyOutDir: true },

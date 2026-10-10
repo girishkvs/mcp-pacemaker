@@ -22,6 +22,7 @@ import { readOwnerLocalAcceptance, publicationHelperEnvironment } from './local-
 import { validateCapture } from './stage-capture.mjs';
 import { reconcileStageCapture } from './stage-capture-hosted.mjs';
 import { scanSource, toolsFromEnvironment } from '../publication-scanners/secrets.mjs';
+import { requiresProducerAdvisoryEvidence } from '../publication-scanners/advisories.mjs';
 import { makeSecretCollection, secretCollectionFiles, secretHash, secretId } from './secret-report.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -221,7 +222,7 @@ async function prepare(approval) {
     ci, toolchain: { node: POLICY.node, npm: POLICY.npm }, producerLocks: locks,
     artifact: { filename: 'candidate.tgz', ...digest(bytes), files: inspection.files },
     sourceReportSha256: digest(readFileSync(sourceReport)).sha256,
-    ...(approval.version === '2.0.2' ? { producerAdvisories: {
+    ...(requiresProducerAdvisoryEvidence(approval.version) ? { producerAdvisories: {
       source: sourceGateReport.source, checks: sourceGateReport.checks,
       gate: sourceGateReport.gates['producer-advisories'],
     } } : {}),

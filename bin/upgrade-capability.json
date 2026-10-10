@@ -1,0 +1,8 @@
+{
+  "protocol": 1,
+  "portZero": true,
+  "admission": true,
+  "cli": true,
+  "legacyRestartProtocol": 1,
+  "accountWorkerProtocol": 1
+}

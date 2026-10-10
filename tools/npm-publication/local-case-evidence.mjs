@@ -14,6 +14,9 @@ import { readLocalBytes, readLocalJson } from './local-evidence.mjs';
 import { exactLocalKeys, localHash, localSha, LOCAL_NODES, releaseRole } from './local-regression.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
 import { auditEvidence } from './local-audit-report.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../windows-process-lifetime/inventory.mjs';
+import { verifyLegacyFeature } from './legacy-broker-gate.mjs';
+import { verifyTaskChannelFeature } from './task-channel-gate.mjs';
 
 const SOURCE = 'C:\\source';
 const EMPTY_GIT = 'C:\\work\\empty-git-config';
@@ -223,7 +226,11 @@ export class LocalCaseReplay {
       files.push({ path: entry.path, sha256: localHash(checkout) });
     }
     return { baselineCommit: baseline, files: files.sort((a, b) => a.path.localeCompare(b.path)),
-      buildScript, reproducibilityBuild: 'not-executed-in-this-run' };
+      buildScript, reproducibilityBuild: 'not-executed-in-this-run',
+      ...(verifyLegacyFeature(this.root) ? { legacyBroker: verifyLegacyFeature(this.root) } : {}),
+      ...(verifyTaskChannelFeature(this.root) ? { taskChannel: verifyTaskChannelFeature(this.root) } : {}),
+      ...(requiresProcessLifetime(this.version)
+        ? { processLifetime: verifyProcessLifetimeAssets(this.root, this.version) } : {}) };
   }
 
   filesUnder(name) {

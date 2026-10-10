@@ -13,6 +13,8 @@ import { inspectRuntimeLicenses } from '../../tools/npm-publication/runtime-lice
 import { retainedDependencies } from '../../tools/npm-publication/local-gate.mjs';
 import { bindStageProofCheckout, STAGE_PROOF_FILES } from '../../tools/npm-publication/stage-proof-contract.mjs';
 import { stageProofFixture } from './stage-proof-fixture.mjs';
+import { lifetimeFixtureFiles } from './lifetime-package-fixture.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../../tools/windows-process-lifetime/inventory.mjs';
 import { AUDIT_DIAGNOSTIC, AUDIT_MODE, AUDIT_TEST_NAME, AUDIT_WORKER_TIMEOUT_MS } from '../../tools/npm-publication/local-audit-report.mjs';
 
 // Producer-complete SYNTHETIC unit receipts. No subprocess, SDK, Git, npm or network is executed.
@@ -114,7 +116,9 @@ export class LocalCaseFixture {
     }
     return { baselineCommit: baseline, files: objects.map(item => ({
       path: item.path, sha256: sha256(readFileSync(join(this.root, item.path))),
-    })).sort((a, b) => a.path.localeCompare(b.path)), buildScript, reproducibilityBuild: 'not-executed-in-this-run' };
+    })).sort((a, b) => a.path.localeCompare(b.path)), buildScript, reproducibilityBuild: 'not-executed-in-this-run',
+    ...(requiresProcessLifetime(this.version)
+      ? { processLifetime: verifyProcessLifetimeAssets(this.root, this.version) } : {}) };
   }
 
   tar(files) {
@@ -173,9 +177,10 @@ export class LocalCaseFixture {
   }
 
   async create() {
+    const tomlVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(this.version) ? '1.8.0' : '1.9.0';
     const pkg = { name: 'mcp-pacemaker', version: this.version, license: 'MIT',
       repository: { url: 'git+https://github.com/girishkvs/mcp-pacemaker.git' },
-      dependencies: { 'smol-toml': '^1.8.0' }, bin: { 'mcp-pacemaker': 'bin/cli.mjs', 'mcp-bridge': 'bin/mcp-bridge.mjs' },
+      dependencies: { 'smol-toml': `^${tomlVersion}` }, bin: { 'mcp-pacemaker': 'bin/cli.mjs', 'mcp-bridge': 'bin/mcp-bridge.mjs' },
       files: ['bin/', 'ui/dist/', 'tools/windows-security-helper/', 'LICENSE', 'THIRD_PARTY_NOTICES.txt'],
       scripts: { test: 'node --test test/unit.test.mjs' } };
     this.write('package.json', pkg);
@@ -189,9 +194,10 @@ export class LocalCaseFixture {
       this.write('ui/test/unit.test.mjs', 'synthetic UI fixture; never executed\n');
     }
     this.write('ui/package.json', ui);
-    const dependency = { version: '1.8.0', license: 'MIT', resolved: 'https://registry.npmjs.org/smol-toml/-/smol-toml-1.8.0.tgz',
+    const dependency = { version: tomlVersion, license: 'MIT',
+      resolved: `https://registry.npmjs.org/smol-toml/-/smol-toml-${tomlVersion}.tgz`,
       integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}` };
-    this.write('node_modules/smol-toml/package.json', { name: 'smol-toml', version: '1.8.0', license: 'MIT' });
+    this.write('node_modules/smol-toml/package.json', { name: 'smol-toml', version: tomlVersion, license: 'MIT' });
     this.write('node_modules/smol-toml/LICENSE', this.license);
     this.write('node_modules/.package-lock.json', { lockfileVersion: 3, packages: { 'node_modules/smol-toml': dependency } });
     this.write('package-lock.json', { lockfileVersion: 3, packages: { '': pkg, 'node_modules/smol-toml': dependency } });
@@ -217,6 +223,7 @@ export class LocalCaseFixture {
       this.nativeBlobs.set(path, bytes);
       this.write(path, path.endsWith('.ps1') ? bytes.toString().replaceAll('\n', '\r\n') : bytes);
     }
+    for (const [path, bytes] of Object.entries(lifetimeFixtureFiles(this.version))) this.write(path, bytes);
     for (const path of STAGE_PROOF_FILES) this.write(path, `Synthetic offline-proof source fixture: ${path}\n`);
     this.write('tools/npm-publication/owner-sdk.mjs', `export const PROFILE_SOURCE_SHA256 = '${'a'.repeat(64)}';\n`);
     this.write('tools/npm-publication/provenance.mjs', `export const PROVENANCE_SOURCE_SHA256 = '${'b'.repeat(64)}';\n`);

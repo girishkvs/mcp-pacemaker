@@ -23,6 +23,7 @@ import { CURRENT_REF, LEGACY_REF, fixturePlan } from '../../tools/compatibility/
 import { renderNotices } from '../../tools/third-party-notices/inventory.mjs';
 import { aggregateExternalGates, verifyNativeIdentity } from '../../tools/npm-publication/external-gates.mjs';
 import { replacementOptions } from '../../tools/service-replacement/check.mjs';
+import { lifetimeFixtureFiles, lifetimeFixtureNames } from './lifetime-package-fixture.mjs';
 import { scanPublicationRequest } from '../../tools/publication-scanners/publication.mjs';
 
 const hash = bytes => digest(bytes).sha256;
@@ -74,10 +75,11 @@ export class CandidateFixture {
     this.package = this.pack(approval.version, controls.package);
     this.root = join(this.home, 'source-checkout');
     for (const [name, bytes] of Object.entries(this.package.files)) save(join(this.root, name), bytes);
+    const tomlVersion = this.tomlVersion(approval.version);
     const lock = { lockfileVersion: 3, packages: {
       '': { name: POLICY.name, version: approval.version },
-      'node_modules/smol-toml': { name: 'smol-toml', version: '1.8.0',
-        resolved: `${POLICY.registry}smol-toml/-/smol-toml-1.8.0.tgz` },
+      'node_modules/smol-toml': { name: 'smol-toml', version: tomlVersion,
+        resolved: `${POLICY.registry}smol-toml/-/smol-toml-${tomlVersion}.tgz` },
     } };
     save(join(this.root, 'package-lock.json'), json(lock));
     save(join(this.root, 'ui/package-lock.json'), json(lock));
@@ -104,10 +106,19 @@ export class CandidateFixture {
       tagTree: approval.tree, head: approval.commit, tree: approval.tree, status: '', workflowMatches: true };
   }
 
+  tomlVersion(version) {
+    return ['1.3.1', '2.0.1', '2.0.2'].includes(version) ? '1.8.0' : '1.9.0';
+  }
+
+  needsProducerReport() {
+    return !['1.3.1', '2.0.1'].includes(this.approval.version);
+  }
+
   pack(version, change = () => {}) {
     const pkg = { name: POLICY.name, version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
-      license: 'MIT', dependencies: { 'smol-toml': '^1.8.0' },
-      files: ['bin/', 'ui/dist/', 'supervisor/', 'tools/windows-security-helper/', 'THIRD_PARTY_NOTICES.txt'],
+      license: 'MIT', dependencies: { 'smol-toml': `^${this.tomlVersion(version)}` },
+      files: ['bin/', 'ui/dist/', 'supervisor/', 'tools/windows-security-helper/',
+        'tools/windows-process-lifetime/', 'THIRD_PARTY_NOTICES.txt'],
       scripts: Object.fromEntries(['test', 'consumer:check', 'compat:prepare', 'compat:clean',
         'test:compat', 'test:compat:browser'].map(name => [name, 'synthetic-command-output-only'])) };
     const files = {
@@ -125,6 +136,7 @@ export class CandidateFixture {
       ...Object.fromEntries(['AssemblyInfo', 'PoolingSecurityHelper', 'PoolingSecurityReader',
         ...(releaseRole(version) === 'current' ? ['PoolingNativeFiles'] : [])]
         .map(name => [`bin/windows/src/${name}.cs`, 'synthetic source'])),
+      ...lifetimeFixtureFiles(version),
     };
     const license = { file: 'LICENSE', text: fixtureMit, sha256: hash(fixtureMit) };
     const packages = [{ name: 'synthetic-ui', version: '1.0.0', license: 'MIT', licenses: [license], comments: [] }];
@@ -226,7 +238,7 @@ export class CandidateFixture {
     }, { run: (...args) => this.nativeResponse(...args) });
     const runner = new GateReaderFixture(this, admitted);
     this.source = runner.snapshot();
-    if (this.approval.version === '2.0.2') {
+    if (this.needsProducerReport()) {
       this.producerScan = await scanPublicationRequest({
         request: { schemaVersion: 1, phase: 'source', sourceRoot: this.root, root: this.root,
           name: POLICY.name, version: this.approval.version, commit: this.approval.commit,
@@ -248,7 +260,7 @@ export class CandidateFixture {
       artifact: { filename: 'candidate.tgz', ...digest(this.package.bytes),
         files: inspectTarball(this.package.bytes, this.approval).files },
       sourceReportSha256: hash(json(this.sourceReport)),
-      ...(this.approval.version === '2.0.2' ? { producerAdvisories: {
+      ...(this.needsProducerReport() ? { producerAdvisories: {
         source: this.sourceReport.source, checks: this.sourceReport.checks,
         gate: this.sourceReport.gates['producer-advisories'],
       } } : {}),
@@ -315,14 +327,16 @@ export class CandidateFixture {
       const names = ['real helper inspection emits only one fingerprint and does not change file contents',
         'real helper prepares both files with matching security without writing config data',
         'real helper refuses a stale fingerprint without writing config data',
-        ...Array.from({ length: 6 }, (_, index) => `synthetic ${index}`)];
+        ...Array.from({ length: 6 }, (_, index) => `synthetic ${index}`),
+        ...lifetimeFixtureNames(this.approval.version)];
       return { stdout: `TAP version 13\n${names.map((name, index) => `ok ${index + 1} - ${name}\n`).join('')}` +
-        '1..9\n# tests 9\n# pass 9\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n', stderr: '' };
+        `1..${names.length}\n# tests ${names.length}\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n`, stderr: '' };
     }
     assert.ok(args.includes('consumer:check'));
     const dependencies = [{ path: `node_modules/${POLICY.name}`, name: POLICY.name,
       version: this.approval.version, integrity: this.prepared.artifact.integrity },
-    { path: 'node_modules/smol-toml', name: 'smol-toml', version: '1.8.0', integrity: fixtureIntegrity }];
+    { path: 'node_modules/smol-toml', name: 'smol-toml',
+      version: this.tomlVersion(this.approval.version), integrity: fixtureIntegrity }];
     const licenseEvidence = fixtureLicenseEvidence(dependencies);
     const candidate = licenseEvidence.packages.find(item => item.name === POLICY.name);
     const text = this.package.files['package.json'];

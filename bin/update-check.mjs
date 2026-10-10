@@ -75,7 +75,7 @@ export function validateRegistry(registry) {
   return url.href;
 }
 
-function npmCliPath() {
+export function npmCliPath() {
   const candidates = [];
   if (process.env.npm_execpath) candidates.push(process.env.npm_execpath);
   candidates.push(join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'));
@@ -105,10 +105,21 @@ export async function readNpmMetadata(spec, field, { registry, cache, run = runF
     throw new Error('Registry metadata unavailable (offline, denied, missing, or npm failed). Check your approved npm configuration; no fallback selected.');
   }
   try {
-    return JSON.parse(stdout);
+    return normalizeNpmMetadata(JSON.parse(stdout));
   } catch {
     throw new Error('npm returned invalid metadata. No fallback selected.');
   }
+}
+
+export function normalizeNpmMetadata(value) {
+  if (Array.isArray(value)) {
+    if (value.length !== 1) throw new Error('Expected one exact npm metadata result.');
+    value = value[0];
+  }
+  if (!value ||
+      typeof value !== 'object' ||
+      Array.isArray(value)) throw new Error('Expected an npm metadata object.');
+  return value;
 }
 
 export async function checkForUpdate(pkg, { registry, read = readNpmMetadata } = {}) {

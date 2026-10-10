@@ -4,10 +4,10 @@ The active workflow supports canonical stable **1.x legacy** (`legacy`) and
 **2.x current** (`latest`) versions. Unknown majors, prereleases, build metadata,
 leading zeros and unsafe integer components are rejected. Support is not release
 authorization: the owner selects each exact version, source and comparison artifact.
-The selected next current-line candidate is **2.0.2**. Selection and local
+This checkout targets the **2.1.0** current-line candidate. Selection and local
 preparation are not publication approval or evidence that its gates have passed.
 
-The package already exists. **2.0.1/latest and 1.3.1/legacy are published and
+The package already exists. **2.0.2, 2.0.1 and 1.3.1 are published and
 immutable.** First-package `sign-bootstrap` and `publish-bootstrap` actions have
 been removed from the active workflow. Historical code and receipts are retained
 for inspection, not reuse. Do not manufacture a version or rerun a publication
@@ -900,18 +900,22 @@ approval remain separate mandatory gates.
 Pins do not float with a new patch version. Before committing/qualifying a selected
 release, compare fresh consumer resolution with the producer locks and reviewed notice
 versions. Run npm audits and the existing OSV gates with the approved public coordinates.
-An advisory or notice mismatch is a stop unless an exact, current risk review explicitly
-covers it. The only release-specific review below does not suppress raw findings.
+An advisory or notice mismatch is a stop. Fresh native producer audits must have
+zero findings; the historical release-specific review below no longer applies to
+new native or OSV scans. New release envelopes retain both native classifications
+and the complete OSV report, not just a generic passing gate.
 
 #### Temporary 2.0.2 producer risk acceptance
 
-**This is a risk exception, not a vulnerability patch or an advisory-free scan.**
+**Historical record: retired from fresh scans. This was a risk exception, not a
+vulnerability patch or an advisory-free scan.**
 The release owner deferred all dependency changes from the **2.0.2 documentation
 release** on October 6, 2026. This replaces the earlier braces-only producer-UI
 record with exact, separate CLI-runtime and UI-build findings. Package manifests,
-producer locks, runtime code and built UI remain unchanged.
+producer locks, runtime code and built UI were unchanged in that release.
 The original expiry remains **2026-10-12T00:00:00Z**; it is not extended.
-The gate uses `notBefore <= now < expiresAt`; equality with expiry is rejected.
+Historical receipt verification uses `notBefore <= now < expiresAt`; equality
+with expiry is rejected.
 Its public effective start is **2026-10-06T15:33:00Z**, conservatively after the
 approval. The exact authorization timestamp and private approval evidence are
 not part of the public review record.
@@ -947,17 +951,17 @@ work, are explicitly deferred from this release. No patched braces release was
 available at review. Fresh consumer installs still resolve and audit their own
 graphs; a vulnerable consumer result is not covered by the producer exception.
 
-The shared record/evaluator is in `tools/publication-scanners/advisories.mjs`.
-Native audit acceptance binds the **entire exact reviewed report** (all advisory
+The historical record/receipt validator is in `tools/publication-scanners/advisories.mjs`.
+Retained native audit acceptance binds the **entire exact reviewed report** (all advisory
 IDs, ranges, paths, ancestor edges, fix metadata and counts), not a package-name
 ignore list. Root and UI reports cannot substitute for each other.
-Only complete finding exit **1** is eligible; execution errors,
+Only the historical complete finding exit **1** was eligible; execution errors,
 signals, partial output and other exits fail. The original exit, raw stream hashes
-and counts remain in evidence. OSV still queries all approved coordinates and
+and counts remain in historical evidence. The original OSV record queried all approved coordinates and
 retains each original ID, modified timestamp, graph and raw-response digest.
 Only exact package/version/advisory matches in their reviewed producer scope
-become `reviewed-exemption`. Both producer locks must match the record for OSV
-acceptance, and unknown or cross-scope findings still block.
+became `reviewed-exemption`. Both producer locks must still match when verifying
+that retained record. Fresh scans do not generate this disposition.
 
 Reports and final gate evidence explicitly say **RISK-ACCEPTED** with the review
 record hash, exact locks, exposure, scope and expiry. They must not say advisory-free.
@@ -974,13 +978,15 @@ report drift or expiry fail closed. Clean unrelated releases do not fail merely
 because this record is expired. Fresh hosted scans still run; local receipts are
 not reused as fresh scan results. No global `exemptionsPath` is installed.
 
-**Required follow-up:** remediate the CLI-runtime and UI-build dependency findings and
-remove this release-specific exception and its fixtures **before expiry or the
-next release, whichever comes first**. Review the replacement source/version/
-license/integrity, rebuild UI/notices with existing tools, and requalify the exact
-source. Existing published packages are not retroactively patched by this record.
-There is no automatic renewal, extension to 2.0.3, Tailwind migration,
-severity-threshold change or dev-dependency omission.
+**Current source:** `smol-toml` has a `1.9.0` floor, the Tailwind 4 build no longer
+contains the reviewed `braces` or `postcss-selector-parser` paths, and
+`source-map-js` is pinned to `1.2.2`. The release-specific exception has been
+removed from fresh scan classification. The original record and historical
+fixtures remain only to verify old receipts without rewriting their meaning.
+Replacement source/version/license/integrity, UI/notices, exact-source
+qualification and fresh hosted audits still require validation. Published
+packages are not retroactively patched. There is no renewal, severity-threshold
+change, dev-dependency omission or extension of this review to another release.
 All other advisories, notices, source/consumer/native/platform gates and separate
 source/byte/stage/owner-publication approvals remain required.
 

@@ -2,8 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter, once } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -47,6 +47,15 @@ async function eventually(read, predicate, message) {
   assert.fail(`${message}: ${JSON.stringify(value)}`);
 }
 
+function registerCleanup(t, child, directory) {
+  const closed = once(child, 'close');
+  t.after(async () => {
+    killBridge(child);
+    await closed;
+    rmSync(directory, { recursive: true, force: true });
+  });
+}
+
 async function boot(t, config) {
   const dir = mkdtempSync(join(tmpdir(), 'pacemaker-metrics-'));
   const cfg = join(dir, 'servers.json');
@@ -63,12 +72,7 @@ async function boot(t, config) {
   });
   let output = '';
   child.stderr.on('data', (chunk) => { output += chunk; });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    killBridge(child);
-    await exited;
-    rmSync(dir, { recursive: true, force: true });
-  });
+  registerCleanup(t, child, dir);
   await eventually(async () => {
     try {
       return (await request('GET', '/status')).status === 200;
@@ -81,6 +85,34 @@ async function boot(t, config) {
   const metrics = async (name = 'echo') => (await snapshot()).servers.find((server) => server.name === name).spawn;
   return { snapshot, metrics, output: () => output, nonce: readFileSync(join(dir, 'admin.nonce'), 'utf8').trim() };
 }
+
+test('fixture cleanup waits for close after process exit', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'pacemaker-metrics-close-'));
+  const config = join(directory, 'servers.json');
+  writeFileSync(config, '{}');
+  const child = new EventEmitter();
+  t.after(() => {
+    child.emit('close', 0, null);
+    rmSync(directory, { recursive: true, force: true });
+  });
+  let cleanup;
+  registerCleanup({ after: callback => { cleanup = callback; } }, child, directory);
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  let settled = false;
+  const cleaning = cleanup().then(() => {
+    settled = true;
+  }, error => {
+    settled = true;
+    return error;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, 'Process exit does not mean its stdio has closed');
+  assert.equal(readFileSync(config, 'utf8'), '{}');
+  child.emit('close', 0, null);
+  assert.equal(await cleaning, undefined);
+  assert.equal(existsSync(directory), false);
+});
 
 test('process totals outlive the bounded latency sample window', () => {
   const metrics = new ServerMetrics();

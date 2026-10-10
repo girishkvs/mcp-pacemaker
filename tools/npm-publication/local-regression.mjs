@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
+import { requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const LOCAL_CONTRACT = 'mcp-pacemaker-private-local-regression-v1';
 export const LOCAL_NODES = Object.freeze(['20.20.2', '22.23.2', '24.21.0']);
@@ -174,7 +174,7 @@ export function validatePreparedLocal(prepared, approval, source = approval, sou
   assert.ok(Number.isFinite(at) &&
     at <= Date.now());
   validateLocalReview(prepared.localRegressionReview, prepared.localRegression, at);
-  if (source.version === '2.0.2' ||
+  if (requiresProducerAdvisoryEvidence(source.version) ||
       prepared.producerAdvisories !== undefined) {
     const producer = prepared.producerAdvisories;
     assert.ok(producer, 'Prepared producer advisory evidence required');

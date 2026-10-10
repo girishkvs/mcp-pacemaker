@@ -26,6 +26,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
@@ -58,22 +60,85 @@ jobs:
           node --check bin/prewarm.mjs
           node --check bin/logs.mjs
           node --check bin/shared-sessions.mjs
+          node --check bin/windows-process-lifetime.mjs
+          node --check bin/windows-legacy-process.mjs
+          node --check bin/legacy-upgrade.mjs
+          node --check bin/legacy-installation.mjs
+          node --check bin/account-upgrade-controller.mjs
+          node --check bin/account-upgrade-worker.mjs
+          node --check bin/windows-task-channel.mjs
+      - name: Restore pinned Windows native toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $toolchain = ./tools/windows-ci/restore-toolchain.ps1 -DestinationDirectory "$env:RUNNER_TEMP/native-toolchain"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "MCP_NATIVE_COMPILER=$($toolchain.CompilerPath)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "MCP_NATIVE_REFERENCES=$($toolchain.ReferenceAssemblyPath)"
+          ./tools/windows-ci/test-toolchain.ps1 -PackageDirectory $toolchain.PackageDirectory -TestDirectory "$env:RUNNER_TEMP/native-toolchain-tests"
+      - name: Verify process lifetime helper reproducible build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/windows-process-lifetime/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Verify separate legacy broker reproducible build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/windows-legacy/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Verify query-only task channel reproducible build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/windows-task-channel/build.ps1 -Verify -CompilerPath $env:MCP_NATIVE_COMPILER -ReferenceAssemblyPath $env:MCP_NATIVE_REFERENCES
+      - name: Record Windows native caller context
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $policy = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA,ConsentPromptBehaviorAdmin
+          [ordered]@{ EnableLUA = $policy.EnableLUA; ConsentPromptBehaviorAdmin = $policy.ConsentPromptBehaviorAdmin } | ConvertTo-Json -Compress
+          node --input-type=module -e '
+            import { queryCliCallerContext } from "./bin/windows-task-channel.mjs";
+            const caller = await queryCliCallerContext();
+            const { elevated, enabledAdministrator, restricted, appContainer,
+              guardThreadImpersonating, parentThreadImpersonation } = caller.actorFacts ?? {};
+            const { completeStableThreadSet, primaryStable, threadCount } = caller.observation ?? {};
+            console.log(JSON.stringify({
+              proofScope: caller.proofScope, ordinaryEligible: caller.ordinaryEligible, reason: caller.reason,
+              elevated, enabledAdministrator, restricted, appContainer,
+              guardThreadImpersonating, parentThreadImpersonation,
+              completeStableThreadSet, primaryStable, threadCount,
+              helperExitCode: caller.helperExit.code, helperExitSignal: caller.helperExit.signal
+            }));'
+      - name: Verify ordinary Windows CI launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: node tools/windows-ci/ordinary-tests.mjs --output "$env:RUNNER_TEMP/ordinary-launcher-tests"
       - name: Test
+        if: runner.os != 'Windows'
         run: npm test
+      - name: Test in ordinary Windows context
+        if: runner.os == 'Windows'
+        run: node tools/windows-ci/ordinary-run.mjs test
       - name: Pooling failure evidence regressions
         if: always() && runner.os == 'Windows'
         env:
           MCP_POOLING_TRACE_RUN_FAULTS: '1'
-        run: >-
-          node --test --test-concurrency=1 --test-reporter=tap
-          --test-name-pattern="real deadline diagnostics" test/pooling-api.test.mjs
+        run: node tools/windows-ci/ordinary-run.mjs pooling-diagnostics
       - name: Prepare the exact release and patch compatibility pair
+        if: runner.os != 'Windows'
         run: npm run compat:prepare
+      - name: Prepare compatibility in ordinary Windows context
+        if: runner.os == 'Windows'
+        run: node tools/windows-ci/ordinary-run.mjs compat:prepare
       - name: Real-version CLI and API compatibility
+        if: runner.os != 'Windows'
         run: npm run test:compat
+      - name: Real-version compatibility in ordinary Windows context
+        if: runner.os == 'Windows'
+        run: node tools/windows-ci/ordinary-run.mjs test:compat
       - name: Clean owned compatibility fixtures
-        if: always()
+        if: always() && runner.os != 'Windows'
         run: npm run compat:clean
+      - name: Clean compatibility in ordinary Windows context
+        if: always() && runner.os == 'Windows'
+        run: node tools/windows-ci/ordinary-run.mjs compat:clean
 
   ui:
     runs-on: ubuntu-latest

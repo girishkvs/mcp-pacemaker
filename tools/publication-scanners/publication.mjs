@@ -6,7 +6,7 @@ import {
   LIMITS, guarded, isolatedEnvironment, readJson, requireCondition, runBounded,
   sha256, validateBinding, workspace,
 } from './core.mjs';
-import { scanAdvisories } from './advisories.mjs';
+import { requiresProducerAdvisoryEvidence, scanAdvisories } from './advisories.mjs';
 import { scanPrivateContent } from './private.mjs';
 import { TOOL_PINS, scanArtifact, scanSource, toolsFromEnvironment } from './secrets.mjs';
 import { consumeSecretAdmission } from '../npm-publication/secret-admission.mjs';
@@ -218,13 +218,14 @@ export async function scanPublicationRequest({
         } } : {}),
       });
       scannerDetails.advisories = advisory;
-      const producerReport = request.phase === 'source' && request.version === '2.0.2';
+      const producerReport = request.phase === 'source' && requiresProducerAdvisoryEvidence(request.version);
+      const advisoryFree = advisory.status === 'passed' && advisory.rawFindingCount === 0;
       gates[advisoryName] = {
         status: advisory.status === 'passed' ? 'passed' : 'failed',
         ...(producerReport ? { osv: advisory, rawFindingCount: advisory.rawFindingCount,
-          remainingFindings: advisory.remainingFindings, advisoryFree: !advisory.riskAcceptance,
-          disposition: advisory.riskAcceptance ? 'RISK-ACCEPTED' : 'advisory-free',
-          ...(advisory.riskAcceptance ? { riskAcceptance: advisory.riskAcceptance } : {}) } : {}),
+          remainingFindings: advisory.remainingFindings, advisoryFree,
+          disposition: advisoryFree ? 'advisory-free'
+            : advisory.status === 'findings' ? 'findings' : 'not-verified' } : {}),
         evidence: [evidence(`${advisoryName}; OSV exact supplied graphs; public coordinates only; per-run responses`,
           advisory)],
       };

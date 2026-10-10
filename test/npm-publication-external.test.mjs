@@ -153,12 +153,12 @@ async function scanner({ request, policyPath, publicPackages }) {
   };
 }
 
-test('Existing external source aggregation carries actual scoped OSV risk evidence to the gate', async t => {
+test('External source aggregation blocks OSV findings covered only by the retired review', async t => {
   t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
   const f = fixture(t);
   const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
   write(f.sourceRoot, 'ui/package-lock.json', lockBytes);
-  const rootLockBytes = readFileSync(new URL('../package-lock.json', import.meta.url));
+  const rootLockBytes = readFileSync(new URL('./fixtures/producer-root-risk-2.0.2-lock.json', import.meta.url));
   write(f.sourceRoot, 'package-lock.json', rootLockBytes);
   const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
     Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
@@ -182,11 +182,14 @@ test('Existing external source aggregation carries actual scoped OSV risk eviden
       return ordinary;
     },
   });
-  assert.equal(report.status, 'pending-owner-review');
-  assert.equal(report.gates['producer-advisories'].riskAcceptance.disposition, 'RISK-ACCEPTED');
+  assert.equal(report.status, 'failed');
+  assert.equal(report.gates['producer-advisories'].riskAcceptance, undefined);
+  assert.equal(report.gates['producer-advisories'].status, 'failed');
+  assert.equal(report.error.gate, 'producer-advisories');
+  assert.notEqual(report.gates['producer-advisories'].advisoryFree, true);
   assert.equal(report.scannerDetails.advisories.rawFindingCount, 4);
-  assert.equal(report.scannerDetails.advisories.findings[0].status, 'reviewed-exemption');
-  assert.equal(report.gates['native-release-identity'].status, 'passed');
+  assert.equal(report.scannerDetails.advisories.findings[0].status, 'blocked');
+  assert.equal(report.gates['native-release-identity'], undefined, 'Later gates must not run after advisory rejection');
 });
 function commandEvidence(args, stdout = '') {
   const command = { file: resolve('synthetic-node'), args, cwd: resolve('synthetic-root') };

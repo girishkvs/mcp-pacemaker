@@ -233,15 +233,22 @@ export class BundleInventory {
       }));
   }
 
+  selectorKey(selector) {
+    const normalized = selector.replace(/\s+/g, ' ');
+    if (normalized.includes('"') ||
+        normalized.includes('\\')) return normalized;
+    return normalized.replaceAll("'", '"');
+  }
+
   tailwindCss(root) {
-    const file = path.join(this.uiRoot, 'node_modules/tailwindcss/lib/css/preflight.css');
+    const file = path.join(this.uiRoot, 'node_modules/tailwindcss/preflight.css');
     const require = createRequire(path.join(this.uiRoot, 'package.json'));
     const preflight = require('postcss').parse(readText(file));
     const selectors = new Set();
-    root.walkRules((rule) => selectors.add(rule.selector.replace(/\s+/g, ' ')));
+    root.walkRules((rule) => selectors.add(this.selectorKey(rule.selector)));
     let missing = false;
     preflight.walkRules((rule) => {
-      if (!selectors.has(rule.selector.replace(/\s+/g, ' '))) missing = true;
+      if (!selectors.has(this.selectorKey(rule.selector))) missing = true;
     });
     if (missing) {
       throw new Error('Tailwind preflight output changed; generated CSS attribution requires review');
@@ -251,7 +258,8 @@ export class BundleInventory {
   }
 
   producers(rollupVersion) {
-    return ['@vitejs/plugin-react', 'autoprefixer', 'postcss', 'rollup', 'tailwindcss', 'vite'].map((name) => {
+    return ['@vitejs/plugin-react', '@tailwindcss/postcss', '@tailwindcss/node', '@tailwindcss/oxide',
+      'postcss', 'rollup', 'tailwindcss', 'vite'].map((name) => {
       const lockPath = `node_modules/${name}`;
       const metadata = JSON.parse(readText(path.join(this.uiRoot, lockPath, 'package.json')));
       const wrongRollup = name === 'rollup' && metadata.version !== rollupVersion;

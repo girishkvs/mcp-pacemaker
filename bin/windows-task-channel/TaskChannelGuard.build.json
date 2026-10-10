@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "binary": "TaskChannelGuard.exe",
+  "binarySha256": "412750faa0357cb8879af69ad9fc75229fb340ea1d85d3843cf5edff177b1bc7",
+  "inputs": {
+    "targetFramework": ".NETFramework,Version=v4.6.2",
+    "platform": "AnyCPU",
+    "compilerVersion": "5.9.0-1.26357.3 (35d9211b841e7613c1d2f8f5af6d628ace696c4c)",
+    "compilerSha256": "3aafb7b9c54fa31a7092af35148971ee616965e7f9a0b80fb7fdc4bdd1d1a555",
+    "compilerArguments": [
+      "/nologo",
+      "/noconfig",
+      "/nostdlib+",
+      "/target:exe",
+      "/platform:anycpu",
+      "/langversion:7.3",
+      "/optimize+",
+      "/debug-",
+      "/deterministic+",
+      "/checked-",
+      "/unsafe-",
+      "/warn:4",
+      "/warnaserror+",
+      "/utf8output"
+    ],
+    "pathMap": "/_/mcp-pacemaker/windows-task-channel",
+    "sourceEncoding": "UTF-8 without BOM, LF line endings",
+    "sourceSha256": {
+      "AssemblyInfo.cs": "cd8b74ed1747f88261085f206ada2aa73f61a90f633fb7f0394c492e2d57e91a",
+      "ChannelCliContext.cs": "d99dcd49c1117a2581e4d9818010eed540fa60a880f2920c174a210e6d369348",
+      "ChannelFiles.cs": "ce4870cb839d49f84868014078a88c869f94b0604d985a64720e93423414d476",
+      "ChannelNative.cs": "fe19cfb88936273d466dd4e121175a3477ff6ae821306038fd3da455e9608b35",
+      "ChannelSession.cs": "9be542fac1ed3fb73b3d6088d7a46f58e6dd5e50c249abd92aa23cf7a051d943",
+      "TaskChannelGuard.cs": "5af35b645388e4063f12d90cd644e25585bcfff880c8f4497f3535364cb6b76f"
+    },
+    "buildScriptSha256": "666cf533c635c3f01d34eed899f7d61d259bb777c442bde0bc38af2cacd3f7d6",
+    "referenceSha256": {
+      "mscorlib.dll": "7118fe658567606fa0538f7b5a2071e4606756c07e9062e1e5b24fa49e97d1f6",
+      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125",
+      "System.Core.dll": "774e965a6c25891a96d6d3b838ae10226ed9963a73b09e4be7c2ec275ffb5886",
+      "System.Management.dll": "bc35cddea6226db4d428a9fb70fcefe321a2af003c947edb812f3e911f8e4094",
+      "System.Web.Extensions.dll": "7a32bf3263aebed93c3a0847294aebdde15f7427541ed223a4cc4eb93c36d556"
+    }
+  }
+}

@@ -18,12 +18,16 @@ part of its security posture. The setup CLI and the dashboard may use dependenci
 
 ## Lockfiles must resolve to the public registry
 
-CI fails any lockfile containing a `resolved` URL outside `registry.npmjs.org`. If you work
-behind a private mirror, re-resolve before committing:
+CI fails any lockfile containing a `resolved` URL outside `registry.npmjs.org`.
+Do not bypass a required registry policy to produce those URLs. Restore through the
+approved registry and preserve exact package names, versions and verified archive
+integrities when canonicalizing mirror-specific URLs for the public lockfile.
+Hosted CI must still restore the resulting lock from its configured registry.
 
-```bash
-npm install --registry https://registry.npmjs.org
-```
+For npm 12 mirrors whose metadata and tarball URLs have different prefixes,
+`replace-registry-host` supports command-local URL-prefix mapping back through the
+approved registry. This does not require relaxing `allow-remote`, disabling TLS,
+changing global settings or committing a private registry configuration.
 
 ## Tests
 
@@ -63,6 +67,14 @@ platform; Windows also exercises the real executable. Those checks do not replac
 byte-for-byte rebuild, and a rolling CI image may not contain the recorded compiler.
 No compiler or PowerShell host runs in the production config-write path.
 
+Windows bridge lifetime containment uses a **separate** packaged helper. Build
+and byte-for-byte verify it with `tools/windows-process-lifetime/build.ps1` and
+`-Verify`; see its README for the ownership and failure contract. Do not change
+the immutable config-security helper to update the lifetime helper. Run both
+`test/windows-process-lifetime.test.mjs` and `test/windows-lifetime-startup.test.mjs`
+on supported Windows/Node versions. They retain owned PID/creation-time cleanup
+receipts and TCP heartbeat observations outside Git.
+
 Batch tests must cover the full five-second trailing debounce, merging complete snapshots,
 Reload now, requests during a flip, stale active revisions, whole-batch Cancel/Undo and late
 commit outcomes. Use controlled clocks for scheduling boundaries and real file/HTTP cases for
@@ -76,6 +88,11 @@ observing a real signal (a heartbeat file, a recorded request) over enumerating 
 sleeping a fixed interval.
 
 ## Real-version compatibility gates
+
+The dashboard uses the Tailwind 4 PostCSS adapter. Its optimizer stays disabled
+until generated selectors and license attribution have been checked; Vite still
+minifies the final CSS. Keep the inline Vite and standalone PostCSS settings
+consistent, and run the UI tests before regenerating the dashboard and notices.
 
 These are separate, mandatory CI gates, not substitutes for `npm test`. The root CI job runs
 CLI/API pairs on Windows, Linux and macOS with Node 20, 22 and 24. The Linux/Node 22 UI
@@ -111,13 +128,14 @@ The same harness runs in both maintained branches:
 
 | Preparation | Selected legacy / current pair |
 |---|---|
-| Default in the selected 2.0.2 checkout | Immutable 1.3.0 / packed 2.0.2 |
+| Default in the selected 2.1.0 checkout | Immutable 1.3.0 / packed 2.1.0 |
 | Default in the 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
 | `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
-| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.1 / packed 2.0.2 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed explicit 1.x peer / packed 2.1.0 |
 
-These selections are not qualification evidence. The selected 1.3.1/2.0.2 pair
-requires fresh exact-byte gates; earlier 1.3.1/2.0.1 results remain historical.
+These selections are not qualification evidence. The 2.1.0 candidate requires fresh
+exact-byte gates; selecting it does not select an opposite-major patch pair.
+Earlier 1.3.1/2.0.2 and 1.3.1/2.0.1 results remain historical.
 
 Run both API and browser gates for the explicit patch pair before publishing either complete
 dual-major release set. The two default CI pairs alone do not establish that combined result.

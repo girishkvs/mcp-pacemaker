@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Target release: **2.0.2**. This candidate has not yet been published.
+## [2.1.0]
+
+### Added
+
+- Explicit managed `upgrade --to`, read-only plans, isolated `--sxs` instances with
+  retained OS-assigned listeners, stable launchers, admission control and a durable
+  activation/recovery journal. Bare `upgrade` and `--self` remain compatible.
+- Preserve ports and host wiring during managed replacement; retain the previous
+  package and restrict rollback to verified, unchanged pre-admission state.
+- Add one-time restart-only migration for the exact Windows 1.3.0 registration,
+  with interactive uncertainty acknowledgement, held process identities, partial
+  observed-descendant receipts and scoped task/CLI rollback. No machine reboot.
+- Refuse unsupported or unknown supervisor/autostart identities before interruption.
+- Add explicit Windows original-account upgrades with a task-only administrator
+  controller and authenticated original-user worker. Keep current-user scope as
+  the default, preserve task security/account settings, and refuse unavailable or
+  changed logged-on session identity. Real elevated two-account qualification
+  remains required; `--all-users` is unsupported.
+
+### Fixed
+
+- Contain Windows bridge descendants in a kill-on-close Job Object before any
+  workload starts, preventing nested cmd/Node trees from surviving abrupt bridge
+  loss. Fail startup if containment cannot be established.
+- Preserve existing task security during legacy migration instead of resubmitting
+  its owner, allowing an ordinary user to update an eligible Administrators-owned
+  task without changing its permissions.
+- Handle Task Scheduler's equivalent XML serialization during post-write checks
+  and restoration, including rediscovery after rollback. Keep raw revision
+  preconditions, original backups and complete resource-security checks intact.
+- Avoid Windows upgrade-authorization failures caused by slow thread enumeration
+  and already-terminated thread records while retaining complete identity and
+  authority checks.
+- Capture larger legacy process trees with bounded discovery and distinguish
+  reused parent PIDs from proven descendant relationships.
+- Recheck shared-session test cooldown deadlines after early timer delivery before
+  acquiring a replacement generation.
+- Wait for the metrics test process and its stdio to close before removing fixture files.
+
+### Security
+
+- Refuse elevated or unverified default Windows upgrade and recovery before
+  staging, task writes or runtime launch, preserving the original runtime authority.
+- Raise the CLI's `smol-toml` floor to `1.9.0`.
+- Move the dashboard build to Tailwind CSS `4.3.3`, removing the vulnerable
+  `braces` and `postcss-selector-parser` dependency paths, and pin `source-map-js`
+  to `1.2.2`.
+- Retire the 2.0.2 producer exception from fresh native and OSV scans. New releases
+  require complete clean producer evidence; historical receipts retain their
+  original source bindings and expiry.
+
+### Changed
+
+- Update the Tailwind PostCSS adapter, class-merging dependency, generated dashboard
+  assets and license attribution while retaining the existing theme configuration.
+
+## [2.0.2] - 2026-10-06
 
 ### Fixed
 

@@ -166,15 +166,15 @@ test('regression control: caller-temporary socket selection fails the stable-end
   }
 });
 
-async function shutdownModel(source, root) {
+async function shutdownModel(source, root, { platform = 'linux', observe } = {}) {
   const config = join(root, 'state', 'servers.json');
   const port = 12345;
   const paths = servicePaths(config, port);
   writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '2.0.1' }));
   const child = new EventEmitter();
   child.connected = true;
-  child.send = (_, callback) => callback();
-  const supervisorProcess = Object.assign(new EventEmitter(), { pid: process.pid, execPath: process.execPath });
+  child.send = (_, callback) => callback?.();
+  const supervisorProcess = Object.assign(new EventEmitter(), { pid: process.pid, execPath: process.execPath, env: {}, platform });
   const timers = new Set();
   let accepts;
   let forks = 0;
@@ -184,7 +184,15 @@ async function shutdownModel(source, root) {
   server.close = () => { server.closed = true; };
   const begin = source.indexOf('async function supervise()');
   assert.notEqual(begin, -1, 'Execute the actual production supervisor body');
-  await runInNewContext(`(${source.slice(begin)})()`, {
+  let body = source.slice(begin);
+  if (observe) {
+    const nativeImport = "const { observeWindowsProcessLifetime } = await import('../bin/windows-process-lifetime.mjs');";
+    assert.equal(body.includes(nativeImport), true);
+    body = body.replace(nativeImport, 'const observeWindowsProcessLifetime = observe;');
+  }
+  await runInNewContext(`(${body})()`, {
+    values: {},
+    observe,
     root, config, port, paths, dirname, join, existsSync, mkdirSync, readFileSync, writeFileSync,
     randomBytes, randomUUID, process: supervisorProcess, console: { error: () => {} },
     fork: () => { forks++; return child; },
@@ -250,6 +258,101 @@ test('shutdown deadline stays unverified until an exit event and an explicit rec
   } finally {
     removeOwnedDirectory(owned);
   }
+});
+
+async function assertEarlyLifetimeBarrier(source, root) {
+  let resolveDrain;
+  const done = new Promise(resolveDone => { resolveDrain = resolveDone; });
+  const model = await shutdownModel(source, root, {
+    platform: 'win32', observe: async () => ({ done }),
+  });
+  let completed = false;
+  const response = model.request().then(value => { completed = true; return value; });
+  const flush = () => new Promise(resolveTurn => setImmediate(resolveTurn));
+  await flush();
+  model.child.emit('message', { type: 'upgrade-lifetime', lifetime: { protocol: 1 } });
+  await flush();
+  model.child.emit('exit', 0);
+  await flush();
+  assert.equal(completed, false, 'Early stop must wait for the late native drain proof, not only root exit');
+  assert.equal(JSON.parse(readFileSync(model.paths.hold, 'utf8')).stopped, undefined);
+  resolveDrain({ verified: true, ownerExited: true, activeProcesses: 0 });
+  assert.equal((await response).stopped, true);
+}
+
+test('early stop before lifetime readiness waits for the same launch native drain proof', async () => {
+  const owned = ownedDirectory();
+  try {
+    await assertEarlyLifetimeBarrier(readFileSync(new URL('../supervisor/supervise.mjs', import.meta.url), 'utf8'), owned.dir);
+  } finally { removeOwnedDirectory(owned); }
+});
+
+test('current Windows child exit without lifetime protocol never completes shutdown', async () => {
+  const owned = ownedDirectory();
+  try {
+    const source = readFileSync(new URL('../supervisor/supervise.mjs', import.meta.url), 'utf8');
+    const model = await shutdownModel(source, owned.dir, { platform: 'win32' });
+    const response = model.request();
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    model.child.emit('exit', 0);
+    assert.equal((await response).stopped, false);
+    assert.equal(JSON.parse(readFileSync(model.paths.hold, 'utf8')).stopped, undefined);
+  } finally { removeOwnedDirectory(owned); }
+});
+
+test('early stop cannot complete when late native drain proof fails', async () => {
+  const owned = ownedDirectory();
+  let rejectDrain;
+  const done = new Promise((_, reject) => { rejectDrain = reject; });
+  done.catch(() => {});
+  try {
+    const source = readFileSync(new URL('../supervisor/supervise.mjs', import.meta.url), 'utf8');
+    const model = await shutdownModel(source, owned.dir, {
+      platform: 'win32', observe: async () => ({ done }),
+    });
+    const response = model.request();
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    model.child.emit('message', { type: 'upgrade-lifetime', lifetime: { protocol: 1 } });
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    model.child.emit('exit', 0);
+    rejectDrain(new Error('owned native drain failed'));
+    assert.equal((await response).stopped, false);
+    assert.equal(JSON.parse(readFileSync(model.paths.hold, 'utf8')).stopped, undefined);
+  } finally { removeOwnedDirectory(owned); }
+});
+
+test('native proof arriving after the original deadline requires explicit stop reconciliation', async () => {
+  const owned = ownedDirectory();
+  let resolveDrain;
+  const done = new Promise(resolveDone => { resolveDrain = resolveDone; });
+  try {
+    const source = readFileSync(new URL('../supervisor/supervise.mjs', import.meta.url), 'utf8');
+    const model = await shutdownModel(source, owned.dir, {
+      platform: 'win32', observe: async () => ({ done }),
+    });
+    const first = model.request();
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    model.expire();
+    assert.equal((await first).stopped, false);
+    model.child.emit('message', { type: 'upgrade-lifetime', lifetime: { protocol: 1 } });
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    model.child.emit('exit', 0);
+    resolveDrain({ verified: true, ownerExited: true, activeProcesses: 0 });
+    await new Promise(resolveTurn => setImmediate(resolveTurn));
+    assert.equal(JSON.parse(readFileSync(model.paths.hold, 'utf8')).stopped, undefined);
+    assert.equal((await model.request()).stopped, true);
+  } finally { removeOwnedDirectory(owned); }
+});
+
+test('RED control: removing the pre-fork lifetime obligation fails the early-stop oracle', async () => {
+  const owned = ownedDirectory();
+  try {
+    const source = readFileSync(new URL('../supervisor/supervise.mjs', import.meta.url), 'utf8');
+    const registration = '      lifetimes.push(proof);';
+    assert.equal(source.includes(registration), true);
+    await assert.rejects(assertEarlyLifetimeBarrier(source.replace(registration, ''), owned.dir),
+      { code: 'ERR_ASSERTION', message: /Early stop must wait/ });
+  } finally { removeOwnedDirectory(owned); }
 });
 
 test('regression control: retaining the rejected stop promise fails the production-body oracle', async () => {
@@ -330,7 +433,7 @@ async function assertSetupRejected(model, command, args, error = /POSIX limit of
 }
 
 test('install/init preflight rejects long POSIX paths before every setup side effect, including wiring-only mode', async () => {
-  const source = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const source = readFileSync(new URL('../bin/cli-main.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   for (const platform of ['linux', 'darwin']) {
     for (const command of ['cmdInstall', 'cmdInit']) {
       for (const format of ['json', 'toml', 'native']) {
@@ -346,7 +449,7 @@ test('install/init preflight rejects long POSIX paths before every setup side ef
 });
 
 test('install/init preflight rejects invalid service ports before setup writes', async () => {
-  const source = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const source = readFileSync(new URL('../bin/cli-main.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   for (const command of ['cmdInstall', 'cmdInit']) {
     for (const port of ['0', '65536', 'not-a-port']) {
       const model = setupModel(source, { config: socketSizedConfig(46) });
@@ -356,7 +459,7 @@ test('install/init preflight rejects invalid service ports before setup writes',
 });
 
 test('init preflights a replacement port before import when the extra port digit exceeds the socket limit', async () => {
-  const source = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const source = readFileSync(new URL('../bin/cli-main.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   for (const platform of ['linux', 'darwin']) {
     const config = socketSizedConfig(103, 9999);
     const paths = posixPaths(servicePaths, platform, '/unused');
@@ -368,7 +471,7 @@ test('init preflights a replacement port before import when the extra port digit
 });
 
 test('supported 46/91/100/103-byte POSIX paths reach actual setup bodies and honor start/autostart flags', async () => {
-  const source = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const source = readFileSync(new URL('../bin/cli-main.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   for (const platform of ['linux', 'darwin']) {
     for (const command of ['cmdInstall', 'cmdInit']) {
       for (const format of ['json', 'toml', 'native']) {
@@ -392,7 +495,7 @@ test('supported 46/91/100/103-byte POSIX paths reach actual setup bodies and hon
 });
 
 test('regression controls: removing any install/init address preflight fails the zero-mutation oracle', async () => {
-  const source = readFileSync(new URL('../bin/cli.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+  const source = readFileSync(new URL('../bin/cli-main.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   for (const [command, guard, reselected] of [
     ['cmdInstall', '\n  servicePaths(CONFIG, port);', false],
     ['cmdInit', '\n  servicePaths(CONFIG, port);', false],

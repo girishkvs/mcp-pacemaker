@@ -177,6 +177,14 @@ class Rig {
     await new Promise((resolve) => setImmediate(resolve));
   }
 
+  async waitForCooldown() {
+    for (;;) {
+      const remaining = this.manager.cooldowns.get('server') - Date.now();
+      if (!(remaining > 0)) return;
+      await new Promise((resolve) => setTimeout(resolve, remaining));
+    }
+  }
+
   clock(t) {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
   }
@@ -220,6 +228,41 @@ class Rig {
     return line;
   }
 }
+
+test('cooldown wait leaves an absent or elapsed deadline alone', async (t) => {
+  const r = new Rig(t);
+  t.mock.method(Date, 'now', () => 1_000);
+  const timeout = t.mock.method(globalThis, 'setTimeout', () => {
+    assert.fail('An absent or elapsed cooldown must not schedule a timer');
+  });
+  await r.waitForCooldown();
+  r.manager.cooldowns.set('server', 1_000);
+  await r.waitForCooldown();
+  r.manager.cooldowns.set('server', 999);
+  await r.waitForCooldown();
+  assert.equal(timeout.mock.callCount(), 0);
+});
+
+test('cooldown wait rechecks an early timer before replacement admission', async (t) => {
+  const r = new Rig(t);
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  r.manager.cooldowns.set('server', 1_020);
+  await assert.rejects(r.acquire(), { code: 'SHARED_RETRY_LATER' });
+  const delays = [];
+  const timeout = t.mock.method(globalThis, 'setTimeout', (callback, milliseconds) => {
+    delays.push(milliseconds);
+    now += delays.length === 1 ? milliseconds - 1 : milliseconds;
+    queueMicrotask(callback);
+  });
+  await r.waitForCooldown();
+  timeout.mock.restore();
+  assert.equal(now, 1_020);
+  assert.deepEqual(delays, [20, 1]);
+  const replacement = await r.attach();
+  assert.equal(replacement.child.active, true);
+  assert.equal(r.children.length, 1);
+});
 
 class PeerProcesses {
   constructor(t) {
@@ -1444,8 +1487,7 @@ test('parsed writes after detach, child exit or recycle throw an unsent admissio
     }
     assert.equal(peer.requests('ping').length, 0);
     assert.equal(peer.requests('tools/call').length, 0);
-    const remaining = r.manager.cooldowns.get('server') - Date.now();
-    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+    await r.waitForCooldown();
     const b = await r.attach();
     b.child.writeMessage({ jsonrpc: '2.0', id: 1, method: 'ping' });
     const fresh = r.children.at(-1);
@@ -1572,8 +1614,7 @@ for (const category of ['response', 'progress']) {
       assert.equal(other.child.active, true);
       peers.send(healthy, { id: otherRequest.id, result: { healthy: true } });
       assert.deepEqual((await other.response(1)).result, { healthy: true });
-      const remaining = r.manager.cooldowns.get('server') - Date.now();
-      if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+      await r.waitForCooldown();
       const replacement = await r.attach();
       const fresh = peers.children.find((child) => child.pid === replacement.child.pid);
       assert.notEqual(replacement.child.__sharedGeneration, generation);

@@ -98,6 +98,11 @@ class KillDispatchRecorder {
   }
 
   spawn(command, args, options) {
+    const lifetime = fileURLToPath(new URL('../../bin/windows-lifetime/ProcessLifetimeHelper.exe', import.meta.url));
+    if (command === lifetime) {
+      assert.deepEqual(args, ['watch-parent', String(process.pid)]);
+      return this.originalSpawn(command, args, options);
+    }
     assert.equal(command, process.execPath);
     assert.ok(args[0] === serverFixture || args[0] === '-e',
       'only the dedicated MCP fixture or an owned Node control may start');
@@ -186,6 +191,7 @@ class KillDispatchRecorder {
     Object.assign(process.env, {
       MCP_CONFIG_WATCH: '0', MCP_IDLE_TIMEOUT_MS: '0', MCP_RECYCLE_MINUTES: '0',
       MCP_HEALTH_INTERVAL_MS: '0', MCP_RESUME: '1',
+      MCP_PACEMAKER_MANAGED_INSTANCE: this.directory,
     });
     const listening = new Promise((resolve) => {
       const listen = http.Server.prototype.listen;

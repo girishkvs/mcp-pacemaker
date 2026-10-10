@@ -13,6 +13,11 @@ import {
   isolatedEnvironment, removeOwnedDirectory, run, sha256,
 } from '../compatibility/fixtures.mjs';
 import { inspectTarball, extractTarball } from '../npm-publication/tarball.mjs';
+import { LIFETIME_FILES, requiresProcessLifetime } from '../windows-process-lifetime/inventory.mjs';
+import { LEGACY_BROKER_FILES } from '../windows-legacy/inventory.mjs';
+import { legacyBrokerRequired } from '../npm-publication/legacy-broker-gate.mjs';
+import { TASK_CHANNEL_FILES } from '../windows-task-channel/inventory.mjs';
+import { taskChannelRequired } from '../npm-publication/task-channel-gate.mjs';
 import {
   CompatibilityBridge, assertImmediate, assertPending, assertSnapshot, waitFor,
 } from '../../test/compat/bridge.mjs';
@@ -66,6 +71,9 @@ export function readArtifact(spec, version) {
   for (const path of [
     'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs', 'bin/service-control.mjs',
     'bin/pooling-writer.mjs', 'bin/windows/PoolingSecurityHelper.exe',
+    ...(requiresProcessLifetime(version) ? LIFETIME_FILES : []),
+    ...(legacyBrokerRequired(inspection.files) ? LEGACY_BROKER_FILES : []),
+    ...(taskChannelRequired(inspection.files) ? TASK_CHANNEL_FILES : []),
   ]) {
     assert.ok(inspection.files.some((file) => file.path === path &&
       file.size > 0), `Missing packed lifecycle/runtime file: ${path}`);

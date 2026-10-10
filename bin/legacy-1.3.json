@@ -1,0 +1,32 @@
+{
+  "version": "1.3.0",
+  "commit": "2d525f4ced01b978a5aeb83aef69145e96cced05",
+  "taskOwnerPolicy": {
+    "protocol": 1,
+    "allowRuntimeUser": true,
+    "allowedOwnerSids": ["S-1-5-32-544"]
+  },
+  "files": {
+    "autostart/windows/launcher.vbs": "d376911cca3fa25afeed3245c6105a790a8af817886f3194832b33dab81c5c0c",
+    "autostart/windows/register-task.ps1": "5e6f618aa7db148ea1931fdd4ea16a970597cd4ee584021acfec38e171682dcd",
+    "bin/cli.mjs": "74cb1bcf9672f16cc1c380ae15c4aedc2924cb185d9b5051625b5d7991200997",
+    "bin/config-checks.mjs": "88c8896d41e9c092016c0c61875037cb885f356aa832188cef6524d97e3b46eb",
+    "bin/logs.mjs": "d3efd905883c8c77260a83c383e898aaf4018fe2318c086832dd513d667e3a44",
+    "bin/mcp-bridge.mjs": "762c097b8c7c22a4c06a4a59029a459f4f74c65b5e94eecc4dbf40a0ca13730a",
+    "bin/pooling-config.mjs": "5aa80bf42a3cf6ea0ae93145d78dd2bf83589812e3889b80c259cbe61b070870",
+    "bin/pooling-execution.mjs": "c247a49866720e2235b2f7592159e6e7b1e92cbc4c8bad79916e3453e677bb61",
+    "bin/pooling-writer.mjs": "6b5d3a4747a121386ee3ae8ed00f897194c5ece6aa255762e42c2221115ed60e",
+    "bin/prewarm.mjs": "c38ff8bf992b7e34c331b2a203439f77f5b0fbe8b6e4809d037d80af26aeb14e",
+    "bin/server-metrics.mjs": "b6e6042688d06e3dc798e776e704e957ea1fdb852c81ac67e1fa107d79dc10ab",
+    "bin/shared-sessions.mjs": "73697d5ddd513a75d15b6b1a3d01776f1e1c8bd45acd1df8fad742c80348a306",
+    "bin/top.mjs": "9545dec6c3461ad310fbb4dcfcb096c85e9fd011cb9970b7f9a3b2d83760672c",
+    "bin/windows/PoolingSecurityHelper.build.json": "8846823dc943c4d2ed18f7e7335e2bbb30a55bc7e6af54b98c121de86554b1e9",
+    "bin/windows/PoolingSecurityHelper.exe": "effdc8deb06beab195523f714b8d1a396ec53f00b6b4a437e251a25d94234c9e",
+    "bin/windows/src/AssemblyInfo.cs": "e81e107352fbcb82818d8265dfcdf392eac8d25df37e6d65ca7f02d1e63a6c9a",
+    "bin/windows/src/PoolingSecurityHelper.cs": "aff0222cf28258f1004908b0ad6e471d00012d5ea7dd90af163d83eb743df6f0",
+    "bin/windows/src/PoolingSecurityReader.cs": "91620ba5e0b3c6fcc673319f59c96466115a6be74fd8b93808f08f07087b7038",
+    "package.json": "ecca72dce5a69f7c286abb64c020a10951c54b6b7d31fdedeeda6def2b66066c",
+    "supervisor/supervise.ps1": "aafe1a30cb35a1b9adb3450fa0b5a117c08d66f0b786fee36f01aac677a4502e",
+    "supervisor/supervise.sh": "beadb235773ca3a13beb6fc3747f78dd52a9986563c8bb6dd4d99b57579d7aa7"
+  }
+}

@@ -18,7 +18,12 @@ export function bundledNotices() {
     postcssPlugin: 'mcp-bundled-css-notices',
     Once(root) {
       root.walkAtRules('tailwind', (rule) => {
-        if (rule.params === 'base') tailwindRoots.add(root);
+        if (rule.params === 'base' ||
+            rule.params === 'utilities') tailwindRoots.add(root);
+      });
+      root.walkAtRules('import', (rule) => {
+        if (['"tailwindcss"', "'tailwindcss'"].some(name =>
+          rule.params === name || rule.params.startsWith(`${name} `))) tailwindRoots.add(root);
       });
     },
     OnceExit(root) {

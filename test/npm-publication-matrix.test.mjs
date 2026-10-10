@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { syntheticLocalApproval, syntheticPreparedLocal, syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
+import { lifetimeFixtureFiles, lifetimeFixtureNames } from './helpers/lifetime-package-fixture.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../tools/windows-process-lifetime/inventory.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,10 +78,12 @@ function zip(entries) {
 }
 
 function packageFixture(version = approval.version, nativeFiles) {
+  const tomlVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(version) ? '1.8.0' : '1.9.0';
   const pkg = {
     name: POLICY.name, version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
-    dependencies: { 'smol-toml': '^1.8.0' }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
-    files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt'],
+    dependencies: { 'smol-toml': `^${tomlVersion}` }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
+    files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt',
+      ...(requiresProcessLifetime(version) ? ['tools/windows-process-lifetime/'] : [])],
   };
   const files = {
     'package.json': JSON.stringify(pkg), 'README.md': 'readme', LICENSE: 'MIT', 'CHANGELOG.md': 'changes',
@@ -91,6 +95,7 @@ function packageFixture(version = approval.version, nativeFiles) {
     ...Object.fromEntries(['AssemblyInfo', 'PoolingNativeFiles', 'PoolingSecurityHelper', 'PoolingSecurityReader']
       .filter(name => releaseRole(version) === 'current' || name !== 'PoolingNativeFiles')
       .map(name => [`bin/windows/src/${name}.cs`, 'fixture source'])),
+    ...lifetimeFixtureFiles(version),
   };
   if (nativeFiles) {
     for (const path of Object.keys(files).filter(path => path.startsWith('bin/windows/'))) delete files[path];
@@ -138,7 +143,7 @@ class Fixture {
     Object.assign(this.env, { GITHUB_REF: approved.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${approved.ref}` });
     this.event.inputs.approval = JSON.stringify(approved);
-    const producer = version === '2.0.2' ? syntheticCleanProducerEvidence({
+    const producer = !['1.3.1', '2.0.1'].includes(version) ? syntheticCleanProducerEvidence({
       version, commit: approved.commit, rootLockSha256: 'd'.repeat(64), uiLockSha256: 'e'.repeat(64),
     }) : undefined;
     const sourceReport = Buffer.from(JSON.stringify({ schemaVersion: 1, ...(producer ? {
@@ -352,7 +357,12 @@ class Fixture {
       }
       if (args.at(-1) === '--version') return { stdout: lane.npm, stderr: '' };
       if (args.includes('ci')) return { stdout: 'injected root restore', stderr: '' };
-      if (args.includes('--test')) return { stdout: tap, stderr: '' };
+      if (args.includes('--test')) {
+        const names = [...nativeNames, ...lifetimeFixtureNames(approval.version)];
+        const stdout = `TAP version 13\n${names.map((name, index) => `ok ${index + 1} - ${name}\n`).join('')}` +
+          `1..${names.length}\n# tests ${names.length}\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n`;
+        return { stdout, stderr: '' };
+      }
       assert.ok(args.includes('consumer:check'));
       const dependencies = [{ path: `node_modules/${POLICY.name}`, name: POLICY.name,
         version: approval.version, integrity: this.prepared.artifact.integrity }];
@@ -433,6 +443,9 @@ for (const version of ['1.3.1', '2.0.1', '1.3.2', '2.0.2', '2.7.13']) {
       files: [...expected, { path: 'tools/windows-security-helper/build.ps1', sha256: hash('unit script') }],
       reproducibilityBuild: 'not-executed-in-this-run' };
     const request = { version, matrix, extractedRoot: join(f.dir, 'lane2/checkout') };
+    if (requiresProcessLifetime(version)) {
+      identity.processLifetime = verifyProcessLifetimeAssets(request.extractedRoot, version);
+    }
     assert.equal(verifyWindowsExecution(request, identity).length, 2);
     for (const report of matrix.nativeWindowsEvidence) assert.deepEqual(
       report.files.toSorted((a, b) => a.path.localeCompare(b.path)), expected);

@@ -472,7 +472,9 @@ export class LocalGate {
           tarball, extractedRoot: extracted, artifact: checks.artifact, name: pkg.name,
           version: pkg.version, commit: fixtureCommit,
         });
-        for (const nativeFile of checks.nativeIdentity.files) {
+        const nativeFiles = [...checks.nativeIdentity.files, ...(checks.nativeIdentity.legacyBroker?.files ?? []),
+          ...(checks.nativeIdentity.taskChannel?.files ?? []), ...(checks.nativeIdentity.processLifetime?.files ?? [])];
+        for (const nativeFile of nativeFiles) {
           assert.deepEqual(extractedFiles.find(file => file.path === nativeFile.path), nativeFile,
             `Packed native bytes differ: ${nativeFile.path}`);
         }
