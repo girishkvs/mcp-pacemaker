@@ -4,9 +4,9 @@ import { spawn, spawnSync, fork } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import http from 'node:http';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync, unlinkSync, constants } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, basename, parse, resolve } from 'node:path';
+import { delimiter, dirname, join, basename, parse, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyLegacyBrokerAssets, LEGACY_BROKER_FILES } from '../tools/windows-legacy/inventory.mjs';
 import { CachedEdgeFixture } from './helpers/cached-edge-fixture.mjs';
@@ -15,9 +15,22 @@ import { LegacyFailureFixture } from './helpers/legacy-failure-fixture.mjs';
 const { prepareLegacyProcesses, verifyLegacyProcessesGone } = await import(process.env.MCP_LEGACY_TEST_MODULE
   ? pathToFileURL(process.env.MCP_LEGACY_TEST_MODULE).href : '../bin/windows-legacy-process.mjs');
 
+// The contained guest receives a whitelisted environment without ProgramFiles, so resolve the
+// interpreter from PATH the way every other pwsh call in this file already does. The supervisor
+// child keeps its own reduced PATH, so it needs the fully qualified image.
+function legacyShellPath() {
+  const directories = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  if (process.env.ProgramFiles) directories.push(join(process.env.ProgramFiles, 'PowerShell', '7'));
+  const shell = directories.map(directory => join(directory, 'pwsh.exe')).find(candidate => existsSync(candidate));
+  assert.ok(shell, 'pwsh.exe was not found on PATH or under ProgramFiles.');
+  return shell;
+}
+
 class LegacyFixture {
   constructor(t, prefix = 'mcp-legacy-owned-') {
-    this.directory = mkdtempSync(join(tmpdir(), prefix));
+    // The broker canonicalizes the root, so the supervisor argv must already be canonical;
+    // TEMP is a junction under the contained gate.
+    this.directory = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
     this.records = [];
     this.sessions = [];
     this.results = [];
@@ -35,7 +48,7 @@ class LegacyFixture {
     const args = ['-NoProfile', '-NonInteractive', '-File', script, '-ProcessId', String(pid)];
     if (creationTicks) args.push('-CreationTicks', creationTicks);
     if (stop) args.push('-StopOwned');
-    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
@@ -126,7 +139,7 @@ while ($watch.Elapsed.TotalSeconds -lt 45) {
     await new Promise((resolve) => listener.close(resolve));
     const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
       '-File', paths.supervisorArgument || join(this.directory, 'supervisor/supervise.ps1'), '-Port', String(this.port), ...extra];
-    this.supervisor = spawn(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'), args, {
+    this.supervisor = spawn(legacyShellPath(), args, {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: this.directory,
       env: {
         SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, ComSpec: process.env.ComSpec,

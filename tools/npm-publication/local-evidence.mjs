@@ -26,9 +26,14 @@ export function controllerBinding(root) {
 }
 
 export function evidenceInventory(root) {
-  const versions = localReportVersions(readLocalJson(join(root, 'result.json')));
+  const report = readLocalJson(join(root, 'result.json'));
+  const versions = localReportVersions(report);
   const cases = localCases(versions);
+  // The host session lane writes its receipt beside the report, so it is inventoried and hashed
+  // with every other run member rather than travelling as unbound evidence.
+  const sessionLane = report.sessionLane ? ['session-lane.json'] : [];
   const expected = ['result.json', 'evidence-manifest.json', 'commands', 'controller', 'runtime', 'docker-config',
+    ...sessionLane,
     ...versions.map(version => `inputs-${version}`),
     ...cases.flatMap(item => [item.name, `${item.name}-storage-admission.json`])];
   const actual = readdirSync(physical(root)).filter(name => name !== 'evidence-manifest.json').sort();
@@ -36,7 +41,7 @@ export function evidenceInventory(root) {
     'Missing or unexpected local run members');
   assert.deepEqual(readdirSync(physical(join(root, 'docker-config'))), [], 'Unexpected private Docker configuration');
   const snapshot = new InputSnapshot(root, { maxBytes: 2 * 1024 ** 3, maxFiles: 100_000 });
-  for (const path of ['result.json', 'commands', 'controller', 'runtime',
+  for (const path of ['result.json', 'commands', 'controller', 'runtime', ...sessionLane,
     ...versions.map(version => `inputs-${version}/manifest.json`),
     ...cases.flatMap(item => [item.name, `${item.name}-storage-admission.json`])]) snapshot.add(path);
   for (const file of snapshot.files) {

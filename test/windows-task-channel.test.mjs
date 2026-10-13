@@ -62,7 +62,7 @@ class Fixture {
     const args = ['-NoProfile', '-NonInteractive', '-File', script, '-ProcessId', String(pid)];
     if (creationTime) args.push('-CreationTicks', String(BigInt(creationTime) + 504911232000000000n));
     if (stop) args.push('-StopOwned');
-    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
@@ -398,7 +398,7 @@ test('task channel admin policy requires all actual token and parent-thread fact
   const script = fileURLToPath(new URL('./fixtures/windows-task-channel/policy-model.ps1', import.meta.url));
   const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script,
     '-Helper', join(dirname(modulePath), 'windows-task-channel/TaskChannelGuard.exe')],
-  { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  { encoding: 'utf8', windowsHide: true, timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
   const model = JSON.parse(result.stdout);
   assert.equal(model.qualification, 'pure-policy-model-not-OS-authorization');
@@ -412,7 +412,7 @@ test('task channel session policy refuses unavailable owner state and logon-gene
   const script = fileURLToPath(new URL('./fixtures/windows-task-channel/session-model.ps1', import.meta.url));
   const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script,
     '-Helper', join(dirname(modulePath), 'windows-task-channel/TaskChannelGuard.exe')],
-  { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  { encoding: 'utf8', windowsHide: true, timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
   const model = JSON.parse(result.stdout);
   assert.equal(model.qualification, 'pure-session-policy-model-no-session-mutations');
@@ -487,7 +487,7 @@ test('task channel refuses a newly created untrusted-writer code file without re
   const script = fileURLToPath(new URL('./fixtures/windows-task-channel/untrusted-file.ps1', import.meta.url));
   const path = join(fixture.directory, 'owned-insecure-file.txt');
   const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script, '-Path', path],
-    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    { encoding: 'utf8', windowsHide: true, timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).existingAclModified, false);
   await assert.rejects(api.inspectTrustedCodeRoot(fixture.directory).catch(error => {
@@ -641,7 +641,7 @@ test('task channel ordinary eligibility refuses incomplete ambiguous or privileg
   const script = fileURLToPath(new URL('./fixtures/windows-task-channel/context-policy.ps1', import.meta.url));
   const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', script,
     '-Helper', join(dirname(modulePath), 'windows-task-channel/TaskChannelGuard.exe')],
-  { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  { encoding: 'utf8', windowsHide: true, timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
   const model = JSON.parse(result.stdout);
   for (const entry of model.results) assert.equal(entry.eligible, entry.case === 'complete', entry.case);

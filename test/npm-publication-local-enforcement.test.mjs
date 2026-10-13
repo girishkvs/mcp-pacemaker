@@ -11,7 +11,7 @@ import { treeEntries, captureSourceIdentity, validateSourceSubject } from '../to
 import { readOwnerLocalAcceptance, publicationHelperEnvironment } from '../tools/npm-publication/local-regression-hosted.mjs';
 import { verifyLocalHeader, verifyRawSteps, verifyRecordedSteps, verifyLocalEvidence, verifyAuditSteps, compareInputSelection,
   verifyCommandTimeout } from '../tools/npm-publication/verify-local.mjs';
-import { evidenceTar } from '../tools/npm-publication/local-evidence.mjs';
+import { evidenceTar, evidenceInventory } from '../tools/npm-publication/local-evidence.mjs';
 import { submitOnce, validateCi } from '../tools/npm-publication/policy.mjs';
 import { main as publicationMain } from '../tools/npm-publication/run.mjs';
 import { LocalCaseFixture } from './helpers/local-case-fixture.mjs';
@@ -20,7 +20,8 @@ import { physical } from '../tools/npm-publication/local-inputs.mjs';
 import './helpers/npm-publication-local-audit.mjs';
 import { syntheticAuditReport } from './helpers/npm-publication-local-audit.mjs';
 import { auditArguments, AUDIT_COMMAND_TIMEOUT_MS } from '../tools/npm-publication/local-audit-report.mjs';
-import { nativeRestoreArguments, LOCAL_NATIVE_PATHS } from '../tools/npm-publication/local-gate.mjs';
+import { nativeRestoreArguments, LOCAL_NATIVE_PATHS, sourceSuiteLabel, SOURCE_SUITE_TIMEOUT_MS } from '../tools/npm-publication/local-gate.mjs';
+import { SESSION_REQUIRED_TESTS } from '../tools/ci/test-contracts.mjs';
 import { CheckoutProofFixture } from './helpers/npm-publication-checkout-proof.mjs';
 import {
   PUBLISHED_LEGACY_STAGE_CONTRACT, STAGE_PROOF_FILES, sourceStageContract, validateStageProof,
@@ -351,11 +352,21 @@ test('selected input binding includes implied parents, additions and empty-direc
   assert.throws(() => compareInputSelection(root, 'source', manifest, ['nested/deep/source.mjs', 'tools']));
 });
 
+const sessionLaneFixture = (version, head = 'a'.repeat(40)) => ({
+  schemaVersion: 1, kind: 'host-session-lane', runId: fixture.statement().runId, version, head,
+  node: 'v24.21.0', files: [...SESSION_REQUIRED_TESTS],
+  startedAt: new Date(Date.now() - 1000).toISOString(), completedAt: new Date().toISOString(),
+  context: { contract: 'session-required', platform: 'win32', role: 'user-runtime',
+    verified: true, sessionVerified: true },
+  totals: { tests: 165, pass: 165, fail: 0, cancelled: 0, skipped: 0, todo: 0 }, contained: false,
+});
+
 test('outer schema rejects actual failure shapes, controls-only, old, partial and duplicate cases', () => {
   const report = { schemaVersion: 3, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
     status: 'passed', scope: 'both-release-lines-local-only', releaseReady: false, ciImageEquivalent: false,
     image: fixture.statement().image, runId: fixture.statement().runId,
     startedAt: new Date(Date.now() - 1000).toISOString(), completedAt: new Date().toISOString(),
+    sessionLane: sessionLaneFixture('2.0.1'),
     nodes: fixture.statement().runtimes, cases: localCases(['1.3.1', '2.0.1']).map(item => ({ name: item.name })) };
   // Header-only fixture, not execution evidence.
   verifyLocalHeader(report);
@@ -366,6 +377,14 @@ test('outer schema rejects actual failure shapes, controls-only, old, partial an
     value => { value.schemaVersion = 2; },
     value => { value.cases = value.cases.filter(item => !item.name.startsWith('audit-')); },
     value => { value.cases.find(item => item.name.startsWith('audit-')).name = 'audit-v2.0.2-node20.20.2'; },
+    value => { delete value.sessionLane; },
+    value => { value.sessionLane.context.sessionVerified = false; },
+    value => { value.sessionLane.context.role = 'privileged-fixture'; },
+    value => { value.sessionLane.totals.fail = 1; },
+    value => { value.sessionLane.totals.pass = 0; },
+    value => { value.sessionLane.files = value.sessionLane.files.slice(1); },
+    value => { value.sessionLane.version = '1.3.1'; },
+    value => { value.sessionLane.contained = true; },
   ]) {
     const copy = structuredClone(report);
     mutate(copy);
@@ -373,11 +392,44 @@ test('outer schema rejects actual failure shapes, controls-only, old, partial an
   }
 });
 
+test('evidence inventory binds the host session-lane receipt and still rejects stray members', t => {
+  const versions = ['1.3.1', '2.0.1'];
+  const cases = localCases(versions);
+  const build = ({ receipt, declared }) => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'local-inventory-')));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    for (const name of ['commands', 'controller', 'runtime', 'docker-config',
+      ...versions.map(version => `inputs-${version}`)]) mkdirSync(join(root, name));
+    for (const version of versions) writeFileSync(join(root, `inputs-${version}`, 'manifest.json'), '{}');
+    for (const name of ['commands', 'controller', 'runtime']) writeFileSync(join(root, name, 'member.json'), '{}');
+    for (const item of cases) {
+      mkdirSync(join(root, item.name));
+      writeFileSync(join(root, item.name, 'member.json'), '{}');
+      writeFileSync(join(root, `${item.name}-storage-admission.json`), '{}');
+    }
+    const report = { cases: cases.map(item => ({ name: item.name })) };
+    if (declared) report.sessionLane = { kind: 'host-session-lane' };
+    if (receipt) writeFileSync(join(root, 'session-lane.json'), '{"kind":"host-session-lane"}');
+    writeFileSync(join(root, 'result.json'), JSON.stringify(report));
+    return root;
+  };
+  const manifest = evidenceInventory(build({ receipt: true, declared: true }));
+  assert.ok(manifest.files.some(file => file.path === 'session-lane.json'),
+    'The session-lane receipt must be hashed with every other run member');
+  assert.throws(() => evidenceInventory(build({ receipt: true, declared: false })),
+    /Missing or unexpected local run members/);
+  assert.throws(() => evidenceInventory(build({ receipt: false, declared: true })),
+    /Missing or unexpected local run members/);
+});
+
 test('raw timeout metadata requires the dedicated source budget without extending other commands', () => {
   const source = { label: 'Complete source suite', timeoutMs: 25 * 60_000, elapsedMs: 1000 };
   const other = { label: 'Local Git', timeoutMs: 15 * 60_000, elapsedMs: 10 };
   verifyCommandTimeout(source);
   verifyCommandTimeout(other);
+  verifyCommandTimeout({ label: 'Contained source suite', timeoutMs: SOURCE_SUITE_TIMEOUT_MS, elapsedMs: 1000 });
+  assert.throws(() => verifyCommandTimeout({ label: 'Contained source suite',
+    timeoutMs: 25 * 60_000, elapsedMs: 1000 }), /timeoutMs/);
   verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: AUDIT_COMMAND_TIMEOUT_MS, elapsedMs: 1000 });
   assert.throws(() => verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: 15 * 60_000, elapsedMs: 1000 }));
   for (const timeoutMs of [undefined, null, '1500000', NaN, Infinity, -1, 0, 15 * 60_000, 26 * 60_000]) {
@@ -461,22 +513,23 @@ test('current schema-5 source replay requires ordinary session preflight and exa
   const f = await new LocalCaseFixture(t).create();
   f.gate.schemaVersion = 5;
   f.gate.checks['checkout-false'].auditExecution = 'required-privileged-companion';
-  const index = f.commands.findIndex(command => command.label === 'Complete source suite');
+  const index = f.commands.findIndex(command => command.label === sourceSuiteLabel(f.version));
   const restore = { label: 'Restore pinned native fixture toolchain', executable: 'C:\\input\\pwsh\\pwsh.exe',
     args: nativeRestoreArguments(), cwd: 'C:\\work\\checkout-false', timeoutMs: 15 * 60_000,
     elapsedMs: 1000, exitCode: 0, signal: null, error: null, encoding: 'utf8',
     stdout: JSON.stringify(LOCAL_NATIVE_PATHS), stderr: '' };
   const context = { ...restore, label: 'Verify user-runtime execution contract', executable: 'C:\\node.exe',
-    args: ['tools/ci/run-tests.mjs', 'source', '--check'],
-    stdout: JSON.stringify({ contract: 'source', platform: 'win32', role: 'user-runtime',
-      verified: true, sessionVerified: true }) };
+    args: ['tools/ci/run-tests.mjs', 'source-ordinary', '--check'],
+    stdout: JSON.stringify({ contract: 'source-ordinary', platform: 'win32', role: 'user-runtime',
+      verified: true }) };
   f.commands.splice(index, 0, context, restore);
   f.save();
   const verify = () => verifyRawSteps(f.directory, f.gate, f.root, f.version, { checkout: f.checkoutBinding });
   await verify();
   const originalContext = structuredClone(context);
   for (const mutate of [
-    value => { value.stdout = value.stdout.replace('"sessionVerified":true', '"sessionVerified":false'); },
+    value => { value.stdout = JSON.stringify({ ...JSON.parse(value.stdout), sessionVerified: true }); },
+    value => { value.stdout = value.stdout.replace('"contract":"source-ordinary"', '"contract":"source"'); },
     value => { value.stdout = value.stdout.replace('"verified":true', '"verified":false'); },
     value => { value.args = ['tools/ci/run-tests.mjs', 'service-context', '--check']; },
     value => { value.executable = 'C:\\other-node.exe'; },
@@ -544,7 +597,7 @@ for (const version of ['1.3.1', '2.0.1']) {
           stdout => stdout.replace('"cleanupVerified":true', '"cleanupVerified":false'),
         ]) {
           f.reset();
-          const command = f.commands.find(item => item.label === 'Complete source suite');
+          const command = f.commands.find(item => item.label === sourceSuiteLabel(f.version));
           command.stdout = mutate(command.stdout);
           f.save();
           await assert.rejects(verify);
@@ -561,7 +614,7 @@ for (const version of ['1.3.1', '2.0.1']) {
           if (schema === 1) delete f.gate.checks['checkout-false'].artifact.evidenceFile;
           delete f.gate.checks['checkout-false'].stageCapture;
           f.commands = f.commands.filter(item => item.label !== 'Actual pinned npm stage capture, offline fixtures');
-          f.commands.find(item => item.label === 'Complete source suite').stdout = f.tap;
+          f.commands.find(item => item.label === sourceSuiteLabel(f.version)).stdout = f.tap;
           f.save();
           assert.equal(typeof await verifyRecordedSteps(f.directory, f.gate, f.root, version), 'string');
           await assert.rejects(verify, /schema 4/);

@@ -247,15 +247,18 @@ internal sealed class CachedEdgeCases
                 {
                     using (var terminator = Api.OpenProcess(TerminateAndQuery, false, (int)pid))
                     {
-                        // The process can exit between the liveness check above and here, and its
-                        // pid can then be reused by a process this account cannot open. Treat any
-                        // of that as success only when the original handle is no longer alive.
-                        if (terminator.IsInvalid ||
-                            native.Creation(terminator) != created) native.Require(!native.Alive(handle));
-                        else if (!Api.TerminateProcess(terminator, 1)) native.Require(!native.Alive(terminator));
+                        if (!terminator.IsInvalid &&
+                            native.Creation(terminator) == created) Api.TerminateProcess(terminator, 1);
                     }
                 }
-                native.Require(Api.WaitForSingleObject(handle, 3000) == 0);
+                // WaitForSingleObject reports WAIT_TIMEOUT without setting a Win32 error, so
+                // Require() would rethrow an unrelated stale code -- which is why this surfaced
+                // for so long as a misleading "Access is denied". Report the real condition, and
+                // allow a loaded host enough time to reap a nine-generation chain.
+                uint wait = Api.WaitForSingleObject(handle, 30000);
+                if (wait != 0) throw new InvalidOperationException(
+                    "Owned cleanup did not observe exit for pid " +
+                    pid.ToString(CultureInfo.InvariantCulture) + " (wait 0x" + wait.ToString("X") + ")");
             }
             if (identities.Add(key)) cleanups.Add(new { pid, creationTime = created.ToString(CultureInfo.InvariantCulture),
                 heldHandleSignaled = !native.Alive(handle) });

@@ -21,7 +21,7 @@ class IdentityFixture {
   powershell(name, args) {
     const file = fileURLToPath(new URL(`./fixtures/windows-process-lifetime/${name}.ps1`, import.meta.url));
     const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', file, ...args],
-      { encoding: 'utf8', timeout: 15000, windowsHide: true });
+      { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     return result.stdout.trim();

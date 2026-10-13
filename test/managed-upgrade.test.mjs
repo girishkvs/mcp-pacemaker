@@ -141,12 +141,28 @@ class UpgradeFixture {
     return result;
   }
 
+  inheritedEnvironment() {
+    // The contained guest exports npm_config_* policy, including offline=true, for its own npm
+    // use. A fixture that serves its own loopback registry must not inherit that policy, or npm
+    // resolves cache-only and fails with ENOTCACHED before it ever reaches the registry.
+    if (!this.npmEnv) return process.env;
+    return Object.fromEntries(Object.entries(process.env)
+      .filter(([key]) => !key.toLowerCase().startsWith('npm_config_')));
+  }
+
   async cli(...args) {
-    const result = await promisify(execFile)(process.execPath, [join(source, 'bin', 'cli.mjs'), ...args], {
-      encoding: 'utf8', timeout: 180000, windowsHide: true,
-      env: { ...process.env, HOME: this.directory, USERPROFILE: this.directory, ...this.npmEnv },
-    });
-    return result.stdout.trim();
+    try {
+      const result = await promisify(execFile)(process.execPath, [join(source, 'bin', 'cli.mjs'), ...args], {
+        encoding: 'utf8', timeout: 180000, windowsHide: true,
+        env: { ...this.inheritedEnvironment(), HOME: this.directory, USERPROFILE: this.directory, ...this.npmEnv },
+      });
+      return result.stdout.trim();
+    } catch (error) {
+      // The CLI reports upgrade failures as JSON on stdout, which execFile omits from the thrown
+      // message. Without this a container-only exit 1 is undiagnosable from the test receipt alone.
+      error.message += `\nstdout: ${error.stdout ?? ''}\nstderr: ${error.stderr ?? ''}`;
+      throw error;
+    }
   }
 
   async executeGeneratedPrewarm(output) {

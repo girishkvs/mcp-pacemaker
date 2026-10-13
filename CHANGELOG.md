@@ -76,6 +76,12 @@ Target release: 2.1.0. This candidate has not yet been published.
   deliberate — the previous behaviour let a bridge run with authority it could not verify.
 - Update the Tailwind PostCSS adapter, class-merging dependency, generated dashboard
   assets and license attribution while retaining the existing theme configuration.
+- Split the Windows release qualification into a contained lane and a host session lane.
+  The qualification container has no interactive logon, so it now verifies the
+  `source-ordinary` contract and defers the four session-bound test files; those files run
+  on the publishing host under an ordinary, non-elevated interactive account and produce a
+  `session-lane.json` receipt that the offline verifier requires, bound to the same commit.
+  This closes a gap where those four files ran in no automated lane.
 
 ## [2.0.2] - 2026-10-06
 

@@ -202,10 +202,13 @@ three containment controls, six complete source cases and three audit companions
 no host account, image, policy or production guard is changed.
 
 Before the current source suite, the gate invokes the same
-[execution-contract preflight](execution-context.md) as CI. The verifier requires
-its exact original receipt. `ContainerUser` alone does not supply a real WTS logon;
-if the image lacks that capability the source case is blocked. Neither the audit
-companion nor a previously passing subset makes that source case complete.
+[execution-contract preflight](execution-context.md) as CI, for the `source-ordinary`
+contract. The verifier requires its exact original receipt. `ContainerUser` is an
+ordinary caller but supplies no real WTS logon, so the contained suite excludes the four
+`SESSION_REQUIRED_TESTS` files and records them in `sessionDeferredTests`. The host half
+runs exactly those files and the verifier requires their `session-lane.json` receipt,
+bound to the same commit. Neither the audit companion nor a previously passing subset
+makes that source case complete.
 
 Full qualification also takes the two already-retained, hash-pinned archives used
 by [Windows CI](../tools/windows-ci/README.md): the Roslyn compiler package and
@@ -262,8 +265,10 @@ Admission may wait up to 60 seconds for the required free space, recording its
 samples before starting a case. This does not retry any test.
 No Docker daemon settings, existing images, or unrelated containers are changed.
 
-The complete source suite has a dedicated 25-minute harness budget inside a
-30-minute guest-case budget. Ordinary inner commands retain their 15-minute
+The contained source suite has a dedicated 60-minute harness budget on the current
+release line; legacy cases keep the 25-minute budget their own line shipped, and the
+verifier checks each recorded budget against the label the case used. The host session
+lane is bounded separately at 40 minutes. Ordinary inner commands retain their 15-minute
 default, timeout controls retain 15 seconds, and the whole run remains bounded
 at two hours. The source budget covers complete native-heavy suites; it does not
 change application/helper deadlines, test concurrency, or test selection.

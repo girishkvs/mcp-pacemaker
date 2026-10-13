@@ -44,21 +44,29 @@ export function testContract(root, name, platform = process.platform) {
     return { name, role: 'user-runtime', platform, args: [], session: true, checkOnly: true };
   }
   const script = { source: 'test', compatibility: 'test:compat', browser: 'test:compat:browser' }[name];
-  assert.ok(script ?? name === 'source-ordinary', 'Unknown test contract');
+  const windowsLane = name === 'source-ordinary' ||
+    name === 'session-required';
+  assert.ok(script ?? windowsLane, 'Unknown test contract');
   const args = nodeTestArguments(pkg.scripts[script ?? 'test']);
   if (name === 'source' ||
-      name === 'source-ordinary') {
+      windowsLane) {
     // Non-recursive by design: test/compat/* belongs to the separate compatibility contract.
     const actual = readdirSync(join(root, 'test')).filter(file => file.endsWith('.test.mjs'))
       .map(file => `test/${file}`).sort();
     assert.deepEqual(args.filter(value => value.startsWith('test/')).sort(), actual,
       'Source contract does not cover the complete registered suite');
   }
-  if (name === 'source-ordinary') {
-    assert.equal(platform, 'win32', 'The ordinary-account lane exists only for Windows');
+  if (windowsLane) {
+    assert.equal(platform, 'win32', `The ${name} lane exists only for Windows`);
     const files = args.filter(value => value.startsWith('test/'));
     for (const file of SESSION_REQUIRED_TESTS) {
       assert.ok(files.includes(file), `Session lane names an unregistered file: ${file}`);
+    }
+    const bounds = args.filter(value => !value.startsWith('test/'));
+    if (name === 'session-required') {
+      // The host lane is parsed for totals rather than read, so it pins the machine-readable reporter.
+      return { name, role: 'user-runtime', platform, session: true,
+        args: [...bounds, '--test-reporter=tap', ...SESSION_REQUIRED_TESTS], timeoutMs: 30 * 60 * 1000 };
     }
     const selected = files.filter(file => !SESSION_REQUIRED_TESTS.includes(file));
     // Compared against the registered files on disk, not against this lane's own input, so a
@@ -68,7 +76,7 @@ export function testContract(root, name, platform = process.platform) {
     assert.deepEqual(selected.slice().sort(), registered,
       'The ordinary lane must run every registered file except the session-required ones');
     return { name, role: 'user-runtime', platform, session: false,
-      args: [...args.filter(value => !value.startsWith('test/')), ...selected],
+      args: [...bounds, ...selected],
       timeoutMs: 60 * 60 * 1000 };
   }
   return { name, role: 'user-runtime', platform, args, session: name === 'source' && platform === 'win32',

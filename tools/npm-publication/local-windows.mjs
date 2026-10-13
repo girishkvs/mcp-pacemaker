@@ -11,15 +11,26 @@ import { LocalGitConfig } from './local-git.mjs';
 import { captureSourceIdentity } from './local-source.mjs';
 import { LOCAL_CONTRACT, LOCAL_NATIVE_PACKAGES, localCaseUser, releaseRole, releaseVersions } from './local-regression.mjs';
 import { controllerBinding, writeEvidenceInventory } from './local-evidence.mjs';
-import { SOURCE_SUITE_TIMEOUT_MS } from './local-gate.mjs';
+import { SOURCE_SUITE_TIMEOUT_MS, testTotals } from './local-gate.mjs';
+import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
 const LIMIT = 4 * 1024 ** 3;
+// Separate from LIMIT, which also caps container memory. The growth check samples
+// machine-wide free space, so it charges writes this run does not control, and it
+// must leave room above the container's own 4 GB StorageOpt scratch.
+const DISK_LIMIT = 8 * 1024 ** 3;
 const NODE_VERSIONS = ['20.20.2', '22.23.2', '24.21.0'];
 const RESERVE = 3 * 1024 ** 3;
 const IO_BYTES_PER_SECOND = 32 * 1024 ** 2;
 const MAX_EXPORT = 128 * 1024 ** 2;
+const SESSION_LANE_TIMEOUT_MS = 40 * 60_000;
+// The ordinary launcher forwards its own fixed allowlist to the task worker. This is the parent's
+// equivalent: a real profile and temporary tree, because an interactive logon owns them.
+const SESSION_LANE_ENVIRONMENT = Object.freeze(['PATH', 'Path', 'SystemRoot', 'WINDIR', 'ComSpec',
+  'PATHEXT', 'OS', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData', 'SystemDrive', 'USERPROFILE',
+  'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'USERNAME', 'USERDOMAIN']);
 
 export function evidenceEntryFilter() {
   const names = new Set();
@@ -265,7 +276,7 @@ export class WindowsLocalGate {
       const space = statfsSync(storage, { bigint: true });
       const free = space.bavail * space.bsize;
       assert.ok(free >= BigInt(RESERVE), 'Daemon disk reserve reached');
-      assert.ok(initialFree - free < BigInt(LIMIT), 'Per-case daemon disk-growth budget reached');
+      assert.ok(initialFree - free < BigInt(DISK_LIMIT), 'Per-case daemon disk-growth budget reached');
       const remaining = deadline - performance.now();
       if (remaining <= 0) return { error: 'ETIMEDOUT', status: null };
       const value = this.docker(['wait', id], Math.min(3000, remaining), true);
@@ -346,7 +357,7 @@ export class WindowsLocalGate {
     let space = statfsSync(storage, { bigint: true });
     const admissionDeadline = Math.min(this.deadline, performance.now() + 60_000);
     const samples = [];
-    while (space.bavail * space.bsize < BigInt(LIMIT + RESERVE) &&
+    while (space.bavail * space.bsize < BigInt(DISK_LIMIT + RESERVE) &&
       performance.now() < admissionDeadline) {
       samples.push({ elapsedMs: performance.now() - this.started,
         freeBytes: Number(space.bavail * space.bsize) });
@@ -355,7 +366,7 @@ export class WindowsLocalGate {
     }
     samples.push({ elapsedMs: performance.now() - this.started, freeBytes: Number(space.bavail * space.bsize) });
     writeFileSync(join(this.output, `${name}-storage-admission.json`), JSON.stringify(samples), { flag: 'wx' });
-    assert.ok(space.bavail * space.bsize >= BigInt(LIMIT + RESERVE), 'Insufficient free daemon storage; no pull or cleanup attempted');
+    assert.ok(space.bavail * space.bsize >= BigInt(DISK_LIMIT + RESERVE), 'Insufficient free daemon storage; no pull or cleanup attempted');
     const image = JSON.parse(this.docker(['image', 'inspect', this.image]).stdout)[0];
     assert.equal(image.Id, this.image);
     assert.equal(image.Os, 'windows');
@@ -457,7 +468,7 @@ export class WindowsLocalGate {
           assert.equal(result.guest.cpu, 4);
           assert.ok(result.guest.disk.totalBytes > 0);
           result.diskGuard = { kind: 'host-free-space-observer', reserveBytes: RESERVE,
-            maxGrowthBytes: LIMIT, sampleTimeoutMs: 3000, requestedIoBytesPerSecond: IO_BYTES_PER_SECOND,
+            maxGrowthBytes: DISK_LIMIT, sampleTimeoutMs: 3000, requestedIoBytesPerSecond: IO_BYTES_PER_SECOND,
             virtualCapacityIsNotQuotaProof: true };
           assert.equal(inspected.State.OOMKilled, false);
           for (const addresses of Object.values(result.guest.network)) {
@@ -510,6 +521,45 @@ export class WindowsLocalGate {
     assert.equal(result.status, 'passed');
   }
 
+  // A Windows container has no interactive logon session, so the registered files that bind one
+  // cannot run inside a case. They run here, in the launcher's own ordinary interactive session,
+  // against the same working tree the cases qualify, and the receipt binds them to that commit.
+  sessionLane(input) {
+    const root = this.roots[0];
+    assert.equal(releaseRole(input.manifest.version), 'current', 'The session lane belongs to the current release line');
+    // The pinned runtime node has no co-located npm, so the launcher is given the same pinned CLI
+    // the contained cases use rather than resolving one beside the executable.
+    const environment = { CI: 'true', MCP_CI_NPM_CLI: join(this.npmRoot, 'bin/npm-cli.js') };
+    for (const key of SESSION_LANE_ENVIRONMENT) {
+      if (process.env[key]) environment[key] = process.env[key];
+    }
+    const startedAt = new Date().toISOString();
+    const result = spawnSync(this.publisherNode,
+      [join(root, 'tools/windows-ci/ordinary-run.mjs'), 'session-required'],
+      { cwd: root, env: environment, shell: false, windowsHide: true,
+        timeout: SESSION_LANE_TIMEOUT_MS, maxBuffer: MAX_EXPORT, encoding: 'utf8' });
+    const evidence = /^Ordinary CI evidence: (.+)$/m.exec(result.stdout ?? '')?.[1]?.trim();
+    assert.equal(result.error, undefined, `Host session lane did not run: ${result.error?.message}`);
+    assert.ok(evidence &&
+      isAbsolute(evidence),
+    `Host session lane did not record its evidence directory: ${(result.stderr ?? '').trim().slice(0, 400)}`);
+    assert.equal(result.status, 0, 'Host session lane did not pass');
+    const output = readFileSync(join(evidence, 'stdout.log'), 'utf8');
+    const context = JSON.parse(output.slice(0, output.indexOf('\n')));
+    assert.deepEqual(context, { contract: 'session-required', platform: 'win32', role: 'user-runtime',
+      verified: true, sessionVerified: true }, 'Host session lane ran without a verified user session');
+    const totals = testTotals(output);
+    assert.equal(totals.fail, 0, 'Host session lane reported failing tests');
+    assert.ok(totals.pass > 0, 'Host session lane executed no tests');
+    const receipt = { schemaVersion: 1, kind: 'host-session-lane', runId: this.owner,
+      version: input.manifest.version, head: input.manifest.head, node: `v${NODE_VERSIONS[2]}`,
+      files: [...SESSION_REQUIRED_TESTS], startedAt, completedAt: new Date().toISOString(),
+      context, totals, contained: false };
+    writeFileSync(join(this.output, 'session-lane.json'), `${JSON.stringify(receipt, null, 2)}\n`,
+      { flag: 'wx', flush: true });
+    return receipt;
+  }
+
   run({ controlsOnly = false } = {}) {
     if (!controlsOnly) assert.ok(this.nativeRoot, 'Full qualification requires --native-packages with the pinned CI archives');
     // Every docker call is clamped to the remaining whole-run budget, so that budget has to be
@@ -517,11 +567,11 @@ export class WindowsLocalGate {
     const planned = this.roots.length * this.nodes.length;
     this.deadline = performance.now() + 15 * 60_000 +
       3 * this.caseTimeout('fail') +
-      (controlsOnly ? 0 : planned * (this.caseTimeout('gate') + this.caseTimeout('audit')));
+      (controlsOnly ? 0 : SESSION_LANE_TIMEOUT_MS + planned * (this.caseTimeout('gate') + this.caseTimeout('audit')));
     const report = { schemaVersion: 3, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
       runId: this.owner, startedAt: this.startedAt, completedAt: null, controller: controllerBinding(ROOT),
       status: 'failed', scope: controlsOnly ? 'containment-controls-only' : 'both-release-lines-local-only',
-      releaseReady: false, nodes: this.nodes.map((node, index) => ({
+      releaseReady: false, sessionLane: null, nodes: this.nodes.map((node, index) => ({
         version: NODE_VERSIONS[index], sha256: digest(readFileSync(node)).sha256,
       })), image: this.image, ciImageEquivalent: false, cases: this.results };
     try {
@@ -530,6 +580,7 @@ export class WindowsLocalGate {
       this.runCase('early-descendant-exit-control', 'timeout-early-exit');
       if (!controlsOnly) {
         const inputs = this.roots.map(root => this.inputs(root));
+        report.sessionLane = this.sessionLane(inputs[0]);
         for (const input of inputs) {
           for (const [index, node] of this.nodes.entries()) {
             if (releaseRole(input.manifest.version) === 'current') {

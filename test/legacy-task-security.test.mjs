@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -172,7 +172,7 @@ for (const operation of ['repoint', 'restore']) {
 }
 
 test('planning accepts only current-user or canonical builtin Administrators owner identity', windows, () => {
-  const directory = mkdtempSync(join(tmpdir(), 'legacy-owner-policy-'));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'legacy-owner-policy-')));
   const launcher = join(directory, 'autostart', 'windows', 'launcher.vbs');
   mkdirSync(join(directory, 'autostart', 'windows'), { recursive: true });
   writeFileSync(launcher, "' owned fixture\n");

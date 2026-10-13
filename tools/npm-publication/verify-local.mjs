@@ -15,11 +15,31 @@ import { readLocalBytes, readLocalJson, controllerBinding, evidenceInventory, ev
 import { validateContainer } from './local-windows.mjs';
 import { bindStageProofCheckout, requireStageProofCheckout } from './stage-proof-contract.mjs';
 import { AUDIT_COMMAND_TIMEOUT_MS, validateOrdinarySourceContext } from './local-audit-report.mjs';
+import { SOURCE_SUITE_TIMEOUT_MS } from './local-gate.mjs';
+import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
 const sameFiles = (a, b) => assert.deepEqual([...a].sort((x, y) => x.path.localeCompare(y.path)),
   [...b].sort((x, y) => x.path.localeCompare(y.path)));
+
+export function verifySessionLane(lane, version) {
+  assert.equal(lane?.schemaVersion, 1, 'A fresh host session-lane receipt is required');
+  assert.equal(lane.kind, 'host-session-lane');
+  assert.equal(lane.contained, false, 'The session lane is explicitly not contained evidence');
+  assert.equal(lane.version, version, 'The session lane qualified a different release version');
+  assert.match(lane.head, /^[a-f0-9]{40}$/);
+  assert.deepEqual(lane.context, { contract: 'session-required', platform: 'win32',
+    role: 'user-runtime', verified: true, sessionVerified: true },
+  'The session-required files did not run in a verified ordinary interactive session');
+  assert.deepEqual(lane.files, [...SESSION_REQUIRED_TESTS],
+    'The session lane did not cover exactly the session-required files');
+  assert.equal(lane.totals.fail, 0, 'The session lane reported failing tests');
+  assert.ok(lane.totals.pass > 0, 'The session lane executed no tests');
+  assert.ok(Number.isFinite(Date.parse(lane.startedAt)) &&
+    Date.parse(lane.startedAt) <= Date.parse(lane.completedAt), 'The session lane timing is unverified');
+  return lane;
+}
 
 export function verifyLocalHeader(report) {
   assert.equal(report?.schemaVersion, 3, 'A fresh schema 3 outer local report with audit companions is required');
@@ -39,14 +59,21 @@ export function verifyLocalHeader(report) {
   assert.deepEqual(report.cases.map(item => item.name).sort(),
     localCases(localReportVersions(report)).map(item => item.name).sort());
   assert.equal(report.cases.length, 12);
+  verifySessionLane(report.sessionLane, localReportVersions(report)[1]);
   return report;
 }
+
+// A legacy case records the 25-minute budget its own line shipped with; the current line raised it.
+const COMMAND_BUDGETS_MS = Object.freeze({
+  'Contained source suite': SOURCE_SUITE_TIMEOUT_MS,
+  'Complete source suite': 25 * 60_000,
+  'Required privileged audit': AUDIT_COMMAND_TIMEOUT_MS,
+});
 
 export function verifyCommandTimeout(command) {
   assert.equal(typeof command.label, 'string');
   assert.ok(Number.isSafeInteger(command.timeoutMs), 'Missing or invalid recorded local command timeoutMs');
-  const expected = command.label === 'Complete source suite' ? 25 * 60_000
-    : command.label === 'Required privileged audit' ? AUDIT_COMMAND_TIMEOUT_MS : 15 * 60_000;
+  const expected = COMMAND_BUDGETS_MS[command.label] ?? 15 * 60_000;
   assert.equal(command.timeoutMs, expected, 'Recorded local command timeoutMs differs from the reviewed harness budget');
   assert.ok(Number.isSafeInteger(command.elapsedMs) &&
     command.elapsedMs >= 0, 'Missing or invalid original command duration');
@@ -183,6 +210,8 @@ export async function verifyLocalCase(root, result, expected, report, input, com
     } else {
       if (releaseRole(expected.version) === 'current') {
         assert.equal(gate.schemaVersion, 5, 'Current source requires ordinary execution and an audit companion');
+        assert.equal(report.sessionLane.head, gate.source.head,
+          'The session lane and the contained case qualified different sources');
         validateOrdinarySourceContext(guest.ordinaryContext, guest.identity, guest.pid);
       } else assert.equal(gate.schemaVersion, 4);
       await verifyRawSteps(join(directory, 'guest/gate'), gate, join(input.directory, 'source'), expected.version,
