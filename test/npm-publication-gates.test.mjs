@@ -293,7 +293,7 @@ test('Controlled source approval uses the explicit fixture clock and still rejec
   }
 });
 
-test('Actual source orchestration retains native exit1 and scoped OSV risk details without waiving other gates', async t => {
+test('Actual source orchestration rejects findings previously covered by the retired producer review', async t => {
   const at = Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000;
   t.mock.method(Date, 'now', () => at);
   const owned = ownedDirectory();
@@ -301,7 +301,7 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
   const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
   mkdirSync(join(owned.dir, 'ui'));
   writeFileSync(join(owned.dir, 'ui/package-lock.json'), lockBytes);
-  const rootLockBytes = readFileSync(new URL('../package-lock.json', import.meta.url));
+  const rootLockBytes = readFileSync(new URL('./fixtures/producer-root-risk-2.0.2-lock.json', import.meta.url));
   writeFileSync(join(owned.dir, 'package-lock.json'), rootLockBytes);
   const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
     Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
@@ -316,7 +316,9 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
         .map(item => ({ id: item.id, modified: '2026-10-06T00:00:08Z' })) })) }),
     { headers: { 'Content-Type': 'application/json' } }),
   });
-  assert.equal(scanned.gates['producer-advisories'].status, 'passed');
+  assert.equal(scanned.gates['producer-advisories'].status, 'failed');
+  assert.equal(scanned.gates['producer-advisories'].advisoryFree, false);
+  assert.equal(scanned.gates['producer-advisories'].riskAcceptance, undefined);
   const selected = { ...binding, version: '2.0.2',
     source: { ...source, version: '2.0.2', uiLockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'],
       rootLockSha256: scanned.gates['producer-advisories'].osv.scope[0].lockSha256 } };
@@ -343,27 +345,10 @@ test('Actual source orchestration retains native exit1 and scoped OSV risk detai
     report.scannerDetails = scanned.scannerDetails;
     return report;
   };
-  const report = runSourceChecks(runner);
-  const gate = report.gates['producer-advisories'];
-  assert.equal(gate.disposition, 'RISK-ACCEPTED');
-  assert.equal(gate.advisoryFree, false);
-  assert.equal(gate.nativeAudits[1].rawExitCode, 1);
-  assert.equal(gate.nativeAudits[1].rawCounts.high, 6);
-  assert.equal(gate.nativeAudits[0].rawCounts.moderate, 1);
-  assert.equal(gate.nativeAudits[0].rawExitCode, 1);
-  assert.equal(gate.rawFindingCount, 4);
-  assert.equal(gate.riskAcceptance.scope, 'producer-root-and-ui');
-  for (const all of [false, true]) {
-    const changed = JSON.parse(JSON.stringify(report));
-    if (all) changed.gates['producer-advisories'] = { status: 'passed', evidence: gate.evidence };
-    else delete changed.gates['producer-advisories'].nativeAudits[1].acceptance;
-    await assert.rejects(runArtifactChecks(runner, selected, changed, evidence));
-  }
-  runner.failure = 'test';
-  assert.throws(() => runSourceChecks(runner), error => error.message.includes('Controlled'));
+  assert.throws(() => runSourceChecks(runner), /Producer advisory findings remain unresolved/);
 });
 
-test('Actual GateRunner native process preserves finding exit1 and rejects exit2 with the same report', t => {
+test('Actual GateRunner preserves and rejects both finding exit1 and execution exit2', t => {
   t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
   const owned = ownedDirectory();
   t.after(() => removeOwnedDirectory(owned));
@@ -374,11 +359,8 @@ test('Actual GateRunner native process preserves finding exit1 and rejects exit2
   const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui',
     lockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'], lockBytes };
   const args = code => ['-e', `process.stdout.write(${JSON.stringify(raw)});process.exitCode=${code}`];
-  const result = GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(1),
-    owned.dir, process.env, context);
-  assert.equal(result.evidence.exitCode, 1);
-  assert.equal(result.rawStdout, raw);
-  assert.equal(result.evidence.stdoutSha256, digest(Buffer.from(raw)).sha256);
+  assert.throws(() => GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(1),
+    owned.dir, process.env, context), /remain unresolved/);
   assert.equal(JSON.parse(readFileSync(runner.logs[0])).exitCode, 1);
   assert.throws(() => GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(2),
     owned.dir, process.env, context));

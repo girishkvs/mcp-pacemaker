@@ -26,7 +26,7 @@ export function LogDrawer() {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="filter…"
-          className="ml-2 bg-panel2 border border-line rounded px-2 py-0.5 text-xs text-fg outline-none focus:border-accent w-40"
+          className="ml-2 bg-panel2 border border-line rounded px-2 py-0.5 text-xs text-fg outline-hidden focus:border-accent w-40"
         />
         <button onClick={() => setOpen((o) => !o)} className="ml-auto text-muted hover:text-fg text-xs">
           {open ? 'hide' : 'show'}

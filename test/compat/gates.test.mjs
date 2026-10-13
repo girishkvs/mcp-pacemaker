@@ -97,13 +97,45 @@ test('every compatibility test is registered and both gates are explicit CI step
     assert.ok(listed.includes(`test/compat/${file}`), `Unregistered compatibility test: ${file}`);
   }
   const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  assert.match(workflow, /os: \[ubuntu-latest, windows-latest, macos-latest\]/);
-  assert.match(workflow, /node: \[20, 22, 24\]/);
-  for (const name of ['test:compat', 'test:compat:browser']) {
-    assert.match(workflow, new RegExp(`- name: [^\\n]+\\n +run: npm run ${name}\\r?\\n`));
+  const assertGates = text => {
+    assert.match(text, /os: \[ubuntu-latest, macos-latest\]/);
+    assert.match(text, /node: \[20, 22, 24\]/);
+    // Stock Windows is a portable/build and native lane that must prove the elevated refusal,
+    // never a silent substitute for ordinary user-runtime integration.
+    assert.match(text, /\n {2}windows-ordinary:\r?\n/);
+    assert.match(text, /- name: [^\n]+\r?\n +run: node tools\/ci\/windows-runner-role\.mjs\r?\n/);
+    // The step that actually executes the Windows suite must be pinned too: deleting it would
+    // otherwise leave every check green with zero Windows tests executed.
+    assert.match(text, /ci-ordinary-user\.ps1 -Contract source-ordinary /);
+    assert.match(text, /ci-ordinary-user\.ps1 -Contract compatibility /);
+    assert.match(text, /run: npm run test:contract -- source --check\r?\n/);
+    assert.match(text, /- name: Test\r?\n +run: npm run test:contract -- source\r?\n/);
+    assert.match(text, /- name: [^\n]+\r?\n +run: npm run compat:prepare\r?\n/);
+    assert.match(text, /- name: [^\n]+\r?\n +run: npm run test:contract -- compatibility\r?\n/);
+    assert.match(text, /- name: [^\n]+\r?\n +run: npm run test:contract -- browser\r?\n/);
+    assert.doesNotMatch(text, /run: node tools\/windows-ci\/ordinary-run/);
+    // The Windows lane prepares and removes its own pair inside the ordinary account, because the
+    // fixtures record the temp root that owns them and refuse an administrator-prepared pair.
+    assert.equal((text.match(/run: npm run compat:prepare/g) ?? []).length, 2);
+    assert.match(text, /playwright install --with-deps chromium/);
+  };
+  assertGates(workflow);
+  for (const command of [
+    'run: npm run compat:prepare',
+    'run: npm run test:contract -- source --check',
+    'run: npm run test:contract -- compatibility',
+    'run: npm run test:contract -- browser',
+    'run: node tools/ci/windows-runner-role.mjs',
+    'ci-ordinary-user.ps1 -Contract source-ordinary ',
+    'ci-ordinary-user.ps1 -Contract compatibility ',
+  ]) {
+    const missing = workflow.replace(command, 'run: echo missing compatibility gate');
+    assert.notEqual(missing, workflow);
+    assert.throws(() => assertGates(missing), { code: 'ERR_ASSERTION' });
   }
-  assert.equal((workflow.match(/run: npm run compat:prepare/g) ?? []).length, 2);
-  assert.match(workflow, /playwright install --with-deps chromium/);
+  const missingSource = workflow.replace(/run: npm run test:contract -- source\r?\n/, 'run: echo missing source\n');
+  assert.notEqual(missingSource, workflow);
+  assert.throws(() => assertGates(missingSource), { code: 'ERR_ASSERTION' });
 });
 
 test('owned fixture cleanup does not follow a directory link or remove another fixture', () => {

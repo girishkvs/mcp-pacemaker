@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "binary": "LegacyProcessBroker.exe",
+  "binarySha256": "0d4579af8e4e6ec2c762d924a68586ab719589b3dd4da22e916fb17ee1b6da0b",
+  "inputs": {
+    "targetFramework": ".NETFramework,Version=v4.6.2",
+    "platform": "AnyCPU",
+    "compilerVersion": "5.9.0-1.26357.3 (35d9211b841e7613c1d2f8f5af6d628ace696c4c)",
+    "compilerSha256": "3aafb7b9c54fa31a7092af35148971ee616965e7f9a0b80fb7fdc4bdd1d1a555",
+    "compilerArguments": [
+      "/nologo",
+      "/noconfig",
+      "/nostdlib+",
+      "/target:exe",
+      "/platform:anycpu",
+      "/langversion:7.3",
+      "/optimize+",
+      "/debug-",
+      "/deterministic+",
+      "/checked-",
+      "/unsafe-",
+      "/warn:4",
+      "/warnaserror+",
+      "/utf8output"
+    ],
+    "pathMap": "/_/mcp-pacemaker/windows-legacy",
+    "sourceEncoding": "UTF-8 without BOM, LF line endings",
+    "sourceSha256": {
+      "AssemblyInfo.cs": "09f672607b66aff39c457899d270688972e440aafaa43b2cb56c1a2367576356",
+      "LegacyNative.cs": "274b9494d249cc4eb3710181047e094f17bf23b0d9301d777be0d517aebb6710",
+      "LegacyProcessBroker.cs": "9d086ab312398aee9462ba85b85e590b551a33e91bd22ecdf21168194ec1a9c4"
+    },
+    "buildScriptSha256": "2ffa31155f6aa8f6b4239facb0f062df167a01ac7a7ce6d9ae0be60e60fd0201",
+    "referenceSha256": {
+      "mscorlib.dll": "7118fe658567606fa0538f7b5a2071e4606756c07e9062e1e5b24fa49e97d1f6",
+      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125",
+      "System.Core.dll": "774e965a6c25891a96d6d3b838ae10226ed9963a73b09e4be7c2ec275ffb5886",
+      "System.Management.dll": "bc35cddea6226db4d428a9fb70fcefe321a2af003c947edb812f3e911f8e4094",
+      "System.Web.Extensions.dll": "7a32bf3263aebed93c3a0847294aebdde15f7427541ed223a4cc4eb93c36d556"
+    }
+  }
+}

@@ -31,16 +31,11 @@
       "LICENSE": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
     }
   },
-  "tailwindcss@3.4.19": {
+  "tailwindcss@4.3.3": {
     "license": "MIT",
     "files": {
-      "LICENSE": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
-      "lib/css/LICENSE": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
-      "lib/value-parser/LICENSE": "3687447039151857a6ba378db062172c7f33d4aa70a615c87a43a9c50e990485",
-      "src/css/LICENSE": "c15f7afc9058d8a9995c2922a4c5812ac16a17647b2eb84014bb2fccada131c9",
-      "src/value-parser/LICENSE": "3687447039151857a6ba378db062172c7f33d4aa70a615c87a43a9c50e990485"
-    },
-    "include": ["LICENSE", "lib/css/LICENSE"]
+      "LICENSE": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985"
+    }
   },
   "vite@7.3.6": {
     "license": "MIT",

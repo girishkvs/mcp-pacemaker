@@ -12,8 +12,9 @@ import net from 'node:net';
 import {
   LocalGate, localEnvironment, main, retainedDependencies, testArguments, testTotals,
   SOURCE_SUITE_TIMEOUT_MS, uiTestArguments, validateContainment,
+  nativeRestoreArguments, LOCAL_NATIVE_PATHS,
 } from '../../tools/npm-publication/local-gate.mjs';
-import { AUDIT_MODE, AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
+import { AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
 import { validateSdkContract } from '../../tools/npm-publication/local-sdk-check.mjs';
 import { CURRENT_REF } from '../../tools/compatibility/fixtures.mjs';
 import { POLICY, channelFor, digest } from '../../tools/npm-publication/policy.mjs';
@@ -401,22 +402,46 @@ for (const version of ['1.3.1', '2.0.1']) {
   test(`source suite child receives CI mode without hosted authority for ${version}`, t => {
     const gate = fixture(t);
     gate.env.CI = 'inherited-marker';
+    const command = gate.command.bind(gate);
+    let restores = 0;
+    gate.command = (label, executable, args, cwd, binary, timeout, environment) => {
+      if (label === 'Verify user-runtime execution contract') {
+        assert.equal(executable, process.execPath);
+        assert.deepEqual(args, ['tools/ci/run-tests.mjs', 'source', '--check']);
+        return JSON.stringify({ contract: 'source', platform: 'win32', role: 'user-runtime',
+          verified: true, sessionVerified: true });
+      }
+      if (label === 'Restore pinned native fixture toolchain') {
+        restores++;
+        assert.equal(executable, 'C:\\input\\pwsh\\pwsh.exe');
+        assert.deepEqual(args, nativeRestoreArguments());
+        assert.equal(environment.OS, 'Windows_NT');
+        assert.equal(timeout, 15 * 60_000);
+        return JSON.stringify(LOCAL_NATIVE_PATHS);
+      }
+      return command(label, executable, args, cwd, binary, timeout, environment);
+    };
     const script = `process.stdout.write(JSON.stringify({
       ci: process.env.CI,
       audit: process.env[${JSON.stringify(AUDIT_MODE_VARIABLE)}],
       github: process.env.GITHUB_ACTIONS,
       token: process.env.GITHUB_TOKEN,
       npmToken: process.env.NPM_TOKEN,
+      compiler: process.env.MCP_NATIVE_COMPILER,
+      references: process.env.MCP_NATIVE_REFERENCES,
       temporary: require('node:os').tmpdir(),
       physicalTemporary: require('node:fs').realpathSync.native(require('node:os').tmpdir())
     }));`;
     const output = gate.sourceSuite(gate.root, version, ['-e', script]);
     assert.deepEqual(JSON.parse(output), {
-      ci: 'true', ...(version === '2.0.1' ? { audit: AUDIT_MODE } : {}),
+      ci: 'true',
+      ...(version === '2.0.1' ? { compiler: LOCAL_NATIVE_PATHS.CompilerPath,
+        references: LOCAL_NATIVE_PATHS.ReferenceAssemblyPath } : {}),
       temporary: join(gate.work, 'source-test-temp-alias'),
       physicalTemporary: realpathSync.native(join(gate.work, 'source-test-temp')),
     });
     assert.equal(gate.env.CI, 'inherited-marker');
+    assert.equal(restores, version === '2.0.1' ? 1 : 0);
     assert.equal(gate.env[AUDIT_MODE_VARIABLE], undefined);
     assert.equal(gate.env.TEMP, gate.env.HOME);
     const receipt = JSON.parse(readFileSync(join(gate.output, gate.steps[0].file)));
@@ -426,6 +451,8 @@ for (const version of ['1.3.1', '2.0.1']) {
     assert.equal(receipt.cwd, gate.root);
     assert.equal(receipt.timeoutMs, SOURCE_SUITE_TIMEOUT_MS);
     assert.equal(receipt.exitCode, 0);
+    gate.env[AUDIT_MODE_VARIABLE] = 'restricted-token';
+    assert.throws(() => gate.sourceSuite(gate.root, version, ['-e', script]), /Privileged audit mode/);
   });
 }
 

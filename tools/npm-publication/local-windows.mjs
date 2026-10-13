@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statfsSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { POLICY, digest } from './policy.mjs';
 import { InputSnapshot, outside, physical, safeName, sha256, writeManifest } from './local-inputs.mjs';
 import { LocalGitConfig } from './local-git.mjs';
 import { captureSourceIdentity } from './local-source.mjs';
-import { LOCAL_CONTRACT, releaseVersions } from './local-regression.mjs';
+import { LOCAL_CONTRACT, LOCAL_NATIVE_PACKAGES, localCaseUser, releaseRole, releaseVersions } from './local-regression.mjs';
 import { controllerBinding, writeEvidenceInventory } from './local-evidence.mjs';
+import { SOURCE_SUITE_TIMEOUT_MS } from './local-gate.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
@@ -42,10 +43,11 @@ export function evidenceEntryFilter() {
   };
 }
 
-export function validateContainer(value, { id, owner, image }) {
+export function validateContainer(value, { id, owner, image, user = '' }) {
   assert.equal(value.Id, id);
   assert.equal(value.Config.Labels['pacemaker.local-gate'], owner);
   assert.equal(value.Image, image);
+  assert.equal(value.Config.User ?? '', user, 'Container execution account differs from its case');
   assert.equal(value.HostConfig.Isolation, 'hyperv');
   assert.equal(value.HostConfig.NetworkMode, 'none');
   assert.equal(value.HostConfig.CpuCount, 4);
@@ -67,7 +69,7 @@ export function validateContainer(value, { id, owner, image }) {
 }
 
 export class WindowsLocalGate {
-  constructor({ output, npmCli, peerRoot, nodeRoot, pwshRoot, image = IMAGE }) {
+  constructor({ output, npmCli, peerRoot, nodeRoot, pwshRoot, nativePackages, image = IMAGE }) {
     assert.equal(process.platform, 'win32', 'The local Hyper-V launcher requires Windows');
     for (const path of [output, npmCli, peerRoot, nodeRoot, pwshRoot]) assert.ok(isAbsolute(path), 'Absolute paths required');
     for (const root of [ROOT, peerRoot]) {
@@ -86,6 +88,11 @@ export class WindowsLocalGate {
     this.npmRoot = resolve(dirname(npmCli), '..');
     this.nodeRoot = physical(nodeRoot);
     this.pwshRoot = physical(pwshRoot);
+    if (nativePackages !== undefined) {
+      assert.ok(isAbsolute(nativePackages), 'Absolute native-package directory required');
+      this.nativeRoot = physical(nativePackages);
+      this.nativeSnapshot = this.nativeInputs(this.nativeRoot);
+    }
     this.nodes = NODE_VERSIONS.map(version => physical(join(nodeRoot, `node-v${version}-win-x64/node.exe`)));
     this.publisherNode = this.nodes[2];
     this.roots = [ROOT, peerRoot];
@@ -96,7 +103,7 @@ export class WindowsLocalGate {
     this.startedAt = new Date().toISOString();
     this.deadline = this.started + 2 * 60 * 60_000;
     this.cleaning = false;
-    this.snapshots = [];
+    this.snapshots = this.nativeSnapshot ? [this.nativeSnapshot] : [];
     this.sourceBindings = [];
     this.commandIndex = 0;
     mkdirSync(output);
@@ -129,6 +136,19 @@ export class WindowsLocalGate {
     this.nodes = NODE_VERSIONS.map(version => join(frozenRuntime, `node-v${version}-win-x64/node.exe`));
     this.publisherNode = this.nodes[2];
     this.freezeController(ROOT);
+  }
+
+  nativeInputs(root) {
+    assert.deepEqual(readdirSync(root).sort(), Object.keys(LOCAL_NATIVE_PACKAGES).sort(),
+      'Native input directory must contain exactly the two pinned archives');
+    const snapshot = new InputSnapshot(root, { maxBytes: 128 * 1024 ** 2, maxFiles: 2 });
+    snapshot.addAll();
+    assert.deepEqual(snapshot.directories, [], 'Native archives must be regular files');
+    assert.equal(snapshot.files.length, 2);
+    for (const file of snapshot.files) {
+      assert.equal(file.sha256, LOCAL_NATIVE_PACKAGES[file.path], 'Native archive hash differs');
+    }
+    return snapshot;
   }
 
   freezeController(root) {
@@ -221,6 +241,7 @@ export class WindowsLocalGate {
       ['npm', this.npmRoot, null],
       ['git', this.gitRoot, ['cmd', 'mingw64/bin', 'mingw64/libexec/git-core', 'usr/bin', 'usr/share']],
       ['pwsh', this.pwshRoot, null],
+      ...(this.nativeRoot ? [['native', this.nativeRoot, null]] : []),
     ]) {
       const tool = new InputSnapshot(toolRoot);
       if (entries === null) tool.addAll();
@@ -308,7 +329,10 @@ export class WindowsLocalGate {
   }
 
   caseTimeout(mode) {
-    if (mode === 'gate') return 30 * 60_000;
+    // A gate case runs the complete source suite once, so it must outlast that suite plus its
+    // checkout, native restore, UI, pack and capture work.
+    if (mode === 'gate') return SOURCE_SUITE_TIMEOUT_MS + 30 * 60_000;
+    if (mode === 'audit') return 5 * 60_000;
     if (mode === 'fail') return 20 * 60_000;
     assert.ok(mode === 'timeout' ||
       mode === 'timeout-early-exit', 'Unsupported local case mode');
@@ -316,6 +340,8 @@ export class WindowsLocalGate {
   }
 
   runCase(name, mode, input, node = this.publisherNode) {
+    const sourceMode = mode === 'gate' || mode === 'audit';
+    const user = localCaseUser(mode, input?.manifest.version);
     const storage = JSON.parse(this.docker(['info', '--format', '{{json .DockerRootDir}}']).stdout);
     let space = statfsSync(storage, { bigint: true });
     const admissionDeadline = Math.min(this.deadline, performance.now() + 60_000);
@@ -348,17 +374,18 @@ export class WindowsLocalGate {
         '--storage-opt', 'size=4GB',
         '--io-maxbandwidth', String(IO_BYTES_PER_SECOND),
         '--restart', 'no', '--log-opt', 'max-size=4m', '--log-opt', 'max-file=1',
+        ...(user ? ['--user', user] : []),
         '--entrypoint', 'C:\\node.exe', this.image, 'C:\\entry.mjs', mode, this.owner, input?.sha256 ?? '-',
-        sha256(readFileSync(node)), mode === 'gate' ? sha256(readFileSync(this.publisherNode)) : '-',
+        sha256(readFileSync(node)), sourceMode ? sha256(readFileSync(this.publisherNode)) : '-',
       ]);
       id = created.stdout.trim();
       assert.match(id, /^[a-f0-9]{64}$/);
-      validateContainer(this.inspect(id), { id, owner: this.owner, image: this.image });
+      validateContainer(this.inspect(id), { id, owner: this.owner, image: this.image, user });
       this.docker(['cp', node, `${id}:C:\\node.exe`]);
       this.docker(['cp', join(this.controller, 'tools/npm-publication/local-windows-entry.mjs'), `${id}:C:\\entry.mjs`]);
       this.docker(['cp', join(this.controller, 'tools/npm-publication/local-inputs.mjs'), `${id}:C:\\local-inputs.mjs`]);
       this.docker(['cp', join(this.controller, 'tools/npm-publication/local-environment.mjs'), `${id}:C:\\local-environment.mjs`]);
-      if (mode === 'gate') {
+      if (sourceMode) {
         this.docker(['cp', input.path, `${id}:C:\\input`], 300_000);
         this.docker(['cp', this.publisherNode, `${id}:C:\\publisher-node.exe`]);
       }
@@ -423,7 +450,7 @@ export class WindowsLocalGate {
           assert.equal(result.guest.manifestSha256, input?.sha256 ?? '-');
           assert.equal(result.guest.node, this.command(node, ['--version']).stdout.trim());
           assert.equal(result.guest.nodeSha256, sha256(readFileSync(node)));
-          assert.equal(result.guest.publisherSha256, mode === 'gate' ? sha256(readFileSync(this.publisherNode)) : '-');
+          assert.equal(result.guest.publisherSha256, sourceMode ? sha256(readFileSync(this.publisherNode)) : '-');
           assert.deepEqual(result.guest.directories, Object.fromEntries(
             ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'TMPDIR']
               .map(key => [key, 'C:\\bootstrap'])));
@@ -436,7 +463,7 @@ export class WindowsLocalGate {
           for (const addresses of Object.values(result.guest.network)) {
             assert.ok(addresses.every(address => address.internal), 'Non-loopback guest adapter');
           }
-          if (mode === 'gate') {
+          if (sourceMode) {
             const entryFailure = join(output, 'guest/entry-failure.json');
             if (existsSync(entryFailure)) {
               const failure = JSON.parse(readFileSync(entryFailure));
@@ -446,6 +473,7 @@ export class WindowsLocalGate {
             const gate = JSON.parse(readFileSync(join(output, 'guest/gate/result.json')));
             assert.equal(inspected.State.ExitCode, 0, `Original gate failed: ${gate.error ?? 'see guest logs'}`);
             assert.equal(gate.status, 'passed');
+            assert.equal(gate.kind, mode === 'audit' ? 'local-privileged-audit' : 'local-publication-regression');
             assert.equal(gate.releaseReady, false);
           } else if (mode === 'fail') {
             assert.equal(inspected.State.ExitCode, 1);
@@ -483,7 +511,14 @@ export class WindowsLocalGate {
   }
 
   run({ controlsOnly = false } = {}) {
-    const report = { schemaVersion: 2, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
+    if (!controlsOnly) assert.ok(this.nativeRoot, 'Full qualification requires --native-packages with the pinned CI archives');
+    // Every docker call is clamped to the remaining whole-run budget, so that budget has to be
+    // derived from the cases actually planned. A fixed ceiling silently starves the later cases.
+    const planned = this.roots.length * this.nodes.length;
+    this.deadline = performance.now() + 15 * 60_000 +
+      3 * this.caseTimeout('fail') +
+      (controlsOnly ? 0 : planned * (this.caseTimeout('gate') + this.caseTimeout('audit')));
+    const report = { schemaVersion: 3, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
       runId: this.owner, startedAt: this.startedAt, completedAt: null, controller: controllerBinding(ROOT),
       status: 'failed', scope: controlsOnly ? 'containment-controls-only' : 'both-release-lines-local-only',
       releaseReady: false, nodes: this.nodes.map((node, index) => ({
@@ -497,6 +532,9 @@ export class WindowsLocalGate {
         const inputs = this.roots.map(root => this.inputs(root));
         for (const input of inputs) {
           for (const [index, node] of this.nodes.entries()) {
+            if (releaseRole(input.manifest.version) === 'current') {
+              this.runCase(`audit-v${input.manifest.version}-node${NODE_VERSIONS[index]}`, 'audit', input, node);
+            }
             this.runCase(`v${input.manifest.version}-node${NODE_VERSIONS[index]}`, 'gate', input, node);
           }
         }
@@ -522,11 +560,13 @@ if (process.argv[1] &&
     const args = process.argv.slice(2);
     const controlsOnly = args.at(-1) === '--controls-only';
     if (controlsOnly) args.pop();
-    assert.equal(args.length, 10, 'Usage: local-windows.mjs --npm-cli PATH --peer-root PATH --output NEW_DIRECTORY --node-root PATH --pwsh-root PATH [--controls-only]');
+    assert.ok([10, 12].includes(args.length), 'Usage: local-windows.mjs --npm-cli PATH --peer-root PATH --output NEW_DIRECTORY --node-root PATH --pwsh-root PATH [--native-packages PATH] [--controls-only]');
     assert.deepEqual([args[0], args[2], args[4], args[6], args[8]],
       ['--npm-cli', '--peer-root', '--output', '--node-root', '--pwsh-root']);
+    if (args.length === 12) assert.equal(args[10], '--native-packages');
     const report = new WindowsLocalGate({
       npmCli: args[1], peerRoot: args[3], output: args[5], nodeRoot: args[7], pwshRoot: args[9],
+      nativePackages: args[11],
     }).run({ controlsOnly });
     console.log(JSON.stringify({ status: report.status, releaseReady: false }));
   } catch (error) {

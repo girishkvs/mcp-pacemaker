@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "binary": "ProcessLifetimeHelper.exe",
+  "binarySha256": "bd7bc6da95e425ce31a0a32947692cf1ef054ecfbf26f5cb2830b495351ea776",
+  "inputs": {
+    "targetFramework": ".NETFramework,Version=v4.6.2",
+    "platform": "AnyCPU",
+    "compilerVersion": "5.9.0-1.26357.3 (35d9211b841e7613c1d2f8f5af6d628ace696c4c)",
+    "compilerSha256": "3aafb7b9c54fa31a7092af35148971ee616965e7f9a0b80fb7fdc4bdd1d1a555",
+    "compilerArguments": [
+      "/nologo",
+      "/noconfig",
+      "/nostdlib+",
+      "/target:exe",
+      "/platform:anycpu",
+      "/langversion:7.3",
+      "/optimize+",
+      "/debug-",
+      "/deterministic+",
+      "/checked-",
+      "/unsafe-",
+      "/warn:4",
+      "/warnaserror+",
+      "/utf8output"
+    ],
+    "pathMap": "/_/mcp-pacemaker/windows-process-lifetime",
+    "sourceEncoding": "UTF-8 without BOM, LF line endings",
+    "sourceSha256": {
+      "AssemblyInfo.cs": "147a81ea19a2765b6e8c273fbcc609ac6dac5bdd343d433ae320fe790893d3cc",
+      "ProcessLifetimeHelper.cs": "938b63e02d6c034e58312edf46224a4f3bc08c0c3f572158e69b56dcfc0341af"
+    },
+    "buildScriptSha256": "b99bc2c251823bccff96cf729bf892b3309423c9a585ac8fca6b4e4ef643d2ac",
+    "referenceSha256": {
+      "mscorlib.dll": "7118fe658567606fa0538f7b5a2071e4606756c07e9062e1e5b24fa49e97d1f6",
+      "System.dll": "b76822f9c08aff597120e3167b3e0fbda836d6bc6f14bc4bc2eeffab5b2c6125"
+    }
+  }
+}

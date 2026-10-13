@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
+import { requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const LOCAL_CONTRACT = 'mcp-pacemaker-private-local-regression-v1';
 export const LOCAL_NODES = Object.freeze(['20.20.2', '22.23.2', '24.21.0']);
+export const LOCAL_NATIVE_PACKAGES = Object.freeze({
+  'microsoft.net.compilers.toolset.5.9.0.nupkg': 'b0227910320c5af14d80ec32b5e1a759c1e3cc2ec12e7d9cc8862cf826bd9551',
+  'net462-4.6.1590.5.cab': '4d4e304503ea6b2067bc916aded7bd1244e8608c57056afcd6f8e79c99448915',
+});
 export const LOCAL_CONTROLS = Object.freeze([
   ['failure-control', 'fail'], ['timeout-control', 'timeout'],
   ['early-descendant-exit-control', 'timeout-early-exit'],
@@ -43,10 +47,17 @@ export function releaseVersions(versions) {
 export function localCases(versions) {
   return [
     ...LOCAL_CONTROLS.map(([name, mode]) => ({ name, mode })),
-    ...releaseVersions(versions).flatMap(version => LOCAL_NODES.map(node => ({
-      name: `v${version}-node${node}`, mode: 'gate', version, node,
-    }))),
+    ...releaseVersions(versions).flatMap(version => LOCAL_NODES.flatMap(node => [
+      ...(releaseRole(version) === 'current'
+        ? [{ name: `audit-v${version}-node${node}`, mode: 'audit', version, node }] : []),
+      { name: `v${version}-node${node}`, mode: 'gate', version, node },
+    ])),
   ];
+}
+
+export function localCaseUser(mode, version) {
+  if (mode === 'audit') assert.equal(releaseRole(version), 'current', 'Only the current line has an audit companion');
+  return mode === 'gate' && releaseRole(version) === 'current' ? 'ContainerUser' : '';
 }
 
 export function localReportVersions(report) {
@@ -68,6 +79,10 @@ export const LOCAL_CONTROLLER = Object.freeze([
   'local-audit-report.mjs', 'provenance.mjs',
 ].map(name => `tools/npm-publication/${name}`).concat([
   'test/helpers/local-regression-fixture.mjs', 'tools/npm-publication/source-gates.mjs',
+  'tools/windows-ci/restore-toolchain.ps1',
+  'tools/ci/test-contracts.mjs', 'tools/ci/execution-context.mjs', 'tools/ci/run-tests.mjs',
+  'tools/ci/test-process.mjs',
+  'bin/runtime-context.mjs',
   'tools/npm-publication/artifact-gates.mjs',
   'tools/npm-publication/gates.mjs', 'tools/publication-scanners/advisories.mjs',
   'tools/publication-scanners/core.mjs', 'tools/publication-scanners/publication.mjs',
@@ -174,7 +189,7 @@ export function validatePreparedLocal(prepared, approval, source = approval, sou
   assert.ok(Number.isFinite(at) &&
     at <= Date.now());
   validateLocalReview(prepared.localRegressionReview, prepared.localRegression, at);
-  if (source.version === '2.0.2' ||
+  if (requiresProducerAdvisoryEvidence(source.version) ||
       prepared.producerAdvisories !== undefined) {
     const producer = prepared.producerAdvisories;
     assert.ok(producer, 'Prepared producer advisory evidence required');

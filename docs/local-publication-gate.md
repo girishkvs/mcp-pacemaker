@@ -47,7 +47,8 @@ with these explicit local paths:
   --npm-root C:\retained\npm\node_modules\npm `
   --git-root 'C:\Program Files\Git' `
   --pwsh-root 'C:\Program Files\PowerShell\7' `
-  --node-root C:\retained\nodes
+  --node-root C:\retained\nodes `
+  --native-packages C:\retained\native-packages
 ```
 
 The verifier does not run tests, npm, Docker, a signing SDK or a network request.
@@ -56,7 +57,8 @@ re-enumerates the frozen and live inputs. Missing, partial, controls-only,
 changed or old-schema evidence fails. It prints a compact `localRegression`
 statement only after those checks; **it never generates owner acceptance**.
 
-Fresh inner reports use schema 4 and retain a private `fixture.tgz` alongside
+Fresh current-line inner reports use schema 5; the immutable legacy producer
+retains schema 4. Both retain a private `fixture.tgz` alongside
 the command receipts. The verifier recomputes its SHA256, SHA512 and SRI,
 independently inspects the compressed tarball and requires its complete file
 inventory to match both npm's raw output and the frozen published source bytes.
@@ -76,12 +78,12 @@ empty or partial receipt does not qualify.
 
 The component-only `verifyRecordedSteps` API can inspect older private diagnostic
 evidence, but it does not accept a case or produce a publication statement.
-`verifyRawSteps` requires schema 4, retained compressed bytes, a verified Git
+`verifyRawSteps` requires schema 4/5, retained compressed bytes, a verified Git
 checkout binding and the offline stage proof. Older evidence is not upgraded
 or relabelled as qualification for changed source.
 
 The stage proof records the exact bytes executed in `checkout-false`, not the
-raw Windows input snapshot. Inner schema 4 records `core.eol=crlf` explicitly
+raw Windows input snapshot. Inner schemas 4 and 5 record `core.eol=crlf` explicitly
 for each Git checkout, alongside its `core.autocrlf` setting. Committed `eol=lf`
 attributes still force LF for MJS/JSON; `text=auto` CJS follows the explicit
 Windows checkout policy. Declared binary files remain byte-exact.
@@ -99,7 +101,8 @@ The in-memory checkout binding is created by those verified Git reads, not
 accepted from report JSON. Standalone proof generation/validation still hashes
 the exact raw execution root. All changed verifier/producer modules were already
 in `LOCAL_CONTROLLER`; their changed bytes invalidate an old controller binding.
-Outer reports remain schema 2 and nested stage proofs remain schema 4. Component
+Fresh outer reports use schema 3; nested stage proofs remain schema 4. The public
+compact statement schema, contract and six-source-case coverage are unchanged. Component
 replay can inspect older inner schemas 1/2/3 (including the historical Windows
 native-EOL policy only when no local `core.eol` override was recorded), but cannot
 produce a fresh qualifying result. New source still needs a new full run.
@@ -176,7 +179,8 @@ node tools\npm-publication\local-windows.mjs `
   --peer-root Q:\checkouts\other-release-line `
   --output Q:\evidence\new-run-directory `
   --node-root C:\retained\nodes `
-  --pwsh-root 'C:\Program Files\PowerShell\7'
+  --pwsh-root 'C:\Program Files\PowerShell\7' `
+  --native-packages C:\retained\native-packages
 ```
 
 `publication:local-gate` invokes this same contained launcher. Never invoke the
@@ -190,6 +194,29 @@ source suites on Node 20, 22, and 24. It does not change test concurrency, short
 the selected suite, increase application deadlines, or retry failures. UI and
 publisher operations use the separately pinned Node 24.21.0 runtime.
 
+Current-line source cases use the image's existing `ContainerUser`, with a fresh
+production ordinary-caller check before execution. Each also requires a separate
+privileged audit companion from the same frozen input manifest and Node executable.
+Legacy cases retain their original image account and producer code. There are
+three containment controls, six complete source cases and three audit companions;
+no host account, image, policy or production guard is changed.
+
+Before the current source suite, the gate invokes the same
+[execution-contract preflight](execution-context.md) as CI. The verifier requires
+its exact original receipt. `ContainerUser` alone does not supply a real WTS logon;
+if the image lacks that capability the source case is blocked. Neither the audit
+companion nor a previously passing subset makes that source case complete.
+
+Full qualification also takes the two already-retained, hash-pinned archives used
+by [Windows CI](../tools/windows-ci/README.md): the Roslyn compiler package and
+matching .NET 4.6.2 reference cabinet. They are frozen with both inputs and checked
+again by the offline verifier. Before each current-line source suite, the existing
+CI restorer extracts them into owned guest work storage with an explicit offline
+`-PackageDirectory`. Its exact returned paths are recorded and passed to the nine
+native fixture builders. No download, machine installation, compiler fallback or
+legacy-producer change is made. Containment-only controls do not require these
+archives.
+
 The source-suite child receives `CI=true` and an owned temporary-directory alias
 inside the guest work directory. This covers CI-dependent behavior and temporary
 path aliases locally. Fixtures must resolve directories they create; external
@@ -197,6 +224,9 @@ linked inputs remain rejected. Tests for local-only operations must scope and
 restore their own local environment and separately verify CI rejection. These
 conditions do not supply GitHub identity, credentials, or authenticated hosted
 evidence, and do not change the environment of the other gate commands.
+
+PowerShell's module-analysis cache is explicitly placed under each owned command
+home, so profile-less module loading cannot add cache files to the source checkout.
 
 ## Isolation and evidence
 
@@ -252,13 +282,20 @@ Evidence export is a bounded 128 MiB TAR stream, not an unbounded directory copy
 Only regular files/directories with safe, unique paths are extracted; the output
 volume must retain its reserve. Disposable checkouts, dependencies and temporary
 files are kept outside the exported receipt directory.
-The current-line source suite requires a non-skipped audit oracle in each guest.
-The gate selects a restricted worker token with the same user, medium integrity,
+Each current-line audit companion requires the existing audit test to pass without
+a skip. Its privileged verifier selects a restricted worker token with the same user, medium integrity,
 administrator membership disabled and no security privilege. Its suspended child
 enters an owned kill-on-close job before running the original 19-case worker.
 The elevated oracle verifies the actual audit, label, owner, group and DACL state
 afterward. Missing privileges, worker failures or an unavailable report fail the
 required case. No Explorer process or interactive desktop is needed.
+
+The ordinary source suite retains its actual capability-skip result for this
+privileged test; it is not relabeled as a pass. The separate audit is mandatory on
+every current-line Node version. The offline verifier requires the original audit
+command, exact test selection, successful exit, unchanged source, matching input
+manifest/runtime and all 19 audit cases. Missing, swapped, skipped, failed or
+changed companion evidence rejects the entire qualification.
 
 The restricted worker has a 120-second test-only deadline within a 150-second
 PowerShell test budget. These cover the measured native process startup cost in
@@ -269,6 +306,10 @@ runtime. Missing, duplicate, changed or skipped audit evidence cannot qualify.
 Ordinary test runs retain the existing Explorer mode and its 20-second worker /
 30-second PowerShell budgets. A capability skip there remains explicitly a skip,
 not security coverage. Legacy has no equivalent audit test and is not relabeled.
+The companion Node command has a 210-second envelope for that unchanged oracle,
+its existing cleanup control and process overhead; the audit guest is bounded to
+five minutes. Companion reports are private schema-1 `local-privileged-audit`
+records, not full-source or publication-success reports.
 
 Each run writes private command vectors, exit/error/signal details, byte hashes,
 guest facts, input manifests and original results. Keep this evidence outside

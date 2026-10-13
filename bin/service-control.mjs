@@ -21,6 +21,7 @@ export function servicePaths(config, port) {
   return {
     record: join(directory, `service-${port}.json`),
     hold: join(directory, `service-${port}.stopped`),
+    admissionHold: join(directory, `service-${port}.admission-held`),
     socket,
   };
 }
@@ -90,7 +91,7 @@ export function requestService(socket, request) {
   });
 }
 
-export async function stopManagedService({ root, config, port, request = requestService }) {
+export async function stopManagedService({ root, config, port, quiescedInstanceId, request = requestService }) {
   const paths = servicePaths(config, port);
   let record;
   try {
@@ -99,6 +100,7 @@ export async function stopManagedService({ root, config, port, request = request
     if (error.code !== 'ENOENT') throw error;
     throw new Error(`No managed supervisor record for :${port}. Older or direct bridges require verified OS-service shutdown and disabled autostart; no process was stopped.`);
   }
+
   validateServiceRecord(record, { root, config, port });
   let receipt;
   try {
@@ -110,15 +112,36 @@ export async function stopManagedService({ root, config, port, request = request
     receipt.id === record.id &&
     receipt.root === record.root &&
     receipt.config === record.config &&
-    receipt.port === record.port;
+    receipt.port === record.port &&
+    (quiescedInstanceId === undefined || receipt.quiescedInstanceId === quiescedInstanceId);
   if (completed) {
     return { root: record.root, config: record.config, port, supervisorId: record.id, alreadyStopped: true };
   }
-  const response = await request(paths.socket, { action: 'stop', id: record.id, token: record.token });
+  const response = await request(paths.socket, { action: 'stop', id: record.id, token: record.token,
+    ...(quiescedInstanceId ? { quiescedInstanceId } : {}) });
   if (response?.id !== record.id ||
       response.stopped !== true ||
-      response.autostartHeld !== true) {
+      response.autostartHeld !== true ||
+      (quiescedInstanceId !== undefined && response.quiescedInstanceId !== quiescedInstanceId)) {
     throw new Error('Supervisor did not verify shutdown and its autostart hold. Do not replace the installation root.');
   }
   return { root: record.root, config: record.config, port, supervisorId: record.id };
+}
+
+export async function controlManagedService({ root, config, port }, action, expected = {}) {
+  const record = validateServiceRecord(
+    JSON.parse(readFileSync(servicePaths(config, port).record, 'utf8')), { root, config, port });
+  if (record.upgradeProtocol !== 1) {
+    throw new Error('This supervisor has no managed admission protocol. Legacy migration requires exact OS-service inspection; no process was stopped.');
+  }
+  const response = await requestService(record.socket, {
+    id: record.id, token: record.token, action,
+    expectedAuthority: expected.authority, expectedSessionState: expected.sessionState,
+  });
+  if (response.id !== record.id ||
+      response.ok !== true ||
+      response.instanceId !== record.instanceId ||
+      response.version !== record.version ||
+      response.port !== port) throw new Error(response.error || 'Managed bridge identity/admission could not be verified.');
+  return response;
 }
