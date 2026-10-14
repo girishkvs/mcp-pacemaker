@@ -9,8 +9,7 @@ have their own dependencies.
 [Report a problem](https://github.com/girishkvs/mcp-pacemaker/issues) ·
 [Release notes](https://github.com/girishkvs/mcp-pacemaker/releases)
 
-> This README describes **2.1.0**. Verify its npm availability before installing;
-> a source branch or GitHub tag is not proof of publication.
+> This README describes **2.1.0**, the current npm `latest`.
 > See the [release changes](CHANGELOG.md).
 
 MCP hosts — editors (VS Code, Cursor, Claude Desktop) **and** CLIs (Claude Code, Copilot CLI,

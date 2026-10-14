@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - 2026-10-12
 
-Target release: 2.1.0. This candidate has not yet been published.
+Published to npm on 2026-10-14.
 
 ### Added
 
