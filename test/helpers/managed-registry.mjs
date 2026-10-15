@@ -46,8 +46,38 @@ function archiveDirectory(root) {
   return gzipSync(Buffer.concat(entries));
 }
 
-export async function retainedRegistry(candidate, version) {
+let archived;
+
+// Deterministic archives of the retained dependencies, in lock order. The registry serves them
+// as /archives/<index>; the candidate package takes the next index.
+function retainedArchives() {
+  if (archived) return archived;
   const lock = JSON.parse(readFileSync(join(retained, 'package-lock.json'), 'utf8'));
+  archived = Object.keys(lock.packages).filter(Boolean).map((path, index) => {
+    const root = join(retained, path);
+    const bytes = archiveDirectory(root);
+    return {
+      path, id: String(index), bytes, pkg: JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')),
+      integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+    };
+  });
+  return archived;
+}
+
+// A bundled release lock that matches retainedRegistry's archives. npm replaces the default
+// registry host with the configured registry, so these entries resolve to the owned server.
+export function retainedDependencyLock(version) {
+  const lock = JSON.parse(readFileSync(join(retained, 'package-lock.json'), 'utf8'));
+  lock.version = version;
+  lock.packages[''].version = version;
+  for (const archive of retainedArchives()) {
+    lock.packages[archive.path].resolved = `https://registry.npmjs.org/archives/${archive.id}`;
+    lock.packages[archive.path].integrity = archive.integrity;
+  }
+  return JSON.stringify(lock, null, 2) + '\n';
+}
+
+export async function retainedRegistry(candidate, version) {
   const packages = new Map();
   const archives = new Map();
   const requests = [];
@@ -57,11 +87,7 @@ export async function retainedRegistry(candidate, version) {
     archives.set(id, bytes);
     packages.set(pkg.name, { pkg, id, integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}` });
   };
-  for (const path of Object.keys(lock.packages)) {
-    if (!path) continue;
-    const root = join(retained, path);
-    add(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')), archiveDirectory(root));
-  }
+  for (const archive of retainedArchives()) add(archive.pkg, archive.bytes);
   add({ ...JSON.parse(readFileSync(join(retained, 'package.json'), 'utf8')), version }, candidate.bytes);
   const server = createServer((request, response) => {
     requests.push(request.url);

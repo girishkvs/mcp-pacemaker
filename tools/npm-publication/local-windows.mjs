@@ -8,18 +8,31 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { POLICY, digest } from './policy.mjs';
 import { InputSnapshot, outside, physical, safeName, sha256, writeManifest } from './local-inputs.mjs';
 import { LocalGitConfig } from './local-git.mjs';
-import { captureSourceIdentity } from './local-source.mjs';
-import { LOCAL_CONTRACT, LOCAL_NATIVE_PACKAGES, localCaseUser, releaseRole, releaseVersions } from './local-regression.mjs';
-import { controllerBinding, writeEvidenceInventory } from './local-evidence.mjs';
-import { SOURCE_SUITE_TIMEOUT_MS } from './local-gate.mjs';
+import { LocalSourceReader, captureSourceIdentity } from './local-source.mjs';
+import {
+  LOCAL_CONTRACT, LOCAL_NATIVE_PACKAGES, LOCAL_NODES, localCaseUser, releaseRole, releaseVersions,
+} from './local-regression.mjs';
+import { controllerBinding, evidenceInventory, readLocalJson, writeEvidenceInventory } from './local-evidence.mjs';
+import { LOCAL_FROZEN_CONTROLLER, LOCAL_GIT_SELECTION, LocalRunLock, LocalRunState } from './local-run-state.mjs';
+import { SOURCE_SUITE_TIMEOUT_MS, testTotals } from './local-gate.mjs';
+import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
 const LIMIT = 4 * 1024 ** 3;
-const NODE_VERSIONS = ['20.20.2', '22.23.2', '24.21.0'];
+// Separate from LIMIT, which also caps container memory. The growth check samples
+// machine-wide free space, so it charges writes this run does not control, and it
+// must leave room above the container's own 4 GB StorageOpt scratch.
+const DISK_LIMIT = 8 * 1024 ** 3;
 const RESERVE = 3 * 1024 ** 3;
 const IO_BYTES_PER_SECOND = 32 * 1024 ** 2;
 const MAX_EXPORT = 128 * 1024 ** 2;
+const SESSION_LANE_TIMEOUT_MS = 40 * 60_000;
+// The ordinary launcher forwards its own fixed allowlist to the task worker. This is the parent's
+// equivalent: a real profile and temporary tree, because an interactive logon owns them.
+const SESSION_LANE_ENVIRONMENT = Object.freeze(['PATH', 'Path', 'SystemRoot', 'WINDIR', 'ComSpec',
+  'PATHEXT', 'OS', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData', 'SystemDrive', 'USERPROFILE',
+  'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'USERNAME', 'USERDOMAIN']);
 
 export function evidenceEntryFilter() {
   const names = new Set();
@@ -68,15 +81,35 @@ export function validateContainer(value, { id, owner, image, user = '' }) {
   }
 }
 
+export function launcherArguments(argv) {
+  const args = [...argv];
+  const usage = 'Usage: local-windows.mjs --npm-cli PATH --peer-root PATH (--output NEW_DIRECTORY | --resume RUN_DIRECTORY) --node-root PATH --pwsh-root PATH [--native-packages PATH] [--controls-only]';
+  const controlsOnly = args.at(-1) === '--controls-only';
+  if (controlsOnly) args.pop();
+  assert.ok([10, 12].includes(args.length), usage);
+  const resume = args[4] === '--resume';
+  assert.deepEqual([args[0], args[2], args[4], args[6], args[8]],
+    ['--npm-cli', '--peer-root', resume ? '--resume' : '--output', '--node-root', '--pwsh-root'], usage);
+  if (args.length === 12) assert.equal(args[10], '--native-packages', usage);
+  if (resume) assert.equal(controlsOnly, false, 'Only a full qualification run can be resumed');
+  assert.ok(isAbsolute(args[5]), 'Absolute paths required');
+  // Resolved once, so the lock, the binding and the sibling attempts directory all name the same run.
+  return { controlsOnly, options: { npmCli: args[1], peerRoot: args[3], output: resolve(args[5]), nodeRoot: args[7],
+    pwshRoot: args[9], nativePackages: args[11], resume } };
+}
+
 export class WindowsLocalGate {
-  constructor({ output, npmCli, peerRoot, nodeRoot, pwshRoot, nativePackages, image = IMAGE }) {
+  constructor({ output, npmCli, peerRoot, nodeRoot, pwshRoot, nativePackages, image = IMAGE, resume = false }) {
     assert.equal(process.platform, 'win32', 'The local Hyper-V launcher requires Windows');
     for (const path of [output, npmCli, peerRoot, nodeRoot, pwshRoot]) assert.ok(isAbsolute(path), 'Absolute paths required');
+    // The run path names the lock, the binding and the sibling attempts directory, so it must be one spelling.
+    assert.equal(output, resolve(output), 'The run directory path must be normalized');
     for (const root of [ROOT, peerRoot]) {
       outside(root, output);
     }
     assert.match(image, /^sha256:[a-f0-9]{64}$/);
-    assert.equal(existsSync(output), false, 'Use a new output directory; no overwrite');
+    if (resume) assert.equal(existsSync(output), true, 'Resume requires the original run directory');
+    else assert.equal(existsSync(output), false, 'Use a new output directory; no overwrite');
     assert.notEqual(resolve(peerRoot), resolve(ROOT), 'Both release lines are required');
     const current = JSON.parse(readFileSync(join(ROOT, 'package.json')));
     const peer = JSON.parse(readFileSync(join(peerRoot, 'package.json')));
@@ -93,7 +126,7 @@ export class WindowsLocalGate {
       this.nativeRoot = physical(nativePackages);
       this.nativeSnapshot = this.nativeInputs(this.nativeRoot);
     }
-    this.nodes = NODE_VERSIONS.map(version => physical(join(nodeRoot, `node-v${version}-win-x64/node.exe`)));
+    this.nodes = LOCAL_NODES.map(version => physical(join(nodeRoot, `node-v${version}-win-x64/node.exe`)));
     this.publisherNode = this.nodes[2];
     this.roots = [ROOT, peerRoot];
     this.image = image;
@@ -106,36 +139,49 @@ export class WindowsLocalGate {
     this.snapshots = this.nativeSnapshot ? [this.nativeSnapshot] : [];
     this.sourceBindings = [];
     this.commandIndex = 0;
-    mkdirSync(output);
-    this.config = join(output, 'docker-config');
-    mkdirSync(this.config);
-    mkdirSync(join(output, 'commands'));
-    this.env = {};
-    for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP']) {
-      if (process.env[key]) this.env[key] = process.env[key];
+    this.openRun(resume);
+  }
+
+  // A resume is checked and accepted here, before this invocation writes its first receipt.
+  openRun(resume) {
+    this.resumed = resume;
+    this.config = join(this.output, 'docker-config');
+    if (!resume) {
+      mkdirSync(this.output);
+      mkdirSync(this.config);
+      mkdirSync(join(this.output, 'commands'));
     }
-    Object.assign(this.env, {
-      HOME: this.config, USERPROFILE: this.config, APPDATA: this.config, LOCALAPPDATA: this.config,
-      GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL',
-      GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never',
-    });
-    const git = this.command('git', ['--exec-path']).stdout.trim();
-    this.gitRoot = resolve(git, '../../..');
-    assert.ok(existsSync(join(this.gitRoot, 'cmd', 'git.exe')), 'A retained Git for Windows distribution is required');
+    this.env = this.hostEnvironment();
+    if (resume) this.resumeRun(this.gitRootOf(this.probe('git', ['--exec-path'])));
+    const gitRoot = this.gitRootOf(this.command('git', ['--exec-path']).stdout);
+    if (resume) assert.equal(gitRoot, this.gitRoot, 'Git for Windows changed while the run was resuming');
+    this.gitRoot = gitRoot;
     for (const [index, node] of this.nodes.entries()) {
-      assert.equal(this.command(node, ['--version']).stdout.trim(), `v${NODE_VERSIONS[index]}`);
+      assert.equal(this.command(node, ['--version']).stdout.trim(), `v${LOCAL_NODES[index]}`);
     }
     const runtime = new InputSnapshot(this.nodeRoot);
-    for (const version of NODE_VERSIONS) runtime.add(`node-v${version}-win-x64/node.exe`);
+    for (const version of LOCAL_NODES) runtime.add(`node-v${version}-win-x64/node.exe`);
     const frozenRuntime = join(this.output, 'runtime');
-    runtime.copy(frozenRuntime);
+    if (!resume) runtime.copy(frozenRuntime);
     this.snapshots.push(runtime);
     this.runtimeSnapshot = new InputSnapshot(frozenRuntime);
     this.runtimeSnapshot.addAll();
     this.snapshots.push(this.runtimeSnapshot);
-    this.nodes = NODE_VERSIONS.map(version => join(frozenRuntime, `node-v${version}-win-x64/node.exe`));
+    this.nodes = LOCAL_NODES.map(version => join(frozenRuntime, `node-v${version}-win-x64/node.exe`));
     this.publisherNode = this.nodes[2];
     this.freezeController(ROOT);
+  }
+
+  hostEnvironment() {
+    const env = {};
+    for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP']) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+    return Object.assign(env, {
+      HOME: this.config, USERPROFILE: this.config, APPDATA: this.config, LOCALAPPDATA: this.config,
+      GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: 'NUL',
+      GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never',
+    });
   }
 
   nativeInputs(root) {
@@ -153,15 +199,104 @@ export class WindowsLocalGate {
 
   freezeController(root) {
     const controller = new InputSnapshot(root);
-    for (const name of ['local-windows-entry.mjs', 'local-inputs.mjs', 'local-environment.mjs']) {
-      controller.add(`tools/npm-publication/${name}`);
-    }
+    for (const path of LOCAL_FROZEN_CONTROLLER) controller.add(path);
     this.controller = join(this.output, 'controller');
-    controller.copy(this.controller);
+    if (!this.resumed) controller.copy(this.controller);
     this.snapshots.push(controller);
     const frozen = new InputSnapshot(this.controller);
     frozen.addAll();
     this.snapshots.push(frozen);
+  }
+
+  // Read without a receipt: a refused resume must leave the run directory exactly as it was.
+  probe(file, args) {
+    const value = spawnSync(file, args, {
+      env: this.env, encoding: 'utf8', windowsHide: true, shell: false, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+    });
+    assert.equal(value.error, undefined, `${file} could not be run: ${value.error?.message}`);
+    assert.equal(value.status, 0, `${file} failed: ${(value.stderr ?? '').trim().slice(0, 400)}`);
+    return value.stdout;
+  }
+
+  gitRootOf(execPath) {
+    const root = resolve(execPath.trim(), '../../..');
+    assert.ok(existsSync(join(root, 'cmd', 'git.exe')), 'A retained Git for Windows distribution is required');
+    return root;
+  }
+
+  // The controls prove containment on one engine and host build, so later cases may not run on another.
+  platform() {
+    const server = JSON.parse(this.probe('docker', ['--host', 'npipe:////./pipe/docker_engine', '--config', this.config,
+      'version', '--format', '{{json .Server}}']));
+    const docker = { version: server.Version, apiVersion: server.ApiVersion, os: server.Os,
+      kernelVersion: server.KernelVersion };
+    for (const value of Object.values(docker)) {
+      assert.ok(typeof value === 'string' &&
+        value.length > 0, 'Unreadable Docker engine version');
+    }
+    const registry = this.probe('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion']);
+    const build = /^\s+CurrentBuild\s+REG_SZ\s+(\d+)\s*$/m.exec(registry)?.[1];
+    const ubr = /^\s+UBR\s+REG_DWORD\s+0x([0-9a-f]+)\s*$/im.exec(registry)?.[1];
+    assert.ok(build &&
+      ubr, 'Unreadable Windows build');
+    return { docker, windows: { build, ubr: Number.parseInt(ubr, 16) } };
+  }
+
+  resumeRun(gitRoot) {
+    assert.ok(this.nativeRoot, 'Full qualification requires --native-packages with the pinned CI archives');
+    this.state = new LocalRunState(this.output);
+    const state = this.state.load();
+    this.owner = state.runId;
+    this.startedAt = state.startedAt;
+    this.gitRoot = gitRoot;
+    const { binding, live } = this.binding(state.binding.scope);
+    this.commandIndex = this.state.accept(this.state.preflight(binding));
+    // Reused inputs are not frozen again, so the final input check re-reads the live trees
+    // the binding hashed.
+    this.snapshots.push(...live.snapshots);
+    this.sourceBindings.push(...live.sources);
+  }
+
+  createState(scope) {
+    this.state = new LocalRunState(this.output);
+    this.state.create(this.binding(scope).binding, this.startedAt);
+  }
+
+  // Everything a resumed invocation must find unchanged. It is hashed directly, not through the
+  // command journal, so the same computation serves a fresh run and a read-only resume check.
+  binding(scope) {
+    const live = { snapshots: [], sources: [] };
+    const binding = { runId: this.owner, scope, image: this.image, platform: this.platform(),
+      arguments: { output: this.output, npmRoot: this.npmRoot, peerRoot: this.roots[1], nodeRoot: this.nodeRoot,
+        pwshRoot: this.pwshRoot, nativeRoot: this.nativeRoot ?? null, gitRoot: this.gitRoot, controllerRoot: ROOT },
+      controller: controllerBinding(ROOT),
+      nodes: LOCAL_NODES.map(version => ({ version,
+        sha256: sha256(readFileSync(physical(join(this.nodeRoot, `node-v${version}-win-x64/node.exe`)))) })),
+      tools: {}, sources: [] };
+    if (scope === 'containment-controls-only') return { binding, live };
+    for (const [name, root, selections] of [['npm', this.npmRoot, null], ['pwsh', this.pwshRoot, null],
+      ['git', this.gitRoot, LOCAL_GIT_SELECTION], ['native', this.nativeRoot, null]]) {
+      const { snapshot, fingerprint } = this.state.digest(root, selections);
+      live.snapshots.push(snapshot);
+      binding.tools[name] = fingerprint;
+    }
+    for (const root of this.roots) {
+      const source = this.readSource(root);
+      const { snapshot, fingerprint } = this.state.digest(root, [...source.names, 'node_modules', 'ui/node_modules']);
+      live.snapshots.push(snapshot);
+      live.sources.push({ root, head: source.head, names: source.names });
+      binding.sources.push({ version: source.version, head: source.head, tree: source.tree, files: fingerprint });
+    }
+    return { binding, live };
+  }
+
+  readSource(root) {
+    const reader = new LocalSourceReader(root, join(this.gitRoot, 'cmd', 'git.exe'));
+    const names = reader.git(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--deduplicate'])
+      .split('\0').filter(name => name.length > 0 &&
+        existsSync(join(root, name))).sort();
+    return { version: JSON.parse(readFileSync(join(root, 'package.json'))).version,
+      head: reader.git(['rev-parse', 'HEAD']).trim(), tree: reader.git(['rev-parse', 'HEAD^{tree}']).trim(), names };
   }
 
   command(file, args, timeout = 180_000, allowFailure = false) {
@@ -239,7 +374,7 @@ export class WindowsLocalGate {
     assert.equal(this.git(root, ['rev-parse', 'HEAD']).trim(), head, 'Source HEAD changed');
     for (const [name, toolRoot, entries] of [
       ['npm', this.npmRoot, null],
-      ['git', this.gitRoot, ['cmd', 'mingw64/bin', 'mingw64/libexec/git-core', 'usr/bin', 'usr/share']],
+      ['git', this.gitRoot, LOCAL_GIT_SELECTION],
       ['pwsh', this.pwshRoot, null],
       ...(this.nativeRoot ? [['native', this.nativeRoot, null]] : []),
     ]) {
@@ -265,7 +400,7 @@ export class WindowsLocalGate {
       const space = statfsSync(storage, { bigint: true });
       const free = space.bavail * space.bsize;
       assert.ok(free >= BigInt(RESERVE), 'Daemon disk reserve reached');
-      assert.ok(initialFree - free < BigInt(LIMIT), 'Per-case daemon disk-growth budget reached');
+      assert.ok(initialFree - free < BigInt(DISK_LIMIT), 'Per-case daemon disk-growth budget reached');
       const remaining = deadline - performance.now();
       if (remaining <= 0) return { error: 'ETIMEDOUT', status: null };
       const value = this.docker(['wait', id], Math.min(3000, remaining), true);
@@ -339,6 +474,25 @@ export class WindowsLocalGate {
     return 15_000;
   }
 
+  stopContainer(id) {
+    let inspected = this.inspect(id);
+    assert.equal(inspected.Id, id);
+    assert.equal(inspected.Config.Labels['pacemaker.local-gate'], this.owner);
+    if (inspected.State.Running) this.docker(['kill', id], 60_000);
+    inspected = this.inspect(id);
+    assert.equal(inspected.State.Running, false);
+    assert.equal(inspected.State.Pid, 0, 'The owned container still has a process after kill');
+    return inspected;
+  }
+
+  removeContainer(id) {
+    this.docker(['rm', id], 60_000);
+    const absent = this.docker(['inspect', id], 30_000, true);
+    assert.equal(absent.error, null);
+    assert.notEqual(absent.status, 0);
+    assert.match(absent.stderr, /No such (?:object|container)/i);
+  }
+
   runCase(name, mode, input, node = this.publisherNode) {
     const sourceMode = mode === 'gate' || mode === 'audit';
     const user = localCaseUser(mode, input?.manifest.version);
@@ -346,7 +500,7 @@ export class WindowsLocalGate {
     let space = statfsSync(storage, { bigint: true });
     const admissionDeadline = Math.min(this.deadline, performance.now() + 60_000);
     const samples = [];
-    while (space.bavail * space.bsize < BigInt(LIMIT + RESERVE) &&
+    while (space.bavail * space.bsize < BigInt(DISK_LIMIT + RESERVE) &&
       performance.now() < admissionDeadline) {
       samples.push({ elapsedMs: performance.now() - this.started,
         freeBytes: Number(space.bavail * space.bsize) });
@@ -355,7 +509,7 @@ export class WindowsLocalGate {
     }
     samples.push({ elapsedMs: performance.now() - this.started, freeBytes: Number(space.bavail * space.bsize) });
     writeFileSync(join(this.output, `${name}-storage-admission.json`), JSON.stringify(samples), { flag: 'wx' });
-    assert.ok(space.bavail * space.bsize >= BigInt(LIMIT + RESERVE), 'Insufficient free daemon storage; no pull or cleanup attempted');
+    assert.ok(space.bavail * space.bsize >= BigInt(DISK_LIMIT + RESERVE), 'Insufficient free daemon storage; no pull or cleanup attempted');
     const image = JSON.parse(this.docker(['image', 'inspect', this.image]).stdout)[0];
     assert.equal(image.Id, this.image);
     assert.equal(image.Os, 'windows');
@@ -421,13 +575,7 @@ export class WindowsLocalGate {
         }
       }
       if (id) {
-        let inspected = this.inspect(id);
-        assert.equal(inspected.Id, id);
-        assert.equal(inspected.Config.Labels['pacemaker.local-gate'], this.owner);
-        if (inspected.State.Running) this.docker(['kill', id], 60_000);
-        inspected = this.inspect(id);
-        assert.equal(inspected.State.Running, false);
-        assert.equal(inspected.State.Pid, 0);
+        const inspected = this.stopContainer(id);
         result.container = { id, state: inspected.State, hostConfig: inspected.HostConfig };
         let copied;
         try {
@@ -435,11 +583,7 @@ export class WindowsLocalGate {
           copied = this.exportEvidence(id, output);
           result.copy = copied;
         } finally {
-          this.docker(['rm', id], 60_000);
-          const absent = this.docker(['inspect', id], 30_000, true);
-          assert.equal(absent.error, null);
-          assert.notEqual(absent.status, 0);
-          assert.match(absent.stderr, /No such (?:object|container)/i);
+          this.removeContainer(id);
           result.removed = true;
         }
         if (!originalError) {
@@ -457,7 +601,7 @@ export class WindowsLocalGate {
           assert.equal(result.guest.cpu, 4);
           assert.ok(result.guest.disk.totalBytes > 0);
           result.diskGuard = { kind: 'host-free-space-observer', reserveBytes: RESERVE,
-            maxGrowthBytes: LIMIT, sampleTimeoutMs: 3000, requestedIoBytesPerSecond: IO_BYTES_PER_SECOND,
+            maxGrowthBytes: DISK_LIMIT, sampleTimeoutMs: 3000, requestedIoBytesPerSecond: IO_BYTES_PER_SECOND,
             virtualCapacityIsNotQuotaProof: true };
           assert.equal(inspected.State.OOMKilled, false);
           for (const addresses of Object.values(result.guest.network)) {
@@ -510,46 +654,156 @@ export class WindowsLocalGate {
     assert.equal(result.status, 'passed');
   }
 
+  // A Windows container has no interactive logon session, so the registered files that bind one
+  // cannot run inside a case. They run here, in the launcher's own ordinary interactive session,
+  // against the same working tree the cases qualify, and the receipt binds them to that commit.
+  sessionLane(input) {
+    const root = this.roots[0];
+    assert.equal(releaseRole(input.manifest.version), 'current', 'The session lane belongs to the current release line');
+    // The pinned runtime node has no co-located npm, so the launcher is given the same pinned CLI
+    // the contained cases use rather than resolving one beside the executable.
+    const environment = { CI: 'true', MCP_CI_NPM_CLI: join(this.npmRoot, 'bin/npm-cli.js') };
+    for (const key of SESSION_LANE_ENVIRONMENT) {
+      if (process.env[key]) environment[key] = process.env[key];
+    }
+    const startedAt = new Date().toISOString();
+    const result = spawnSync(this.publisherNode,
+      [join(root, 'tools/windows-ci/ordinary-run.mjs'), 'session-required'],
+      { cwd: root, env: environment, shell: false, windowsHide: true,
+        timeout: SESSION_LANE_TIMEOUT_MS, maxBuffer: MAX_EXPORT, encoding: 'utf8' });
+    const evidence = /^Ordinary CI evidence: (.+)$/m.exec(result.stdout ?? '')?.[1]?.trim();
+    assert.equal(result.error, undefined, `Host session lane did not run: ${result.error?.message}`);
+    assert.ok(evidence &&
+      isAbsolute(evidence),
+    `Host session lane did not record its evidence directory: ${(result.stderr ?? '').trim().slice(0, 400)}`);
+    assert.equal(result.status, 0, 'Host session lane did not pass');
+    const output = readFileSync(join(evidence, 'stdout.log'), 'utf8');
+    const context = JSON.parse(output.slice(0, output.indexOf('\n')));
+    assert.deepEqual(context, { contract: 'session-required', platform: 'win32', role: 'user-runtime',
+      verified: true, sessionVerified: true }, 'Host session lane ran without a verified user session');
+    const totals = testTotals(output);
+    assert.equal(totals.fail, 0, 'Host session lane reported failing tests');
+    assert.ok(totals.pass > 0, 'Host session lane executed no tests');
+    const receipt = { schemaVersion: 1, kind: 'host-session-lane', runId: this.owner,
+      version: input.manifest.version, head: input.manifest.head, node: `v${LOCAL_NODES[2]}`,
+      files: [...SESSION_REQUIRED_TESTS], startedAt, completedAt: new Date().toISOString(),
+      context, totals, contained: false };
+    writeFileSync(join(this.output, 'session-lane.json'), `${JSON.stringify(receipt, null, 2)}\n`,
+      { flag: 'wx', flush: true });
+    return receipt;
+  }
+
+  // A killed invocation can leave its container behind. It carries this run's unique ownership
+  // label, so it is reconciled the same way an uncertain create is, before any case runs again.
+  reconcileContainers() {
+    const listed = this.docker(['ps', '--all', '--quiet', '--no-trunc', '--filter',
+      `label=pacemaker.local-gate=${this.owner}`]).stdout.split(/\r?\n/).filter(id => id.length > 0);
+    for (const id of listed) {
+      assert.match(id, /^[a-f0-9]{64}$/);
+      this.stopContainer(id);
+      this.removeContainer(id);
+      this.state.removed(id);
+    }
+  }
+
+  caseStep(name, mode, input, node) {
+    if (this.state.passed(name)) {
+      this.state.reuse(name);
+      this.results.push(readLocalJson(join(this.output, name, 'result.json')));
+      return;
+    }
+    this.state.begin(name);
+    this.runCase(name, mode, input, node);
+    this.state.pass(name, this.commandIndex);
+  }
+
+  inputStep(root) {
+    const name = `inputs-${JSON.parse(readFileSync(join(root, 'package.json'))).version}`;
+    if (this.state.passed(name)) {
+      this.state.reuse(name);
+      const bytes = readFileSync(join(this.output, name, 'manifest.json'));
+      return { path: join(this.output, name), manifest: JSON.parse(bytes), sha256: sha256(bytes) };
+    }
+    this.state.begin(name);
+    const input = this.inputs(root);
+    this.state.confirmInputs(input.manifest);
+    this.state.pass(name, this.commandIndex);
+    return input;
+  }
+
+  sessionLaneStep(input) {
+    if (this.state.passed('session-lane')) {
+      this.state.reuse('session-lane');
+      return readLocalJson(join(this.output, 'session-lane.json'));
+    }
+    this.state.begin('session-lane');
+    const receipt = this.sessionLane(input);
+    // The lane runs the live working tree. Its receipt is only reusable if that tree still
+    // matched every frozen input when it finished, which the end of the run would otherwise prove.
+    this.verifyInputs();
+    this.state.pass('session-lane', this.commandIndex);
+    return receipt;
+  }
+
   run({ controlsOnly = false } = {}) {
     if (!controlsOnly) assert.ok(this.nativeRoot, 'Full qualification requires --native-packages with the pinned CI archives');
+    if (this.resumed) assert.equal(controlsOnly, false, 'Only a full qualification run can be resumed');
     // Every docker call is clamped to the remaining whole-run budget, so that budget has to be
     // derived from the cases actually planned. A fixed ceiling silently starves the later cases.
     const planned = this.roots.length * this.nodes.length;
     this.deadline = performance.now() + 15 * 60_000 +
       3 * this.caseTimeout('fail') +
-      (controlsOnly ? 0 : planned * (this.caseTimeout('gate') + this.caseTimeout('audit')));
+      (controlsOnly ? 0 : SESSION_LANE_TIMEOUT_MS + planned * (this.caseTimeout('gate') + this.caseTimeout('audit')));
     const report = { schemaVersion: 3, kind: 'private-local-publication-run', contract: LOCAL_CONTRACT,
       runId: this.owner, startedAt: this.startedAt, completedAt: null, controller: controllerBinding(ROOT),
       status: 'failed', scope: controlsOnly ? 'containment-controls-only' : 'both-release-lines-local-only',
-      releaseReady: false, nodes: this.nodes.map((node, index) => ({
-        version: NODE_VERSIONS[index], sha256: digest(readFileSync(node)).sha256,
-      })), image: this.image, ciImageEquivalent: false, cases: this.results };
+      releaseReady: false, sessionLane: null, nodes: this.nodes.map((node, index) => ({
+        version: LOCAL_NODES[index], sha256: digest(readFileSync(node)).sha256,
+      })), image: this.image, ciImageEquivalent: false, cases: this.results, invocations: null };
     try {
-      this.runCase('failure-control', 'fail');
-      this.runCase('timeout-control', 'timeout');
-      this.runCase('early-descendant-exit-control', 'timeout-early-exit');
+      if (this.resumed) this.reconcileContainers();
+      else this.createState(report.scope);
+      this.caseStep('failure-control', 'fail');
+      this.caseStep('timeout-control', 'timeout');
+      this.caseStep('early-descendant-exit-control', 'timeout-early-exit');
       if (!controlsOnly) {
-        const inputs = this.roots.map(root => this.inputs(root));
+        const inputs = this.roots.map(root => this.inputStep(root));
+        report.sessionLane = this.sessionLaneStep(inputs[0]);
         for (const input of inputs) {
           for (const [index, node] of this.nodes.entries()) {
             if (releaseRole(input.manifest.version) === 'current') {
-              this.runCase(`audit-v${input.manifest.version}-node${NODE_VERSIONS[index]}`, 'audit', input, node);
+              this.caseStep(`audit-v${input.manifest.version}-node${LOCAL_NODES[index]}`, 'audit', input, node);
             }
-            this.runCase(`v${input.manifest.version}-node${NODE_VERSIONS[index]}`, 'gate', input, node);
+            this.caseStep(`v${input.manifest.version}-node${LOCAL_NODES[index]}`, 'gate', input, node);
           }
         }
       }
       this.verifyInputs();
+      // The state records a pass before the inventory is written, so the inventory must already
+      // be buildable from these members; otherwise the run could be neither verified nor resumed.
+      if (!controlsOnly) evidenceInventory(this.output, report);
       report.status = 'passed';
       return report;
     } catch (error) {
       report.error = error.message;
       throw error;
     } finally {
+      const passed = report.status === 'passed';
       report.completedAt = new Date().toISOString();
+      let unrecorded;
+      try {
+        report.invocations = this.state?.finish(report) ?? null;
+      } catch (error) {
+        unrecorded = error;
+        report.status = 'failed';
+        report.error = [report.error, `The run state was not recorded: ${error.message}`].filter(Boolean).join('; ');
+      }
       writeFileSync(join(this.output, 'result.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx' });
       if (report.status === 'passed' &&
           !controlsOnly) writeEvidenceInventory(this.output);
+      // A run that otherwise passed must not report success. A failed run keeps its original error.
+      if (unrecorded &&
+          passed) throw unrecorded;
     }
   }
 }
@@ -557,18 +811,15 @@ export class WindowsLocalGate {
 if (process.argv[1] &&
     import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const args = process.argv.slice(2);
-    const controlsOnly = args.at(-1) === '--controls-only';
-    if (controlsOnly) args.pop();
-    assert.ok([10, 12].includes(args.length), 'Usage: local-windows.mjs --npm-cli PATH --peer-root PATH --output NEW_DIRECTORY --node-root PATH --pwsh-root PATH [--native-packages PATH] [--controls-only]');
-    assert.deepEqual([args[0], args[2], args[4], args[6], args[8]],
-      ['--npm-cli', '--peer-root', '--output', '--node-root', '--pwsh-root']);
-    if (args.length === 12) assert.equal(args[10], '--native-packages');
-    const report = new WindowsLocalGate({
-      npmCli: args[1], peerRoot: args[3], output: args[5], nodeRoot: args[7], pwshRoot: args[9],
-      nativePackages: args[11],
-    }).run({ controlsOnly });
-    console.log(JSON.stringify({ status: report.status, releaseReady: false }));
+    const { options, controlsOnly } = launcherArguments(process.argv.slice(2));
+    const lock = new LocalRunLock(options.output);
+    await lock.acquire();
+    try {
+      const report = new WindowsLocalGate(options).run({ controlsOnly });
+      console.log(JSON.stringify({ status: report.status, releaseReady: false }));
+    } finally {
+      await lock.release();
+    }
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

@@ -31,6 +31,7 @@ import { registerDefaultCli } from './cli-dispatch.mjs';
 import { randomUUID } from 'node:crypto';
 import { canonicalPort, validateSelectedCommand } from './cli-selection.mjs';
 import { requireUserRuntimeContext } from './runtime-context.mjs';
+import { POOLING_BUDGET_MS } from './pooling-execution.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -414,7 +415,44 @@ async function cmdInit(args) {
 }
 
 /* -------------------------------- upgrade ----------------------------------- */
+async function requireOrdinaryUpgradeCaller() {
+  try { await requireUserRuntimeContext(); }
+  catch (error) {
+    let hint = '';
+    try {
+      // Only a plain legacy install can need the access fix; skip the Task Scheduler probe otherwise.
+      const { discoverInstances } = await import('./managed-upgrade.mjs');
+      if (!discoverInstances(HOME).length) {
+        const { inspectLegacyAccess } = await import('./legacy-access.mjs');
+        const { report } = await inspectLegacyAccess(HOME);
+        if (report.fixable.length) {
+          hint = '\nThis 1.3 install also needs a one-time access fix first: run mcp-pacemaker upgrade --fix-legacy-access in this administrator terminal.';
+        }
+      }
+    } catch { /* Not an inspectable legacy install: the general guidance below applies. */ }
+    throw new Error(`${error.message}\nRun upgrades from a normal (non-administrator) terminal; the new bridge must run as you.${hint}`, { cause: error });
+  }
+}
+
 async function cmdUpgrade(args) {
+  if (args.fixLegacyAccess) {
+    const conflicting = args.to !== undefined ||
+      args.sxs ||
+      args.recover ||
+      args.instance ||
+      args.port !== undefined ||
+      args.self ||
+      args.registry !== undefined ||
+      args.controllerRoot !== undefined;
+    if (conflicting) throw new Error('--fix-legacy-access can only be combined with --plan or --yes.');
+    const { fixLegacyAccess } = await import('./legacy-access.mjs');
+    const result = await fixLegacyAccess({
+      home: HOME, plan: Boolean(args.plan), yes: Boolean(args.yes),
+      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), confirm: message => p.confirm({ message }),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
   if (selectedInstance &&
       (args.to || args.recover) &&
       !args.instance) args.instance = selectedInstance.directory;
@@ -434,6 +472,8 @@ async function cmdUpgrade(args) {
       console.log(JSON.stringify(await upgrader.recover(options.instance), null, 2));
       return;
     }
+    // Refuse a privileged caller before planning and before any confirmation prompt.
+    if (!args.plan) await requireOrdinaryUpgradeCaller();
     const plan = await planUpgrade(args, { home: HOME });
     console.log(describeUpgrade(plan));
     if (args.plan) return;
@@ -443,10 +483,17 @@ async function cmdUpgrade(args) {
         yes: Boolean(args.yes), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
         confirm: message => p.confirm({ message }),
       });
-      if (!accepted) return;
+      if (!accepted) {
+        p.cancel('Cancelled. Nothing was changed.');
+        return;
+      }
     } else if (!args.yes) {
       const approved = await p.confirm({ message: 'Apply this local managed upgrade plan?' });
-      if (p.isCancel(approved) || approved !== true) return;
+      if (p.isCancel(approved) ||
+          approved !== true) {
+        p.cancel('Cancelled. Nothing was changed.');
+        return;
+      }
     }
     console.log(JSON.stringify(await upgrader.execute(plan), null, 2));
     return;
@@ -659,11 +706,15 @@ async function reportBackend(port, action) {
   info(`:${port}: ${backendDescription(pkgVersion, backend, action)}`);
 }
 
+// A slow answer is not a stopped bridge: a refused connection still fails at once, and a reload
+// may first spend the bridge's whole pooling budget settling a pending batch.
+const STATUS_TIMEOUT_MS = 10_000;
+const RELOAD_TIMEOUT_MS = POOLING_BUDGET_MS + 20_000;
 function httpGet(url) {
   return new Promise((res) => {
     const r = http.get(url, (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => res({ status: resp.statusCode, body: d })); });
     r.on('error', () => res(null));
-    r.setTimeout(2000, () => { r.destroy(); res(null); });
+    r.setTimeout(STATUS_TIMEOUT_MS, () => { r.destroy(); res(null); });
   });
 }
 async function cmdStatus() {
@@ -708,7 +759,7 @@ function httpPost(url, nonce) {
     const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST', headers: { 'x-mcp-nonce': nonce } },
       (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => res({ status: resp.statusCode, body: d })); });
     r.on('error', () => res(null));
-    r.setTimeout(5000, () => { r.destroy(); res(null); });
+    r.setTimeout(RELOAD_TIMEOUT_MS, () => { res({ timedOut: true }); r.destroy(); });
     r.end();
   });
 }
@@ -723,6 +774,10 @@ async function cmdReload(opts) {
 
   const r = await httpPost(`http://127.0.0.1:${port}/admin/reload`, nonce);
   if (!r) { err(`bridge DOWN on :${port}  (start with "mcp-pacemaker start")`); process.exit(1); }
+  if (r.timedOut) {
+    err(`bridge on :${port} did not answer the reload within ${RELOAD_TIMEOUT_MS / 1000}s; it may still apply it (check "mcp-pacemaker status")`);
+    process.exit(1);
+  }
   let j = null; try { j = JSON.parse(r.body); } catch { /* noop */ }
   if (r.status !== 200 || !j || !j.ok) { err(`reload rejected: ${(j && j.error) || r.body || r.status} — the bridge kept its previous config`); process.exit(1); }
   if (j.unchanged) { ok(`${CONFIG} re-read on :${port} — no changes`); return; }
@@ -959,7 +1014,7 @@ program.command('emit')
 
 program.command('upgrade')
   .description('Replace a managed version with --to; bare upgrade retains legacy host repair')
-  .addHelpText('after', '\nDefault scope is the current user, including elevated callers. Explicit original-account management uses --user <canonical SID> plus --task <exact task path> or --instance <directory>. --all-users is not implemented. Legacy restart requires interactive acknowledgement of uncertain HTTP outcomes and partial descendant coverage; --yes cannot replace it.')
+  .addHelpText('after', '\nDefault scope is the current user, including elevated callers. Explicit original-account management uses --user <canonical SID> plus --task <exact task path> or --instance <directory>. --all-users is not implemented. An upgrade may end open sessions and calls in progress; it never changes servers.json or your client setup. The 1.3 restart asks for confirmation; --yes confirms the plan shown. Explicit-account (--user) upgrades still need interactive confirmation.')
   .option('--to <version>', 'exact stable version to stage and activate')
   .option('--sxs', 'keep the old instance; create an isolated new instance without rewiring hosts')
   .option('--port <n>', 'SxS only: exact port; omitted lets the actual listener use OS-assigned port 0', canonicalPort)
@@ -970,6 +1025,7 @@ program.command('upgrade')
   .option('--self', 'resolve the same-major channel and print exact-version guidance (no update)')
   .option('--registry <url>', 'approved npm registry override (otherwise use existing npm configuration)')
   .option('--controller-root <directory>', 'existing protected operation store for explicit account management')
+  .option('--fix-legacy-access', 'Windows, administrator terminal: give your account control of a 1.3 task and CLI file that were set up as administrator')
   .action(cmdUpgrade);
 
 program.command('update-check')

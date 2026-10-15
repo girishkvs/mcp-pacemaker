@@ -40,7 +40,7 @@ export function accountUpgradeOptions(args) {
       (result.plan || result.registry !== undefined)) throw new Error('Explicit account recovery cannot combine --plan or --registry; it uses the recorded operation.');
   if (result.to) exactVersion(result.to);
   if (result.registry) result.registry = validateRegistry(result.registry);
-  if (result.yes && !result.plan) throw new Error('Original-account task bootstrap and restart require interactive confirmation; --yes cannot attest paused callers.');
+  if (result.yes && !result.plan) throw new Error('Original-account task bootstrap and restart require interactive confirmation; --yes cannot replace it.');
   return result;
 }
 

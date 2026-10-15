@@ -16,7 +16,7 @@ const GUARDIAN_CHILD_STOP_MS = 10000;
 const ENVIRONMENT = ['PATH', 'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'OS', 'ProgramFiles',
   'ProgramFiles(x86)', 'ProgramData', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
   'MCP_NATIVE_COMPILER', 'MCP_NATIVE_REFERENCES', 'MCP_POOLING_TRACE_RUN_FAULTS'];
-const OPERATIONS = ['test', 'pooling-diagnostics', 'compat:prepare', 'test:compat', 'compat:clean',
+const OPERATIONS = ['test', 'session-required', 'pooling-diagnostics', 'compat:prepare', 'test:compat', 'compat:clean',
   'probe', 'probe-npm', 'probe-exit', 'probe-error', 'probe-hang', 'probe-before-registration',
   'probe-after-registration', 'probe-after-run', 'probe-registration-uncertain',
   'probe-collision', 'probe-mismatch', 'probe-input-change', 'probe-stop-failure', 'probe-delete-failure',
@@ -63,6 +63,9 @@ function argumentsFor(input) {
   assert.ok(OPERATIONS.includes(input.operation), 'Unsupported ordinary CI operation');
   if (input.operation === 'probe-npm') return [input.npm, '--version'];
   if (input.operation.startsWith('probe')) return [join(HERE, 'ordinary-probe.mjs'), input.operation, input.directory];
+  if (input.operation === 'session-required') {
+    return [join(HERE, '../ci/run-tests.mjs'), 'session-required'];
+  }
   if (input.operation === 'pooling-diagnostics') {
     return ['--test', '--test-concurrency=1', '--test-reporter=tap',
       '--test-name-pattern=real deadline diagnostics', 'test/pooling-api.test.mjs'];
@@ -71,7 +74,8 @@ function argumentsFor(input) {
 }
 
 export function operationBudgetMs(operation) {
-  return operation === 'test' ? 3600000 : 2700000;
+  if (operation === 'test') return 3600000;
+  return operation === 'session-required' ? 1800000 : 2700000;
 }
 
 export function guardianStartupInTime(input, receipt) {

@@ -78,6 +78,13 @@ test('the Windows lanes together cover every registered file exactly once', () =
   assert.deepEqual(ordinary.args.filter(value => !value.startsWith('test/')),
     complete.args.filter(value => !value.startsWith('test/')));
   assert.throws(() => testContract(root, 'source-ordinary', 'linux'), /only for Windows/);
+  const session = testContract(root, 'session-required', 'win32');
+  assert.equal(session.role, 'user-runtime');
+  assert.equal(session.session, true, 'The session lane must observe a real interactive logon session');
+  assert.deepEqual(files(session.args), [...SESSION_REQUIRED_TESTS]);
+  assert.ok(session.args.includes('--test-reporter=tap'), 'The receipt totals parser requires TAP output');
+  assert.deepEqual([...files(ordinary.args), ...files(session.args)].sort(), files(complete.args).sort());
+  assert.throws(() => testContract(root, 'session-required', 'linux'), /only for Windows/);
 });
 
 test('source contract includes every registered source file without changing concurrency', () => {
@@ -96,6 +103,8 @@ test('source contract includes every registered source file without changing con
   assert.deepEqual(plan.filter(item => item.name === 'browser').map(({ platform, node }) => ({ platform, node })),
     [{ platform: 'linux', node: 22 }]);
   assert.equal(plan.some(item => item.name === 'service-context'), false);
+  // Hosted runners have no interactive logon session, so the session lane is host-only by design.
+  assert.equal(plan.some(item => item.name === 'session-required'), false);
   assert.throws(() => testContract(root, 'audit', 'linux'));
 });
 

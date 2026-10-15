@@ -202,6 +202,14 @@ internal sealed class LegacyNative
         catch { /* Diagnostic metadata must never replace the original failure. */ }
     }
 
+    // A fixed reason the broker can report; the WMI exception text itself is never relayed.
+    internal Exception QueryTimeout(Exception error)
+    {
+        var timeout = new InvalidOperationException("Argument query timed out", error);
+        TagApi(timeout, LegacyFailureApi.WmiQuery);
+        return timeout;
+    }
+
     internal void TagFailure(Exception error, LegacyFailureStage substage, int? pid = null,
         long? creationTime = null, int? actualParentPid = null, int? expectedParentPid = null,
         string expectedParentCreationTime = null, bool? alive = null, bool? parentAlive = null,
@@ -376,7 +384,7 @@ internal sealed class LegacySnapshot
                 if (pid == 0 ||
                     pid > int.MaxValue) throw new InvalidOperationException("Snapshot identity unavailable");
                 result.Add((int)pid);
-                if (result.Count > 512) throw new InvalidOperationException("Child bound");
+                if (result.Count > 2048) throw new InvalidOperationException("Child bound");
             }
         }
         return result;
@@ -472,6 +480,8 @@ internal sealed class LegacyArgumentQueries : IDisposable
     private readonly Action check;
     private readonly List<LegacyQueryWorker> workers = new List<LegacyQueryWorker>();
     private volatile bool cancelled;
+    // The first real worker failure. Later workers only observe cancellation, which must not hide it.
+    private Exception primary;
     private int count;
     private int maximum;
     private bool disposed;
@@ -505,10 +515,13 @@ internal sealed class LegacyArgumentQueries : IDisposable
                     workers[index].Queue.Add(batch);
                 }
                 foreach (var batch in wave)
-                    while (!batch.Done.Wait(25)) Check();
+                    while (!batch.Done.Wait(25)) CheckPrimary();
+                var failure = Volatile.Read(ref primary);
                 foreach (var batch in wave)
-                    if (batch.Error != null) throw batch.Error;
-                Check();
+                    if (failure == null &&
+                        batch.Error != null) failure = batch.Error;
+                if (failure != null) throw failure;
+                CheckPrimary();
                 if (capture)
                 {
                     foreach (var batch in wave)
@@ -548,7 +561,7 @@ internal sealed class LegacyArgumentQueries : IDisposable
                     native.TagApi(error, LegacyFailureApi.WmiConnect);
                     native.TagFailure(error, LegacyFailureStage.ArgumentConnect);
                     worker.Error = error;
-                    cancelled = true;
+                    Fail(error);
                 }
                 finally { worker.Ready.Set(); }
                 foreach (var batch in worker.Queue.GetConsumingEnumerable())
@@ -561,9 +574,11 @@ internal sealed class LegacyArgumentQueries : IDisposable
                     }
                     catch (Exception error)
                     {
-                        native.TagFailure(error, LegacyFailureStage.ArgumentQuery);
-                        batch.Error = error;
-                        cancelled = true;
+                        var failure = TimedOut(error) ? native.QueryTimeout(error) : error;
+                        native.TagFailure(failure, LegacyFailureStage.ArgumentQuery);
+                        batch.Error = failure;
+                        if (IsCancellation(failure)) cancelled = true;
+                        else Fail(failure);
                     }
                     finally { batch.Done.Set(); }
                 }
@@ -574,7 +589,7 @@ internal sealed class LegacyArgumentQueries : IDisposable
         }
         foreach (var worker in workers)
         {
-            while (!worker.Ready.Wait(25)) Check();
+            while (!worker.Ready.Wait(25)) CheckPrimary();
             if (worker.Error != null) throw worker.Error;
         }
     }
@@ -592,7 +607,10 @@ internal sealed class LegacyArgumentQueries : IDisposable
             clauses.Add("ProcessId=" + process.Info.pid.ToString(CultureInfo.InvariantCulture));
         }
         var seen = new HashSet<int>();
-        var options = new EnumerationOptions { Timeout = TimeSpan.FromSeconds(2), ReturnImmediately = false };
+        // Loaded hosts with ~1000 processes measured close to 1 s per query, so 2 s failed under contention.
+        // The caller's phase watchdog still bounds the whole capture, so a timeout late in a long
+        // capture can surface as that bound rather than as "Argument query timed out".
+        var options = new EnumerationOptions { Timeout = TimeSpan.FromSeconds(8), ReturnImmediately = false };
         using (var search = new ManagementObjectSearcher(scope, new ObjectQuery(
             "SELECT ProcessId,CreationDate,CommandLine FROM Win32_Process WHERE " + string.Join(" OR ", clauses)), options))
         using (var rows = QueryRows(search, native))
@@ -663,8 +681,39 @@ internal sealed class LegacyArgumentQueries : IDisposable
 
     private void Check()
     {
-        if (cancelled) throw new InvalidOperationException("Argument query cancelled");
+        if (cancelled)
+        {
+            var cancellation = new InvalidOperationException("Argument query cancelled");
+            cancellation.Data["LegacyQueryCancelled"] = true;
+            throw cancellation;
+        }
         check();
+    }
+
+    // Main thread only: report the first real worker failure rather than the cancellation it caused.
+    private void CheckPrimary()
+    {
+        var failure = Volatile.Read(ref primary);
+        if (failure != null) throw failure;
+        Check();
+    }
+
+    private void Fail(Exception error)
+    {
+        Interlocked.CompareExchange(ref primary, error, null);
+        cancelled = true;
+    }
+
+    private static bool IsCancellation(Exception error)
+    {
+        return error.Data.Contains("LegacyQueryCancelled");
+    }
+
+    private static bool TimedOut(Exception error)
+    {
+        var management = error as ManagementException;
+        return management != null &&
+            management.ErrorCode == ManagementStatus.Timedout;
     }
 
     public void Dispose()

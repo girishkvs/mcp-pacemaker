@@ -8,6 +8,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Web.Script.Serialization;
 
+// Drives the broker's stop sweep against real owned processes. Three cases model parent
+// metadata (reused PIDs) on real handles; the nine-generation chain uses actual parentage.
 internal sealed class CachedEdgeCases
 {
     internal static CachedEdgeCases Current;
@@ -15,12 +17,13 @@ internal sealed class CachedEdgeCases
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly List<Process> owned = new List<Process>();
     private readonly List<SafeProcess> handles = new List<SafeProcess>();
-    // SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION. The broker opens its
-    // own handles without PROCESS_TERMINATE, which is why cleanup needs its own handle.
+    // SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION.
     private const int TerminateAndQuery = 0x00101001;
     private readonly List<object> cleanups = new List<object>();
-    private Held root, bridge, leaf;
-    private string mode = "none";
+    // Modeled parent PID by creation time, and modeled snapshot children by parent PID.
+    private readonly Dictionary<long, int> parents = new Dictionary<long, int>();
+    private readonly Dictionary<int, List<int>> children = new Dictionary<int, List<int>>();
+    private bool modeled;
 
     private static int Main(string[] args)
     {
@@ -31,7 +34,8 @@ internal sealed class CachedEdgeCases
 
     private int Run(string[] args)
     {
-        if (args.Length > 0 && args[0] == "worker")
+        if (args.Length > 0 &&
+            args[0] == "worker")
         {
             var directory = args[1];
             int remaining = int.Parse(args[2], CultureInfo.InvariantCulture);
@@ -45,18 +49,17 @@ internal sealed class CachedEdgeCases
             Thread.Sleep(45000);
             return 0;
         }
-        if (args.Length < 1) throw new ArgumentException("Test lifetime helper required");
+        if (args.Length != 1) throw new ArgumentException("Test lifetime helper required; the sweep model has no old-code mode");
         ArmCapsule(args[0]);
-        bool expectedRed = args.Length == 2 && args[1] == "old-red";
         var results = new List<object>();
         try
         {
-            foreach (var scenario in expectedRed ? new[] { "older-root" } :
-                new[] { "older-root", "changed-parent", "dead-root", "dead-parent", "changed-birth", "newer-root", "nonroot-older" })
-                results.Add(Cached(scenario, expectedRed));
-            if (!expectedRed) results.Add(RealDepth());
-            Console.WriteLine(json.Serialize(new { expectedRed, results, cleanup = cleanups,
-                limits = "Cached-parent reuse is modeled on real owned handles; over-depth chain is actual parentage. No live identities queried." }));
+            results.Add(Modeled("older-root"));
+            results.Add(Modeled("older-nonmember"));
+            results.Add(Modeled("changed-parent"));
+            results.Add(RealChain());
+            Console.WriteLine(json.Serialize(new { expectedRed = false, results, cleanup = cleanups,
+                limits = "Parent metadata is modeled on real owned handles except in the actual nine-generation chain." }));
             return 0;
         }
         catch (Exception error)
@@ -86,140 +89,161 @@ internal sealed class CachedEdgeCases
         long created = native.Creation(handle);
         return new Held { Handle = handle, Created = created, Info = new Identity {
             pid = pid, creationTime = created.ToString(CultureInfo.InvariantCulture),
-            parentPid = native.Parent(handle), ownerSid = native.Owner(handle), imagePath = native.Image(handle),
-            imageSha256 = new string('a', 64), argvSha256 = new string('b', 64) } };
+            parentPid = native.Parent(handle), ownerSid = native.Owner(handle), imagePath = native.Image(handle) } };
     }
 
-    private object Cached(string scenario, bool expectedRed)
+    private object Modeled(string scenario)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "legacy-cached-edge-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
+        var directory = NewDirectory("legacy-sweep-model-");
         var broker = new LegacyProcessBroker();
         try
         {
-            mode = "none";
             var first = Hold(Start(directory, 0).Id);
             var second = Hold(Start(directory, 0).Id);
             var third = Hold(Start(directory, 0).Id);
-            root = scenario == "newer-root" ? third : first;
-            bridge = second;
-            leaf = scenario == "newer-root" ? first : third;
-            root.Info.parentPid = leaf.Info.pid;
-            root.Info.parentCreationTime = null;
-            bridge.Info.parentPid = root.Info.pid;
-            bridge.Info.parentCreationTime = root.Info.creationTime;
-            leaf.Info.parentPid = bridge.Info.pid;
-            leaf.Info.parentCreationTime = bridge.Info.creationTime;
-            var keep = typeof(Held).GetField("KeepArguments", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (keep != null) { keep.SetValue(root, true); keep.SetValue(bridge, true); }
-            var marker = typeof(Held).GetField("SelectedRoot", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (marker != null)
+            Held root;
+            Held bridge;
+            Held untouched = null;
+            if (scenario == "older-root")
             {
-                marker.SetValue(root, scenario != "nonroot-older");
-                marker.SetValue(bridge, true);
+                // The supervisor's creator PID was reused by a process its bridge started.
+                root = first;
+                bridge = second;
+                Edge(root, bridge);
+                Edge(bridge, third);
+                Edge(third, root);
             }
-            var captured = (List<Held>)Field(broker, "held");
-            captured.AddRange(new[] { root, bridge, leaf });
-            SetField(broker, "root", directory);
-            SetField(broker, "port", 1);
-            mode = scenario;
-            if (scenario == "dead-root") { native.Require(Api.TerminateProcess(root.Handle, 1)); Api.WaitForSingleObject(root.Handle, 3000); }
-            if (scenario == "dead-parent") { native.Require(Api.TerminateProcess(leaf.Handle, 1)); Api.WaitForSingleObject(leaf.Handle, 3000); }
-            if (scenario == "changed-birth") root.Created++;
-            var reason = "";
-            try
+            else if (scenario == "older-nonmember")
             {
-                if (scenario == "older-root") Invoke(broker, "CaptureChildren", root, 0);
-                else Invoke(broker, "Capture", root.Info.pid, leaf);
+                // An older process still names the supervisor's PID from that PID's earlier owner.
+                root = second;
+                bridge = third;
+                untouched = first;
+                Edge(root, bridge);
+                Edge(root, first);
             }
-            catch (Exception error) { reason = error.Message; }
-            if (expectedRed)
+            else
             {
-                if (reason != "Depth bound") throw new InvalidOperationException("Old cached path did not reproduce Depth bound: " + reason);
-                return new { scenario, modeledParentMetadata = true, refused = reason, selectedCount = captured.Count };
+                // The snapshot lists the process under the bridge, but its live parent differs.
+                root = first;
+                bridge = second;
+                untouched = third;
+                Edge(root, bridge);
+                Child(bridge, third);
+                parents[third.Created] = root.Info.pid;
             }
-            if (scenario != "older-root")
-            {
-                if (reason == "") throw new InvalidOperationException("Negative cached edge was accepted: " + scenario);
-                return new { scenario, modeledParentMetadata = true, refused = reason,
-                    excludedRoot = ((List<ExcludedIdentity>)Field(broker, "excluded")).Exists(value => value.pid == root.Info.pid) };
-            }
-            if (reason != "") throw new InvalidOperationException("Older cached root refused: " + reason);
-            if (captured.Count != 3 ||
-                root.Info.parentCreationTime != null) throw new InvalidOperationException("Root membership or binding changed");
-            var exclusions = (List<ExcludedIdentity>)Field(broker, "excluded");
-            if (exclusions.Count != 0) throw new InvalidOperationException("Selected root was excluded");
-            var plan = (Plan)Invoke(broker, "MakePlan", root, bridge);
-            Invoke(broker, "ValidatePlan", plan);
-            bool reusedEdge = (bool)Invoke(broker, "KnownEdge", root, leaf);
-            if (reusedEdge) throw new InvalidOperationException("Revalidation did not ignore the false creator edge");
-            SetField(broker, "plan", plan);
-            var stopped = (Receipt)Invoke(broker, "Stop", root, bridge);
-            if (!stopped.legacyRootStopVerified ||
-                !stopped.observedDescendantsStopped ||
-                stopped.errors.Length != 0) throw new InvalidOperationException("Owned modeled set stop failed");
-            return new { scenario, modeledParentMetadata = true, finitePlan = true, selectedCount = captured.Count,
-                excludedRoot = false, rootParentBirthUnchanged = true, revalidationSkippedOnlyEdge = true, stopped };
+            var receipt = StopModel(broker, root, bridge, directory);
+            bool? untouchedAlive = null;
+            if (untouched != null) untouchedAlive = native.Alive(untouched.Handle);
+            return new { scenario, modeledParentMetadata = true, stopped = receipt, untouchedAlive,
+                rootsStopped = !native.Alive(root.Handle) && !native.Alive(bridge.Handle) };
         }
-        finally { Cleanup(directory); root = bridge = leaf = null; mode = "none"; }
+        finally
+        {
+            modeled = false;
+            parents.Clear();
+            children.Clear();
+            ReleaseBroker(broker);
+            Cleanup(directory);
+        }
     }
 
-    private object RealDepth()
+    private object RealChain()
     {
-        var directory = Path.Combine(Path.GetTempPath(), "legacy-actual-depth-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
+        var directory = NewDirectory("legacy-sweep-chain-");
         var broker = new LegacyProcessBroker();
         try
         {
-            mode = "none";
             var first = Start(directory, 8);
             var wait = Stopwatch.StartNew();
             while (Directory.GetFiles(directory, "worker-*.json").Length != 9)
             {
-                if (wait.ElapsedMilliseconds > 10000) throw new InvalidOperationException("Owned depth chain startup bound");
+                if (wait.ElapsedMilliseconds > 10000) throw new InvalidOperationException("Owned chain startup bound");
                 Thread.Sleep(20);
             }
+            var generations = new List<Held>();
             foreach (var file in Directory.GetFiles(directory, "worker-*.json"))
             {
                 var identity = json.Deserialize<WorkerIdentity>(File.ReadAllText(file));
                 var process = Hold(identity.pid);
                 if (process.Created.ToString(CultureInfo.InvariantCulture) != identity.creationTime)
-                    throw new InvalidOperationException("Owned depth generation changed");
-                if (identity.pid == first.Id) root = process;
+                    throw new InvalidOperationException("Owned chain generation changed");
+                generations.Add(process);
             }
-            ((List<Held>)Field(broker, "held")).Add(root);
-            var snapshotField = typeof(LegacyProcessBroker).GetField("snapshot", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (snapshotField != null) Invoke(broker, "RefreshSnapshot");
-            var reason = "";
-            try { Invoke(broker, "CaptureChildren", root, 0); }
-            catch (Exception error) { reason = error.Message; }
-            if (reason != "Depth bound") throw new InvalidOperationException("Actual depth8 boundary did not refuse: " + reason);
-            foreach (var process in (List<Held>)Field(broker, "held"))
-                if (!handles.Contains(process.Handle)) handles.Add(process.Handle);
-            return new { scenario = "actual-eight-edge-chain", modeledParentMetadata = false,
-                ownedGenerations = 9, refused = reason };
+            generations.Sort((left, right) => left.Created.CompareTo(right.Created));
+            if (generations[0].Info.pid != first.Id) throw new InvalidOperationException("Owned chain order changed");
+            var receipt = StopModel(broker, generations[0], generations[1], directory);
+            int stopped = 0;
+            foreach (var generation in generations)
+                if (!native.Alive(generation.Handle)) stopped++;
+            return new { scenario = "actual-nine-generation-chain", modeledParentMetadata = false,
+                generations = generations.Count, generationsStopped = stopped, stopped = receipt };
         }
-        finally { Cleanup(directory); root = null; }
+        finally
+        {
+            ReleaseBroker(broker);
+            Cleanup(directory);
+        }
+    }
+
+    private Receipt StopModel(LegacyProcessBroker broker, Held root, Held bridge, string directory)
+    {
+        var captured = (List<Held>)Field(broker, "held");
+        captured.Add(bridge);
+        captured.Add(root);
+        SetField(broker, "root", directory);
+        SetField(broker, "port", 1);
+        SetField(broker, "plan", (Plan)Invoke(broker, "MakePlan", root, bridge));
+        modeled = parents.Count > 0;
+        try { return (Receipt)Invoke(broker, "Stop", root, bridge); }
+        finally { modeled = false; }
+    }
+
+    private void Edge(Held parent, Held child)
+    {
+        Child(parent, child);
+        parents[child.Created] = parent.Info.pid;
+    }
+
+    private void Child(Held parent, Held child)
+    {
+        List<int> group;
+        if (!children.TryGetValue(parent.Info.pid, out group))
+        {
+            group = new List<int>();
+            children.Add(parent.Info.pid, group);
+        }
+        group.Add(child.Info.pid);
     }
 
     internal int? Parent(SafeProcess process)
     {
-        if (mode == "none") return null;
-        long created = native.Creation(process);
-        if (created.ToString(CultureInfo.InvariantCulture) == root.Info.creationTime)
-            return mode == "changed-parent" ? bridge.Info.pid : leaf.Info.pid;
-        if (created == bridge.Created) return root.Info.pid;
-        if (created == leaf.Created) return bridge.Info.pid;
+        if (!modeled) return null;
+        int parent;
+        if (parents.TryGetValue(native.Creation(process), out parent)) return parent;
         return null;
     }
 
     internal List<int> Children(int parent)
     {
-        if (mode == "none") return null;
-        if (parent == root.Info.pid) return new List<int> { bridge.Info.pid };
-        if (parent == bridge.Info.pid) return new List<int> { leaf.Info.pid };
-        if (parent == leaf.Info.pid) return new List<int> { root.Info.pid };
+        if (!modeled) return null;
+        List<int> group;
+        if (children.TryGetValue(parent, out group)) return new List<int>(group);
         return new List<int>();
+    }
+
+    private string NewDirectory(string prefix)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    // The sweep opens its own handles for what it adopts; this model owns only its Hold handles.
+    private void ReleaseBroker(LegacyProcessBroker broker)
+    {
+        foreach (var process in (List<Held>)Field(broker, "held"))
+            if (!handles.Contains(process.Handle)) process.Handle.Dispose();
     }
 
     private object Field(object instance, string name) { return instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(instance); }
@@ -240,22 +264,13 @@ internal sealed class CachedEdgeCases
             var key = pid.ToString(CultureInfo.InvariantCulture) + ":" + created.ToString(CultureInfo.InvariantCulture);
             if (native.Alive(handle))
             {
-                // Handles captured from the broker are opened query-only by design, so they cannot
-                // terminate. Fall back to a handle opened for termination, bound to the same pid and
-                // creation time so a reused pid is never stopped.
-                if (!Api.TerminateProcess(handle, 1))
-                {
-                    using (var terminator = Api.OpenProcess(TerminateAndQuery, false, (int)pid))
-                    {
-                        // The process can exit between the liveness check above and here, and its
-                        // pid can then be reused by a process this account cannot open. Treat any
-                        // of that as success only when the original handle is no longer alive.
-                        if (terminator.IsInvalid ||
-                            native.Creation(terminator) != created) native.Require(!native.Alive(handle));
-                        else if (!Api.TerminateProcess(terminator, 1)) native.Require(!native.Alive(terminator));
-                    }
-                }
-                native.Require(Api.WaitForSingleObject(handle, 3000) == 0);
+                Api.TerminateProcess(handle, 1);
+                // WaitForSingleObject reports WAIT_TIMEOUT without setting a Win32 error, so report
+                // the real condition, and give a loaded host time to reap a nine-generation chain.
+                uint wait = Api.WaitForSingleObject(handle, 30000);
+                if (wait != 0) throw new InvalidOperationException(
+                    "Owned cleanup did not observe exit for pid " +
+                    pid.ToString(CultureInfo.InvariantCulture) + " (wait 0x" + wait.ToString("X") + ")");
             }
             if (identities.Add(key)) cleanups.Add(new { pid, creationTime = created.ToString(CultureInfo.InvariantCulture),
                 heldHandleSignaled = !native.Alive(handle) });

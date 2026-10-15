@@ -80,8 +80,8 @@ let PORT = Number(getArg('--port', '8791'));
 const HOST = getArg('--host', '127.0.0.1');
 let upgradeHeld = process.env.MCP_PACEMAKER_UPGRADE_PENDING === '1';
 let upgradeRequests = 0;
+let upgradeCalls = 0;
 let upgradeTraffic = false;
-let upgradeUncertain = false;
 if (PORT === 0 &&
     (!process.connected || !process.env.MCP_PACEMAKER_MANAGED_INSTANCE || HOST !== '127.0.0.1')) {
   throw new Error('Port 0 requires a managed loopback startup with actual-port readiness.');
@@ -450,6 +450,13 @@ function handlePoolingChange(encodedName, req, res) {
     trace?.record('body-end', { bytes });
     clearTimeout(bodyTimer);
     if (rejected) return;
+    // A body that arrives after an upgrade closed admission must not start config work while
+    // the bridge is being stopped.
+    if (upgradeHeld ||
+        shuttingDown) {
+      reply(503, { error: 'Managed upgrade in progress; no change was submitted.' });
+      return;
+    }
     let body;
     let name;
     try {
@@ -2096,13 +2103,14 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (!['api', 'ui', '.well-known'].includes(name)) {
+      // A GET is a listening stream that lasts as long as its session; anything else is a call.
+      const call = req.method !== 'GET';
       upgradeRequests++;
+      if (call) upgradeCalls++;
       upgradeTraffic = true;
-      let finished = false;
-      res.once('finish', () => { finished = true; });
       res.once('close', () => {
         upgradeRequests--;
-        if (!finished) upgradeUncertain = true;
+        if (call) upgradeCalls--;
       });
     }
   }
@@ -2208,16 +2216,26 @@ server.listen(PORT, HOST, () => {
 
 function upgradeState() {
   const pooling = poolingConfig.upgradeState();
-  const unsafe = upgradeUncertain ||
-    pooling.unsafe ||
+  const unsafe = pooling.unsafe ||
     hasPoolingTransaction(CONFIG);
-  const busy = pooling.busy ||
-    upgradeRequests > 0 ||
-    sessions.size > 0 ||
-    httpSessions.size > 0 ||
+  const calls = upgradeCalls > 0 ||
     resuming.size > 0 ||
     tokenInFlight.size > 0;
-  return { unsafe, busy, configBusy: pooling.busy, held: upgradeHeld, traffic: upgradeTraffic, port: PORT, version: VERSION, instanceId };
+  const busy = pooling.busy ||
+    calls ||
+    upgradeRequests > 0 ||
+    sessions.size > 0 ||
+    httpSessions.size > 0;
+  return { unsafe, busy, calls, configBusy: pooling.busy, held: upgradeHeld, traffic: upgradeTraffic, port: PORT, version: VERSION, instanceId };
+}
+
+// Quiesce waits for calls and config work, never for open sessions. A staged pooling batch
+// still commits on its own timer while admission is held.
+function draining() {
+  const state = upgradeState();
+  return state.unsafe ||
+    state.configBusy ||
+    state.calls;
 }
 
 let upgradeControlBusy = false;
@@ -2231,26 +2249,26 @@ process.on('message', async (message) => {
   try {
     if (message.action === 'quiesce') {
       upgradeHeld = true;
+      // Admission is closed now. Calls in progress and config work get up to eight seconds;
+      // calls still running at the restart end with their sessions. Config work that is still
+      // unfinished blocks the upgrade, because an upgrade must never change servers.json.
       const deadline = Date.now() + Math.min(8000, Math.max(0, message.timeoutMs ?? 8000));
-      while (upgradeState().busy &&
-          !upgradeState().unsafe &&
+      while (draining() &&
           Date.now() < deadline) {
         await new Promise(resolveWait => setTimeout(resolveWait, 25));
       }
       const state = upgradeState();
-      if (state.busy ||
-          state.unsafe) {
-        throw new Error('Active work or unresolved config transaction blocks upgrade. Settle work and retry; nothing was replayed.');
+      if (state.unsafe ||
+          state.configBusy) {
+        throw new Error('Unfinished config work blocks upgrade. Let it finish and retry; nothing was replayed.');
       }
     } else if (message.action === 'activate' ||
         message.action === 'resume') {
       if (upgradeState().unsafe) throw new Error('Unresolved config transaction prevents admission.');
       if (message.action === 'activate') {
-        const files = new PoolingFiles(CONFIG);
-        const sessions = existsSync(RESUME_FILE) ? files.inspect(RESUME_FILE) : null;
-        if (!isDeepStrictEqual(files.inspect(CONFIG), message.expectedAuthority) ||
-            !isDeepStrictEqual(sessions, message.expectedSessionState)) {
-          throw new Error('Configuration or persisted session state changed before admission; the bridge remains held.');
+        // Session records may change while the old version runs; only the config must match.
+        if (!isDeepStrictEqual(new PoolingFiles(CONFIG).inspect(CONFIG), message.expectedAuthority)) {
+          throw new Error('Configuration changed before admission; the bridge remains held.');
         }
       } else {
         await poolingConfig.reloadSaved('upgrade resumed');

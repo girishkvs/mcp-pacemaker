@@ -13,12 +13,21 @@ import { assertDurableRoot } from './service-control.mjs';
 const approved = new WeakMap();
 const inventory = readManagedJson(new URL('./legacy-1.3.json', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const ACCESS_PROBLEMS = {
+  'task-write': report => `Task ${report.task.path} (owner ${report.task.ownerName}): your account can only read it.`,
+  'cli-owner': report => `${report.cli.path} (owner ${report.cli.ownerName}): your account cannot copy it with its permissions.`,
+  'cli-write': report => `${report.cli.path}: your account cannot write it.`,
+  'cli-delete': report => `${report.cli.path}: your account cannot rename it.`,
+  'bin-add-file': report => `${report.cli.directory}: your account cannot create files in it.`,
+};
+export const ACCESS_FIXES = {
+  'task-write': report => `give your account full control of task ${report.task.path}`,
+  'cli-owner': report => `make your account the owner of ${report.cli.path}`,
+};
 export const LEGACY_WARNING = [
-  'Restart this legacy Pacemaker installation? Pause its callers before confirming.',
-  'Clients will disconnect. Legacy 1.3 cannot drain or certify every in-flight HTTP outcome.',
-  'Only the selected supervisor, bridge and captured provably owned descendants will be verified stopped.',
-  'Historical orphan coverage remains unproven; uncaptured or unattributed processes are left untouched and are not enumerated as a complete set.',
-  'No unknown call is automatically replayed. The new managed runtime contains future children from birth.',
+  'Upgrade this 1.3 installation? Its supervisor, its bridge and the processes the bridge started will be stopped.',
+  'Open sessions and calls in progress end, and clients reconnect to the new version. No call is retried.',
+  'servers.json, every server setting in it and your client setup are kept as they are.',
 ].join('\n');
 
 export function legacyPlanDigest(plan) {
@@ -30,18 +39,19 @@ export function legacyPlanDigest(plan) {
 
 export async function confirmLegacyUpgrade(plan, { yes = false, interactive = false, confirm } = {}) {
   if (!plan.legacy) throw new Error('Expected a legacy restart plan.');
-  if (yes ||
-      !interactive) throw new Error('Legacy migration requires interactive acknowledgement of this exact restart/uncertain-HTTP/partial-tree plan. Run upgrade --to <version> without --yes in an interactive terminal; pause callers before confirming.');
   const digest = legacyPlanDigest(plan);
-  const answer = await confirm(`${LEGACY_WARNING}\nPlan: ${digest}`);
-  if (answer !== true) return false;
+  if (!yes) {
+    if (!interactive) throw new Error('Legacy migration needs confirmation. Run upgrade --to <version> in an interactive terminal, or add --yes to confirm the plan shown.');
+    const answer = await confirm(`${LEGACY_WARNING}\nPlan: ${digest}`);
+    if (answer !== true) return false;
+  }
   if (legacyPlanDigest(plan) !== digest) throw new Error('Legacy plan changed during confirmation.');
   approved.set(plan, digest);
   return true;
 }
 
 export function requireLegacyApproval(plan) {
-  if (approved.get(plan) !== legacyPlanDigest(plan)) throw new Error('This legacy plan has no matching interactive acknowledgement.');
+  if (approved.get(plan) !== legacyPlanDigest(plan)) throw new Error('This legacy plan has no matching confirmation.');
   approved.delete(plan);
 }
 
@@ -132,10 +142,58 @@ export function legacySessionState(config) {
   return existsSync(path) ? new PoolingFiles(config).inspect(path) : null;
 }
 
+export function legacyStatePort(home) {
+  const statePath = join(home, 'state.json');
+  if (!existsSync(statePath)) throw new Error('No stable managed installation or exact legacy install state was found. Nothing was changed.');
+  const state = readManagedJson(statePath);
+  const ports = [...new Set((state.hosts ?? []).map(host => canonicalPort(host.port)))];
+  if (ports.length !== 1) throw new Error('Legacy migration requires exactly one selected port in existing install state.');
+  return { statePath, port: ports[0] };
+}
+
+export function legacyAccessReport(report, registration) {
+  const bound = report?.protocol === 1 &&
+    report.task?.path === registration.path &&
+    report.expected?.xmlSha256 === registration.xmlSha256 &&
+    Array.isArray(report.missing) &&
+    Array.isArray(report.fixable) &&
+    report.missing.every(id => Object.hasOwn(ACCESS_PROBLEMS, id)) &&
+    report.fixable.every(id => Object.hasOwn(ACCESS_FIXES, id) && report.missing.includes(id));
+  if (!bound) throw new Error('Legacy access check did not match the selected registration. Nothing was changed.');
+  return report;
+}
+
+export function legacyAccessProblems(report) {
+  return report.missing.map(id => ACCESS_PROBLEMS[id](report));
+}
+
+// A certain gap here would otherwise fail after the journal is published (task hold) or after staging (CLI copy).
+export function assertLegacyAccess(report, registration) {
+  legacyAccessReport(report, registration);
+  if (!report.missing.length) return;
+  const lines = [
+    'Your account cannot make the changes this upgrade needs. Nothing was changed.',
+    ...legacyAccessProblems(report).map(problem => `  - ${problem}`),
+  ];
+  if (report.fixable.length) {
+    lines.push(
+      'This usually means 1.3 was set up from an administrator terminal.',
+      `Run this once from ${report.elevated ? 'this' : 'an'} administrator terminal. It will only ${report.fixable.map(id => ACCESS_FIXES[id](report)).join(' and ')}:`,
+      '  mcp-pacemaker upgrade --fix-legacy-access',
+      'Then run this upgrade again from a normal (non-administrator) terminal.',
+    );
+  }
+  if (report.missing.some(id => !report.fixable.includes(id))) {
+    lines.push('--fix-legacy-access does not change the other permissions listed; an administrator must grant them.');
+  }
+  throw Object.assign(new Error(lines.join('\n')), { code: 'LEGACY_ACCESS_MISSING' });
+}
+
+// 1.3 rewrites sessions.json whenever a session starts or ends, and an upgrade may end
+// sessions, so only the config is compared.
 export function verifyLegacyConfig(config, legacy) {
   new PoolingFiles(config).verify(config, legacy.authority);
-  if (!isDeepStrictEqual(legacySessionState(config), legacy.sessions) ||
-      hasPoolingTransaction(config)) throw new Error('Legacy configuration/session state changed or has an unresolved transaction.');
+  if (hasPoolingTransaction(config)) throw new Error('Legacy configuration has an unresolved transaction.');
 }
 
 async function nonceChallenge(port, nonce) {
@@ -183,21 +241,19 @@ export async function verifyLegacyListener(instance, legacy, { sameGeneration = 
 export async function prepareLegacyPlan(options, { home, task = new WindowsLegacyTaskAdapter(), processes } = {}) {
   if (process.platform !== 'win32') throw new Error('Legacy restart migration has no supported adapter on this OS. Nothing was changed.');
   if (options.sxs) throw new Error('Legacy-source SxS is not supported; no existing service was changed.');
-  const statePath = join(home, 'state.json');
-  if (!existsSync(statePath)) throw new Error('No stable managed installation or exact legacy install state was found. Nothing was changed.');
-  const state = readManagedJson(statePath);
-  const ports = [...new Set((state.hosts ?? []).map(host => canonicalPort(host.port)))];
-  if (ports.length !== 1) throw new Error('Legacy migration requires exactly one selected port in existing install state.');
-  const port = ports[0];
+  const { statePath, port } = legacyStatePort(home);
   const records = task.inspectLegacySource ? await task.inspectLegacySource(port) : await task.inspect(port);
   const { root, registration } = parseLegacyRegistration(records, port);
   const rootIdentity = verifyLegacyPackage(root);
+  if (typeof task.access === 'function') assertLegacyAccess(await task.access(port, join(root, 'bin', 'cli.mjs')), registration);
   const config = realpathSync.native(join(home, 'servers.json'));
   const files = new PoolingFiles(config);
+  // 1.3 rewrites sessions.json on every session start and end, so it is read only after the
+  // old bridge has stopped.
   const legacy = {
     protocol: 1, root, rootIdentity, registration,
     stateAuthority: files.inspect(statePath),
-    authority: files.inspect(config), sessions: legacySessionState(config),
+    authority: files.inspect(config), sessions: null,
   };
   const instance = {
     id: randomUUID(), directory: join(home, 'managed', `legacy-${port}-${randomUUID()}`),

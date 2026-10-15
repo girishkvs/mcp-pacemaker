@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import semver from 'semver';
 import {
   acquireInstanceLock, createInstance, directoryIdentity, durableJson,
   loadInstance, readInstanceState, readRecoveryContext, readManagedJson, verifySelection,
 } from './managed-state.mjs';
 import { acquireUpgrade, configuredRegistry, exactVersion, unpackUpgrade, verifyArchive } from './upgrade-package.mjs';
 import { inspectInstance, listenerOpen, startInstance, stopInstance } from './managed-runtime.mjs';
-import { PoolingFiles, hasPoolingTransaction } from './pooling-files.mjs';
+import { MAX_CONFIG_BYTES, PoolingFiles, hasPoolingTransaction } from './pooling-files.mjs';
 import { inspectAutostart } from './upgrade-autostart.mjs';
 import { validateRegistry } from './update-check.mjs';
 import { servicePaths } from './service-control.mjs';
@@ -26,9 +27,10 @@ function sessionState(config) {
   return existsSync(path) ? new PoolingFiles(config).inspect(path) : null;
 }
 
+// Session records change whenever a client connects. An upgrade may end sessions, so only
+// the config is protected here.
 function verifyRollbackState(instance, journal) {
   new PoolingFiles(instance.config).verify(instance.config, journal.authority);
-  if (!same(sessionState(instance.config), journal.sessionState)) throw new Error('Persisted session state changed; rollback/activation refused.');
   if (hasPoolingTransaction(instance.config)) throw new Error('Config outcome is uncertain; automatic rollback refused.');
 }
 
@@ -105,9 +107,9 @@ export async function planUpgrade(options, { home, legacy, autostart: inspectSta
       affectedInstances: [prepared.legacy.backendInstanceId],
       autostart: { kind: 'legacy', name: prepared.legacy.registration.name },
       downtime: LEGACY_WARNING,
-      rollback: 'Only before target admission, with unchanged config/session authority and verified captured-root/observed-set stop. Uncertain launch, task or HTTP outcomes require explicit recovery.',
+      rollback: 'Only before target admission, with unchanged config and a verified supervisor and bridge stop. Uncertain launch or task outcomes require explicit recovery.',
       hostWiring: 'Unchanged. The same installed CLI entry will dispatch the selected managed version.',
-      legacyAdoption: 'One-time restart; tree completeness stays unproven. Unattributed historical processes are left untouched.',
+      legacyAdoption: 'One-time restart. A process the 1.3 bridge started that cannot be stopped is reported and left running.',
     };
   }
   if (instances.length !== 1) {
@@ -153,7 +155,7 @@ export function describeUpgrade(plan) {
 export class ManagedUpgrader {
   constructor({ acquire = acquireUpgrade, dependencies = stageCliDependencies, checkpoint = () => {}, legacy,
     autostart = inspectAutostart, beforeInterruption = async () => {},
-    beforeStop = async () => {}, beforeAdmission = async () => {} } = {}) {
+    beforeStop = async () => {}, beforeAdmission = async () => {}, afterRefusal = async () => {} } = {}) {
     this.acquire = acquire;
     this.dependencies = dependencies;
     this.checkpoint = checkpoint;
@@ -162,6 +164,7 @@ export class ManagedUpgrader {
     this.beforeInterruption = beforeInterruption;
     this.beforeStop = beforeStop;
     this.beforeAdmission = beforeAdmission;
+    this.afterRefusal = afterRefusal;
   }
 
   transition(directory, journal, phase, changes = {}) {
@@ -246,10 +249,10 @@ export class ManagedUpgrader {
         same(instanceBinding(source), instanceBinding(plan.instance));
       if (!matchesPlan) throw new Error('Managed selection changed after the plan; create a new plan.');
       assertNoPendingJournal(source);
+      if (!plan.options.sxs) this.requireSessionRecords(source.config, plan.to);
       await this.autostart(source);
       const current = await inspectInstance(source);
       if (current.unsafe) throw new Error('Unresolved transaction blocks upgrade.');
-      const sessions = sessionState(source.config);
       const target = await this.stage(plan, operation);
       verifySelection(target);
       const reloaded = loadInstance(source.directory, { verifyFiles: false });
@@ -259,11 +262,15 @@ export class ManagedUpgrader {
       if (plan.options.sxs) {
         return await this.startSxs(source, plan, target, operation);
       }
+      // The records can grow while the target downloads, so their size is checked again.
+      this.requireSessionRecords(source.config, target.version);
+      // Session records are read only after the old bridge stops; while it runs, every session
+      // start and end rewrites them.
       journal = {
         protocol: 1, operation, instanceId: source.id, previous: source.active, target,
         binding: instanceBinding(source),
         authority: current.authority, originalInstanceId: current.instanceId,
-        sessionState: sessions, launchToken: randomUUID(), phase: 'prepared',
+        sessionState: null, launchToken: randomUUID(), phase: 'prepared',
       };
       const backup = join(source.directory, 'staging', operation, 'servers.backup.json');
       new PoolingFiles(source.config).stage(backup, source.config, current.authority, readFileSync(source.config));
@@ -271,13 +278,12 @@ export class ManagedUpgrader {
       await this.beforeInterruption(source, journal);
       this.transition(destination, journal, 'prepared');
       this.transition(destination, journal, 'quiescing');
-      const drained = await inspectInstance(source, 'quiesce');
-      if (!same(drained.authority, journal.authority)) throw new Error('Configuration changed while staging; retry from a new plan.');
+      const drained = await this.quiesce(source, destination, journal);
       verifyRollbackState(source, journal);
       await this.beforeStop(source, journal);
       this.transition(destination, journal, 'stopping', { quiescedInstanceId: drained.instanceId });
       const stoppedProof = await stopInstance(source, drained.instanceId);
-      this.transition(destination, journal, 'stopped', { stoppedProof });
+      this.transition(destination, journal, 'stopped', { stoppedProof, sessionState: this.sessionRecords(source.config) });
       return await this.activate(destination, journal);
     } catch (error) {
       if (journal) {
@@ -292,6 +298,89 @@ export class ManagedUpgrader {
     } finally {
       release();
     }
+  }
+
+  // A definite refusal releases the hold at once, as recovery would. Only an uncertain
+  // outcome, such as a lost reply, keeps admission held for explicit recovery.
+  async quiesce(source, destination, journal) {
+    try {
+      const drained = await inspectInstance(source, 'quiesce');
+      if (!same(drained.authority, journal.authority)) {
+        throw Object.assign(new Error('Configuration changed while staging; retry from a new plan.'), { refused: true });
+      }
+      return drained;
+    } catch (error) {
+      if (!error.refused) throw error;
+      await this.resumeRefused(source, error);
+      await this.releaseRefused(source, journal, error);
+      this.transition(destination, journal, 'aborted', { error: error.message });
+      throw new Error(`${error.message} Nothing was stopped; the current version is serving again.`, { cause: error });
+    }
+  }
+
+  // Config work that blocked the drain can still be settling, and resume refuses until it has,
+  // so resume is retried briefly. If it still refuses, admission stays held for recovery.
+  async resumeRefused(source, refusal) {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      try { return await inspectInstance(source, 'resume'); }
+      catch (error) {
+        if (!error.refused ||
+            Date.now() >= deadline) {
+          const state = error.refused ? 'stays paused' : 'may still be paused';
+          throw new Error(`${refusal.message} The current version ${state} until \`mcp-pacemaker upgrade --recover --instance ${source.directory} --yes\` succeeds.`, { cause: error });
+        }
+        await new Promise(resolveWait => setTimeout(resolveWait, 500));
+      }
+    }
+  }
+
+  // Whatever the caller held for the upgrade, such as an account's task, is released before the
+  // journal settles. If that fails, the journal stays at `quiescing` and recovery finishes it.
+  async releaseRefused(source, journal, refusal) {
+    try { await this.afterRefusal(source, journal); }
+    catch (error) {
+      throw new Error(`${refusal.message} Nothing was stopped and the current version is serving again. ${error.message} Run recovery to finish.`,
+        { cause: new AggregateError([refusal, error], refusal.message) });
+    }
+  }
+
+  // Targets before 2.1.1 compare session records when they start, reading at most 1 MiB of them.
+  comparesSessionRecords(version) {
+    const ignoresRecords = semver.valid(version) &&
+      semver.gte(version, '2.1.1');
+    return !ignoresRecords;
+  }
+
+  // Refuse such a target before anything is downloaded or stopped instead of restarting into a
+  // rollback. Only the size is checked, so a session starting or ending meanwhile cannot make
+  // this refuse.
+  requireSessionRecords(config, version) {
+    if (!this.comparesSessionRecords(version)) return;
+    const path = join(dirname(config), 'sessions.json');
+    const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0;
+    if (size > MAX_CONFIG_BYTES) {
+      throw new Error(`Session records in ${path} are over 1 MiB, more than ${version} can compare when it starts. Upgrade to 2.1.1 or newer instead. Nothing was stopped.`);
+    }
+  }
+
+  // Records that could not be read after the stop would make such a target refuse admission,
+  // where rollback is no longer automatic. Refusing here, while the journal is still at
+  // `stopped`, rolls back to the previous version.
+  requireReadSessionRecords(config, journal) {
+    const unread = this.comparesSessionRecords(journal.target.version) &&
+      journal.sessionState === null &&
+      existsSync(join(dirname(config), 'sessions.json'));
+    if (unread) {
+      throw new Error(`Session records could not be read after the old version stopped, and ${journal.target.version} compares them when it starts.`);
+    }
+  }
+
+  // Read once the old bridge has stopped. A file the integrity helper refuses, such as one
+  // over 1 MiB, must not strand an upgrade whose old version is already down.
+  sessionRecords(config) {
+    try { return sessionState(config); }
+    catch { return null; }
   }
 
   async startSxs(source, plan, target, operation) {
@@ -340,6 +429,7 @@ export class ManagedUpgrader {
 
   async activate(directory, journal) {
     const instance = loadInstance(directory, { verifyFiles: false });
+    this.requireReadSessionRecords(instance.config, journal);
     verifyRollbackState(instance, journal);
     verifySelection(journal.target);
     this.transition(directory, journal, 'selecting');
@@ -479,7 +569,7 @@ export class ManagedUpgrader {
       if (journal.phase === 'stopping') {
         await this.beforeStop(instance, journal);
         const stoppedProof = await stopInstance(instance, journal.quiescedInstanceId);
-        this.transition(instance.directory, journal, 'stopped', { stoppedProof });
+        this.transition(instance.directory, journal, 'stopped', { stoppedProof, sessionState: this.sessionRecords(instance.config) });
       }
       if (['stopped', 'selecting', 'selected', 'launching',
         'rollback-selecting', 'rollback-selected', 'rollback-launching'].includes(journal.phase)) {

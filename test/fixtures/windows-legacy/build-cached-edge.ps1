@@ -30,7 +30,7 @@ foreach ($name in @('LegacyNative.cs','LegacyProcessBroker.cs')) {
         $needle = "internal int Parent(SafeProcess process)`n    {"
         $replacement = $needle + "`n        var modeled = CachedEdgeCases.Current.Parent(process);`n        if (modeled.HasValue) return modeled.GetValueOrDefault();"
     } else {
-        $needle = "private List<int> Children(int parentId)`n    {"
+        $needle = "private List<int> Children(LegacySnapshot current, int parentId)`n    {"
         $replacement = $needle + "`n        var modeled = CachedEdgeCases.Current.Children(parentId);`n        if (modeled != null) return modeled;"
     }
     if ($text.Split(@($needle),[StringSplitOptions]::None).Length -ne 2) { throw 'Owned metadata injection point changed' }

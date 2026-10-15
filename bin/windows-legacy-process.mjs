@@ -6,6 +6,13 @@ import { fileURLToPath } from 'node:url';
 
 const HELPER = fileURLToPath(new URL('./windows-legacy/LegacyProcessBroker.exe', import.meta.url));
 const METADATA = fileURLToPath(new URL('./windows-legacy/LegacyProcessBroker.build.json', import.meta.url));
+// Each wait outlasts the broker's own limit. The broker may take 15 s to read a request,
+// then has a 120 s capture or verification phase, or a 120 s revalidation and a 20 s stop,
+// each with a 10 s watchdog margin. MESSAGE_BYTES equals the broker's request limit.
+const MESSAGE_BYTES = 262144;
+const PREPARE_TIMEOUT_MS = 150000;
+const VERIFY_TIMEOUT_MS = 150000;
+const STOP_TIMEOUT_MS = 170000;
 
 class LegacyBroker {
   constructor() {
@@ -62,7 +69,7 @@ class LegacyBroker {
     });
     this.child.stdout.on('data', (chunk) => {
       this.buffer += chunk;
-      if (this.buffer.length > 262144) {
+      if (this.buffer.length > MESSAGE_BYTES) {
         this.failure(new Error('Legacy broker response exceeded bounds'));
         this.child.kill();
         return;
@@ -128,7 +135,7 @@ class LegacyBroker {
 
   encode(value) {
     const bytes = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');
-    if (bytes.length > 262144) throw new Error('Legacy broker request exceeded bounds');
+    if (bytes.length > MESSAGE_BYTES) throw new Error('Legacy broker request exceeded bounds');
     return bytes;
   }
 
@@ -143,7 +150,7 @@ class LegacyBroker {
     this.encode(request);
     this.start();
     try {
-      const result = await this.request(request, 20000);
+      const result = await this.request(request, PREPARE_TIMEOUT_MS);
       const plan = result.plan;
       if (plan?.kind !== 'legacy-observed-process-set' ||
           plan.protocol !== 1 ||
@@ -183,7 +190,7 @@ class LegacyBroker {
     try {
       const response = await this.request({
         action: 'stop', token: this.token, planSha256: this.plan.planSha256,
-      }, 30000);
+      }, STOP_TIMEOUT_MS);
       const receipt = this.receipt(response.receipt);
       const exit = await this.finish();
       if (exit.code !== 0 ||
@@ -223,7 +230,7 @@ class LegacyBroker {
     this.encode({ action: 'verify', expected: plan });
     this.start();
     try {
-      const response = await this.request({ action: 'verify', expected: plan }, 20000);
+      const response = await this.request({ action: 'verify', expected: plan }, VERIFY_TIMEOUT_MS);
       const receipt = this.receipt(response.receipt);
       const exit = await this.finish();
       if (exit.code !== 0) throw new Error('Legacy verification broker exit failed');

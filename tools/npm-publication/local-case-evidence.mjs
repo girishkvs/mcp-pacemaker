@@ -6,7 +6,7 @@ import { CURRENT_REF, LEGACY_REF, checkLockfile } from '../compatibility/fixture
 import { verifyArtifacts } from '../third-party-notices/inventory.mjs';
 import { captureConsumerLicenseEvidence } from '../npm-consumer/license-evidence.mjs';
 import { inspectRuntimeLicenses } from './runtime-licenses.mjs';
-import { retainedDependencies, selectedTestFiles, testArguments, testTotals, uiTestArguments, nativeRestoreArguments, LOCAL_NATIVE_PATHS } from './local-gate.mjs';
+import { containedSelection, retainedDependencies, selectedTestFiles, sourceSuiteLabel, testArguments, testTotals, uiTestArguments, nativeRestoreArguments, LOCAL_NATIVE_PATHS } from './local-gate.mjs';
 import { validatePackage } from './policy.mjs';
 import { safeName, physical } from './local-inputs.mjs';
 import { treeEntries } from './local-source.mjs';
@@ -379,16 +379,19 @@ export class LocalCaseReplay {
       const selected = testArguments(this.pkg.scripts.test);
       assert.deepEqual(selectedTestFiles(selected).sort(), readdirSync(join(this.root, 'test'))
         .filter(name => name.endsWith('.test.mjs')).map(name => `test/${name}`).sort());
+      const { contained, deferred } = containedSelection(selected, this.version);
+      assert.deepEqual(this.gate.sessionDeferredTests ?? [], deferred,
+        'Recorded session deferral differs from the registered contract');
       if (this.gate.schemaVersion === 5) {
         const context = this.take('Verify user-runtime execution contract', 'C:\\node.exe',
-          ['tools/ci/run-tests.mjs', 'source', '--check'], cwd).toString('utf8');
-        assert.deepEqual(JSON.parse(context), { contract: 'source', platform: 'win32', role: 'user-runtime',
-          verified: true, sessionVerified: true });
+          ['tools/ci/run-tests.mjs', 'source-ordinary', '--check'], cwd).toString('utf8');
+        assert.deepEqual(JSON.parse(context), { contract: 'source-ordinary', platform: 'win32',
+          role: 'user-runtime', verified: true });
         const restored = this.take('Restore pinned native fixture toolchain', 'C:\\input\\pwsh\\pwsh.exe',
           nativeRestoreArguments(), cwd).toString('utf8');
         assert.deepEqual(JSON.parse(restored), LOCAL_NATIVE_PATHS);
       }
-      const sourceOutput = this.take('Complete source suite', 'C:\\node.exe', selected, cwd).toString('utf8');
+      const sourceOutput = this.take(sourceSuiteLabel(this.version), 'C:\\node.exe', contained, cwd).toString('utf8');
       assert.deepEqual(checks.sourceTests, testTotals(sourceOutput));
       if (this.gate.schemaVersion === 5) {
         assert.equal(releaseRole(this.version), 'current');

@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import net from 'node:net';
 import {
   LocalGate, localEnvironment, main, retainedDependencies, testArguments, testTotals,
-  SOURCE_SUITE_TIMEOUT_MS, uiTestArguments, validateContainment,
+  SOURCE_SUITE_TIMEOUT_MS, sourceSuiteLabel, uiTestArguments, validateContainment,
   nativeRestoreArguments, LOCAL_NATIVE_PATHS,
 } from '../../tools/npm-publication/local-gate.mjs';
 import { AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
@@ -407,9 +407,9 @@ for (const version of ['1.3.1', '2.0.1']) {
     gate.command = (label, executable, args, cwd, binary, timeout, environment) => {
       if (label === 'Verify user-runtime execution contract') {
         assert.equal(executable, process.execPath);
-        assert.deepEqual(args, ['tools/ci/run-tests.mjs', 'source', '--check']);
-        return JSON.stringify({ contract: 'source', platform: 'win32', role: 'user-runtime',
-          verified: true, sessionVerified: true });
+        assert.deepEqual(args, ['tools/ci/run-tests.mjs', 'source-ordinary', '--check']);
+        return JSON.stringify({ contract: 'source-ordinary', platform: 'win32', role: 'user-runtime',
+          verified: true });
       }
       if (label === 'Restore pinned native fixture toolchain') {
         restores++;
@@ -445,7 +445,7 @@ for (const version of ['1.3.1', '2.0.1']) {
     assert.equal(gate.env[AUDIT_MODE_VARIABLE], undefined);
     assert.equal(gate.env.TEMP, gate.env.HOME);
     const receipt = JSON.parse(readFileSync(join(gate.output, gate.steps[0].file)));
-    assert.equal(receipt.label, 'Complete source suite');
+    assert.equal(receipt.label, sourceSuiteLabel(version));
     assert.equal(receipt.executable, process.execPath);
     assert.deepEqual(receipt.args, ['-e', script]);
     assert.equal(receipt.cwd, gate.root);

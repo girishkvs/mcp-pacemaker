@@ -47,6 +47,13 @@ export async function executeAccountUpgrade(session) {
       const current = await session.repoint(binding.port, session.logical, binding.launcher);
       await session.enable(binding.port, current);
     },
+    // A refused drain resumed the current version with nothing stopped, so the task held for the
+    // upgrade is restored before the runtime journal settles.
+    afterRefusal: async () => {
+      if (taskRevision(session.logical) === taskRevision(session.original)) return;
+      try { await session.restore(binding.port, session.logical, session.original); }
+      catch (error) { throw new Error(`The original task could not be restored (${error.message}).`, { cause: error }); }
+    },
   });
   if (binding.recover) {
     const { instance, journal } = readRecoveryContext(binding.destination);

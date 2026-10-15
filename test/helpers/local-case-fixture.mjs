@@ -10,7 +10,7 @@ import { inspectTarball } from '../../tools/npm-publication/tarball.mjs';
 import { renderNotices, verifyArtifacts, sha256 } from '../../tools/third-party-notices/inventory.mjs';
 import { captureConsumerLicenseEvidence } from '../../tools/npm-consumer/license-evidence.mjs';
 import { inspectRuntimeLicenses } from '../../tools/npm-publication/runtime-licenses.mjs';
-import { retainedDependencies } from '../../tools/npm-publication/local-gate.mjs';
+import { retainedDependencies, sourceSuiteLabel, SOURCE_SUITE_TIMEOUT_MS } from '../../tools/npm-publication/local-gate.mjs';
 import { bindStageProofCheckout, STAGE_PROOF_FILES } from '../../tools/npm-publication/stage-proof-contract.mjs';
 import { stageProofFixture } from './stage-proof-fixture.mjs';
 import { lifetimeFixtureFiles } from './lifetime-package-fixture.mjs';
@@ -61,8 +61,9 @@ export class LocalCaseFixture {
   }
 
   command(label, args, cwd, stdout = '', binary = false, executable = 'C:\\publisher-node.exe') {
+    const budgets = { 'Contained source suite': SOURCE_SUITE_TIMEOUT_MS, 'Complete source suite': 1500000 };
     this.commands.push({ label, executable, args, cwd, elapsedMs: 1,
-      timeoutMs: label === 'Complete source suite' ? 1500000 : 900000,
+      timeoutMs: budgets[label] ?? 900000,
       exitCode: 0, signal: null, error: null, encoding: binary ? 'base64' : 'utf8',
       stdout: binary ? Buffer.from(stdout).toString('base64') : stdout, stderr: '' });
   }
@@ -253,7 +254,7 @@ export class LocalCaseFixture {
       this.command('Actual UI rebuild and notice comparison', ['tools/third-party-notices/check.mjs'], cwd);
       this.snapshot(cwd);
       if (autocrlf === 'true') continue;
-      this.command('Complete source suite', ['--test', '--test-reporter=tap', 'test/unit.test.mjs'], cwd, this.sourceTap, false, 'C:\\node.exe');
+      this.command(sourceSuiteLabel(this.version), ['--test', '--test-reporter=tap', 'test/unit.test.mjs'], cwd, this.sourceTap, false, 'C:\\node.exe');
       checks.sourceTests = { ...this.totals };
       this.command('UI typecheck', ['node_modules/typescript/bin/tsc', '--noEmit'], `${cwd}\\ui`);
       if (releaseRole(this.version) === 'current') {

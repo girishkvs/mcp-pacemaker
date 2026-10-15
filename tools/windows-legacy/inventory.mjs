@@ -18,7 +18,7 @@ export const LEGACY_BROKER_TEST = 'test/windows-legacy-process.test.mjs';
 export const LEGACY_BROKER_REQUIRED_TESTS = Object.freeze([
   'legacy API denials preserve refusal and bounded stored-only failure diagnostics',
   'legacy failure metadata cannot mask errors or cross concurrent operation identities',
-  'legacy cached selected-root creator-PID reuse skips only the older edge and retains strict refusals',
+  'legacy stop sweep stops descendants of held parents and skips reused-PID edges',
   'legacy protected-plan model enforces 512 combined identities and UTF8 byte bounds without process queries',
   'legacy expected request refuses oversized UTF8 framing before native discovery',
   ...['relative', 'drive-relative', 'root-relative'].flatMap((spelling) =>
@@ -28,19 +28,21 @@ export const LEGACY_BROKER_REQUIRED_TESTS = Object.freeze([
   'legacy script qualification recognizes drive and UNC forms without cwd resolution',
   'legacy script identity preserves fully qualified short-path handling',
   'legacy script identity does not equate a junction spelling with a different canonical root',
-  'legacy broker captures held roots and stops only its observed set with partial receipt',
+  'legacy broker plans only its roots and stops the processes they started',
+  'legacy broker stops a server the bridge ran through cmd.exe, which Node ends with the bridge',
+  'legacy broker refuses an upgrade started from inside the 1.3 tree without stopping anything',
   'legacy broker close is read-only and an identical expected plan can be reopened',
-  'legacy broker preserves an already-exited captured descendant without adopting a replacement PID',
-  'legacy broker rejects stale generation or expanded observed plan without stopping roots',
+  'legacy broker reopens its plan while sessions start and end, and stops the later ones',
+  'legacy broker rejects a stale root generation without stopping roots',
   'legacy broker rejects wrong root and malformed protected verification plan',
   'legacy broker refuses extra supervisor argv and a foreign listener without process mutation',
   'legacy read-only recovery does not stop an unrelated process reusing the endpoint',
   'legacy native inventory rejects changed executable, source and build metadata',
   'legacy prepare and recovery verify refuse wrong-hash packaged helper before any discovery',
   'legacy broker parent loss releases read-only capture without stopping legacy roots',
-  'legacy broker reports captured descendant termination failure without certifying stop',
+  'legacy broker reports a session process it could not stop and still verifies the root stop',
   'legacy broker preserves Unicode plan identity across fragmented UTF8 pipe messages',
-  'legacy broker excludes a proven older nonmember without terminating or verifying its exit',
+  'legacy broker sweep leaves an older process alive when it names a stopped root as parent',
 ]);
 
 export function verifyLegacyBrokerAssets(root) {

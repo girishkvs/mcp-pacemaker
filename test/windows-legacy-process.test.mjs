@@ -4,9 +4,9 @@ import { spawn, spawnSync, fork } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import http from 'node:http';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync, unlinkSync, constants } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, basename, parse, resolve } from 'node:path';
+import { delimiter, dirname, join, basename, parse, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifyLegacyBrokerAssets, LEGACY_BROKER_FILES } from '../tools/windows-legacy/inventory.mjs';
 import { CachedEdgeFixture } from './helpers/cached-edge-fixture.mjs';
@@ -15,9 +15,22 @@ import { LegacyFailureFixture } from './helpers/legacy-failure-fixture.mjs';
 const { prepareLegacyProcesses, verifyLegacyProcessesGone } = await import(process.env.MCP_LEGACY_TEST_MODULE
   ? pathToFileURL(process.env.MCP_LEGACY_TEST_MODULE).href : '../bin/windows-legacy-process.mjs');
 
+// The contained guest receives a whitelisted environment without ProgramFiles, so resolve the
+// interpreter from PATH the way every other pwsh call in this file already does. The supervisor
+// child keeps its own reduced PATH, so it needs the fully qualified image.
+function legacyShellPath() {
+  const directories = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  if (process.env.ProgramFiles) directories.push(join(process.env.ProgramFiles, 'PowerShell', '7'));
+  const shell = directories.map(directory => join(directory, 'pwsh.exe')).find(candidate => existsSync(candidate));
+  assert.ok(shell, 'pwsh.exe was not found on PATH or under ProgramFiles.');
+  return shell;
+}
+
 class LegacyFixture {
   constructor(t, prefix = 'mcp-legacy-owned-') {
-    this.directory = mkdtempSync(join(tmpdir(), prefix));
+    // The broker canonicalizes the root, so the supervisor argv must already be canonical;
+    // TEMP is a junction under the contained gate.
+    this.directory = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
     this.records = [];
     this.sessions = [];
     this.results = [];
@@ -35,7 +48,7 @@ class LegacyFixture {
     const args = ['-NoProfile', '-NonInteractive', '-File', script, '-ProcessId', String(pid)];
     if (creationTicks) args.push('-CreationTicks', creationTicks);
     if (stop) args.push('-StopOwned');
-    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const result = spawnSync('pwsh.exe', args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
@@ -52,6 +65,13 @@ class LegacyFixture {
   record(identity) {
     this.records.push(identity);
     writeFileSync(join(this.directory, 'identities.jsonl'), `${JSON.stringify(identity)}\n`, { flag: 'a' });
+  }
+
+  // Creation ticks recorded when the process was captured, so a later check cannot match a reused PID.
+  generation(pid) {
+    const record = this.records.find(item => item.pid === pid);
+    assert.ok(record, `Process ${pid} was not captured`);
+    return record.creationTicks;
   }
 
   // The supervisor is the one process captured immediately after spawn, so an instant death
@@ -76,8 +96,8 @@ class LegacyFixture {
       `scriptPath=${read(marker)}; spawned=${read(spawned)}; output=${this.output.slice(0, 600).trim()}`);
   }
 
-  async wait(check) {
-    const deadline = Date.now() + 10000;
+  async wait(check, milliseconds = 10000) {
+    const deadline = Date.now() + milliseconds;
     while (Date.now() < deadline) {
       const value = check();
       if (value) return value;
@@ -126,7 +146,7 @@ while ($watch.Elapsed.TotalSeconds -lt 45) {
     await new Promise((resolve) => listener.close(resolve));
     const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
       '-File', paths.supervisorArgument || join(this.directory, 'supervisor/supervise.ps1'), '-Port', String(this.port), ...extra];
-    this.supervisor = spawn(join(process.env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe'), args, {
+    this.supervisor = spawn(legacyShellPath(), args, {
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: this.directory,
       env: {
         SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, ComSpec: process.env.ComSpec,
@@ -178,6 +198,26 @@ while ($watch.Elapsed.TotalSeconds -lt 45) {
     this.capture(child.pid);
     await this.wait(() => existsSync(child.path));
     return child;
+  }
+
+  // A server started the 1.3 way: a cmd.exe wrapper that Node ends together with the bridge.
+  async wrappedChild() {
+    const response = await this.request('/spawn-wrapped');
+    const wrapper = response.children.at(-1);
+    this.capture(wrapper.pid);
+    await this.wait(() => existsSync(wrapper.path));
+    const worker = JSON.parse(readFileSync(wrapper.path, 'utf8'));
+    assert.equal(worker.parentPid, wrapper.pid, 'The worker runs under the cmd.exe wrapper.');
+    this.capture(worker.pid);
+    return { wrapper: wrapper.pid, worker: worker.pid };
+  }
+
+  async prepareFromInside(module) {
+    const response = await this.request(`/spawn-prepare?module=${encodeURIComponent(module)}&root=${encodeURIComponent(this.directory)}`);
+    const run = response.children.at(-1);
+    // The run exits by itself once it has written its result; a WMI query can take 8 s.
+    await this.wait(() => existsSync(run.path), 60000);
+    return JSON.parse(readFileSync(run.path, 'utf8'));
   }
 
   async prepare(expected, root = this.directory, prepare = prepareLegacyProcesses) {
@@ -275,23 +315,30 @@ test('legacy failure metadata cannot mask errors or cross concurrent operation i
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('legacy cached selected-root creator-PID reuse skips only the older edge and retains strict refusals', WINDOWS, async () => {
+test('legacy stop sweep stops descendants of held parents and skips reused-PID edges', WINDOWS, async () => {
   const evidence = await new CachedEdgeFixture().run();
   const cases = evidence.result.results;
-  assert.equal(cases.length, 8);
-  const root = cases.find(item => item.scenario === 'older-root');
-  assert.equal(root.finitePlan, true);
-  assert.equal(root.selectedCount, 3);
-  assert.equal(root.excludedRoot, false);
-  assert.equal(root.rootParentBirthUnchanged, true);
-  assert.equal(root.revalidationSkippedOnlyEdge, true);
-  assert.equal(root.stopped.legacyRootStopVerified, true);
-  assert.equal(root.stopped.observedDescendantsStopped, true);
-  for (const item of cases.filter(item => item.scenario !== 'older-root')) assert.ok(item.refused);
-  const depth = cases.find(item => item.scenario === 'actual-eight-edge-chain');
-  assert.equal(depth.modeledParentMetadata, false);
-  assert.equal(depth.ownedGenerations, 9);
-  assert.equal(depth.refused, 'Depth bound');
+  assert.equal(cases.length, 4);
+  const scenario = name => cases.find(item => item.scenario === name);
+  for (const item of cases) {
+    assert.equal(item.stopped.legacyRootStopVerified, true, item.scenario);
+    assert.equal(item.stopped.observedDescendantsStopped, true, item.scenario);
+    assert.deepEqual(item.stopped.errors, [], item.scenario);
+  }
+  const reusedRoot = scenario('older-root');
+  assert.equal(reusedRoot.rootsStopped, true);
+  assert.equal(reusedRoot.stopped.descendantsFound, 1, 'A descendant naming the supervisor as its child is stopped once.');
+  assert.equal(reusedRoot.stopped.descendantsStopped, 1);
+  for (const name of ['older-nonmember', 'changed-parent']) {
+    assert.equal(scenario(name).stopped.descendantsFound, 0, name);
+    assert.equal(scenario(name).untouchedAlive, true, `${name} is not adopted or stopped`);
+  }
+  const chain = scenario('actual-nine-generation-chain');
+  assert.equal(chain.modeledParentMetadata, false);
+  assert.equal(chain.generations, 9);
+  assert.equal(chain.generationsStopped, 9);
+  assert.ok(chain.stopped.descendantsFound >= 7);
+  assert.equal(chain.stopped.descendantsStopped, chain.stopped.descendantsFound);
 });
 
 test('legacy protected-plan model enforces 512 combined identities and UTF8 byte bounds without process queries', WINDOWS, t => {
@@ -467,29 +514,59 @@ test('legacy script identity does not equate a junction spelling with a differen
   assert.equal((await fixture.request('/')).pid, status.pid);
 });
 
-test('legacy broker captures held roots and stops only its observed set with partial receipt', WINDOWS, async (t) => {
+test('legacy broker plans only its roots and stops the processes they started', WINDOWS, async (t) => {
   const fixture = await new LegacyFixture(t).start();
   const child = await fixture.child();
   const session = await fixture.prepare();
   const plan = session.plan;
   assert.equal(plan.treeCompleteness, 'unproven');
-  assert.ok(plan.observed.some((identity) => identity.pid === child.pid));
-  assert.equal((await session.status()).legacyRootStopVerified, false);
-  const before = await verifyLegacyProcessesGone(plan);
+  assert.deepEqual(plan.observed, []);
+  assert.deepEqual(plan.excluded, []);
+  const before = await session.status();
   assert.equal(before.legacyRootStopVerified, false);
+  assert.equal(before.observedDescendantsStopped, false);
+  assert.equal((await verifyLegacyProcessesGone(plan)).legacyRootStopVerified, false);
   const result = await session.stop();
   fixture.results.push(result);
   assert.equal(result.legacyRootStopVerified, true);
   assert.equal(result.observedDescendantsStopped, true);
+  assert.ok(result.descendantsFound >= 1);
+  assert.equal(result.descendantsStopped, result.descendantsFound);
   assert.equal(result.treeCompleteness, 'unproven');
   assert.deepEqual(result.errors, []);
   assert.equal(Object.hasOwn(result, 'stopped'), false);
   assert.equal(Object.hasOwn(result, 'activeProcesses'), false);
+  assert.equal(fixture.identity(child.pid, fixture.generation(child.pid)).gone, true, 'The process the bridge started is stopped.');
   const after = await verifyLegacyProcessesGone(plan);
   fixture.results.push(after);
   assert.equal(after.legacyRootStopVerified, true);
-  assert.equal(after.observedDescendantsStopped, true);
+  assert.equal(after.observedDescendantsStopped, false, 'A roots-only plan cannot vouch for descendants.');
+  assert.equal(after.descendantsFound, null);
   await assert.rejects(session.stop(), /consumed/);
+});
+
+test('legacy broker stops a server the bridge ran through cmd.exe, which Node ends with the bridge', WINDOWS, async (t) => {
+  const fixture = await new LegacyFixture(t).start();
+  const { wrapper, worker } = await fixture.wrappedChild();
+  const session = await fixture.prepare();
+  const result = await session.stop();
+  fixture.results.push(result);
+  assert.equal(result.legacyRootStopVerified, true);
+  assert.equal(result.observedDescendantsStopped, true);
+  assert.deepEqual(result.errors, []);
+  assert.equal(fixture.identity(wrapper, fixture.generation(wrapper)).gone, true);
+  assert.equal(fixture.identity(worker, fixture.generation(worker)).gone, true, 'The server under the wrapper is stopped, not orphaned.');
+});
+
+test('legacy broker refuses an upgrade started from inside the 1.3 tree without stopping anything', WINDOWS, async (t) => {
+  const fixture = await new LegacyFixture(t).start();
+  const module = process.env.MCP_LEGACY_TEST_MODULE ?? fileURLToPath(new URL('../bin/windows-legacy-process.mjs', import.meta.url));
+  const result = await fixture.prepareFromInside(module);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'Run the upgrade from a terminal the 1.3 bridge did not start');
+  assert.equal((await fixture.request('/')).fixture, 'owned-legacy-broker');
+  const session = await fixture.prepare();
+  fixture.results.push(await session.stop());
 });
 
 test('legacy broker close is read-only and an identical expected plan can be reopened', WINDOWS, async (t) => {
@@ -505,23 +582,29 @@ test('legacy broker close is read-only and an identical expected plan can be reo
   assert.equal(result.legacyRootStopVerified, true);
 });
 
-test('legacy broker preserves an already-exited captured descendant without adopting a replacement PID', WINDOWS, async t => {
+test('legacy broker reopens its plan while sessions start and end, and stops the later ones', WINDOWS, async (t) => {
   const fixture = await new LegacyFixture(t).start();
-  const child = await fixture.child();
-  const session = await fixture.prepare();
-  const identity = session.plan.observed.find(value => value.pid === child.pid);
-  assert.ok(identity);
-  const ticks = String(BigInt(identity.creationTime) + 504911232000000000n);
-  assert.equal(fixture.identity(identity.pid, ticks, true).gone, true);
-  const receipt = await session.stop();
-  fixture.results.push(receipt);
-  assert.equal(receipt.legacyRootStopVerified, true);
-  assert.equal(receipt.observedDescendantsStopped, true);
-  assert.deepEqual(receipt.errors, []);
-  assert.equal(receipt.treeCompleteness, 'unproven');
+  const early = await fixture.child();
+  const first = await fixture.prepare();
+  const plan = structuredClone(first.plan);
+  await first.close();
+  // Between confirmation and stop one session ends and others start.
+  assert.equal(fixture.identity(early.pid, fixture.generation(early.pid), true).gone, true);
+  const late = await fixture.child();
+  const second = await fixture.prepare(plan);
+  assert.deepEqual(second.plan, plan);
+  const later = await fixture.child();
+  const result = await second.stop();
+  fixture.results.push(result);
+  assert.equal(result.legacyRootStopVerified, true);
+  assert.equal(result.observedDescendantsStopped, true);
+  assert.deepEqual(result.errors, []);
+  for (const child of [late, later]) {
+    assert.equal(fixture.identity(child.pid, fixture.generation(child.pid)).gone, true, `Session process ${child.pid} is stopped`);
+  }
 });
 
-test('legacy broker rejects stale generation or expanded observed plan without stopping roots', WINDOWS, async (t) => {
+test('legacy broker rejects a stale root generation without stopping roots', WINDOWS, async (t) => {
   const fixture = await new LegacyFixture(t).start();
   const first = await fixture.prepare();
   const stale = structuredClone(first.plan);
@@ -530,10 +613,6 @@ test('legacy broker rejects stale generation or expanded observed plan without s
   stale.planSha256 = null;
   stale.planSha256 = createHash('sha256').update(JSON.stringify(stale)).digest('hex');
   await assert.rejects(fixture.prepare(stale), (error) => error.detail?.stage === 'plan');
-  assert.equal((await fixture.request('/')).pid, first.plan.roots.bridge.pid);
-  const second = await fixture.prepare();
-  await fixture.child();
-  await assert.rejects(second.stop(), (error) => error.detail?.stage === 'revalidate');
   assert.equal((await fixture.request('/')).pid, first.plan.roots.bridge.pid);
 });
 
@@ -577,7 +656,7 @@ test('legacy read-only recovery does not stop an unrelated process reusing the e
     const result = await verifyLegacyProcessesGone(session.plan);
     fixture.results.push(result);
     assert.equal(result.legacyRootStopVerified, true);
-    assert.equal(result.observedDescendantsStopped, true);
+    assert.equal(result.observedDescendantsStopped, false, 'A roots-only plan cannot vouch for descendants.');
     assert.equal(server.listening, true);
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
@@ -642,7 +721,7 @@ test('legacy broker parent loss releases read-only capture without stopping lega
   await fixture.prepare();
 });
 
-test('legacy broker reports captured descendant termination failure without certifying stop', WINDOWS, async (t) => {
+test('legacy broker reports a session process it could not stop and still verifies the root stop', WINDOWS, async (t) => {
   const variant = mkdtempSync(join(tmpdir(), 'mcp-legacy-stop-fault-'));
   const fixture = new LegacyFixture(t);
   t.after(() => rmSync(variant, { recursive: true }));
@@ -660,10 +739,12 @@ test('legacy broker reports captured descendant termination failure without cert
   fixture.results.push(result);
   assert.equal(result.legacyRootStopVerified, true);
   assert.equal(result.observedDescendantsStopped, false);
+  assert.ok(result.descendantsFound >= 1);
+  assert.ok(result.descendantsStopped < result.descendantsFound);
   assert.equal(result.treeCompleteness, 'unproven');
   assert.ok(result.errors.length > 0);
-  assert.equal(fixture.identity(child.pid).gone, false, 'Fault leaves the captured worker alive until owned cleanup');
-  assert.equal((await verifyLegacyProcessesGone(session.plan)).observedDescendantsStopped, false);
+  assert.equal(fixture.identity(child.pid).gone, false, 'Fault leaves the session process alive until owned cleanup');
+  assert.equal((await verifyLegacyProcessesGone(session.plan)).legacyRootStopVerified, true);
 });
 
 test('legacy broker preserves Unicode plan identity across fragmented UTF8 pipe messages', WINDOWS, async (t) => {
@@ -685,7 +766,7 @@ test('legacy broker preserves Unicode plan identity across fragmented UTF8 pipe 
   assert.equal((await fixture.request('/')).pid, session.plan.roots.bridge.pid);
 });
 
-test('legacy broker excludes a proven older nonmember without terminating or verifying its exit', WINDOWS, async (t) => {
+test('legacy broker sweep leaves an older process alive when it names a stopped root as parent', WINDOWS, async (t) => {
   const variant = mkdtempSync(join(tmpdir(), 'mcp-legacy-older-'));
   const fixture = new LegacyFixture(t);
   t.after(() => rmSync(variant, { recursive: true }));
@@ -708,19 +789,15 @@ test('legacy broker excludes a proven older nonmember without terminating or ver
     // Only discovery metadata is fault-injected to model the observed reused-parent
     // case. The older control's process handle, birth and continued liveness are real.
     const session = await fixture.prepare(undefined, fixture.directory, api.prepareLegacyProcesses);
-    const excluded = session.plan.excluded.find((item) => item.pid === control.pid);
-    assert.equal(excluded.reason, 'predates-held-parent');
-    assert.equal(excluded.creationTime, identity.creationFileTime);
-    assert.equal(session.plan.observed.some((item) => item.pid === control.pid), false);
+    assert.deepEqual(session.plan.excluded, []);
     const result = await session.stop();
     fixture.results.push(result);
     assert.equal(result.legacyRootStopVerified, true);
     assert.equal(result.observedDescendantsStopped, true);
-    assert.ok(result.excludedCount >= 1);
+    assert.deepEqual(result.errors, []);
     assert.equal(fixture.identity(control.pid, identity.creationTicks).gone, false);
     const recovered = await verifyLegacyProcessesGone(session.plan);
     assert.equal(recovered.legacyRootStopVerified, true);
-    assert.equal(recovered.observedDescendantsStopped, true);
     assert.equal(fixture.identity(control.pid, identity.creationTicks).gone, false);
   } finally {
     keys.forEach((key, index) => {

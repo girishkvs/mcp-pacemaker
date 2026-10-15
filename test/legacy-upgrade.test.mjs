@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, cpSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { request, createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { backendStatus } from '../bin/managed-runtime.mjs';
 import { readManagedJson } from '../bin/managed-state.mjs';
 import { describeUpgrade, discoverInstances, ManagedUpgrader } from '../bin/managed-upgrade.mjs';
@@ -202,45 +202,50 @@ async function ownedRequest(port, path, body) {
   });
 }
 
-test('legacy acknowledgement is interactive, exact-plan scoped and never implied by --yes', async () => {
+test('legacy confirmation is exact-plan scoped and --yes confirms the plan shown', async () => {
   const plan = { to: '2.0.3', registry: 'https://owned.invalid/', instance: { id: 'owned' }, legacy: { protocol: 1 } };
   let prompts = 0;
   const confirm = async () => { prompts++; return true; };
-  await assert.rejects(confirmLegacyUpgrade(plan, { yes: true, interactive: true, confirm }), /interactive acknowledgement/);
-  await assert.rejects(confirmLegacyUpgrade(plan, { interactive: false, confirm }), /interactive acknowledgement/);
+  await assert.rejects(confirmLegacyUpgrade(plan, { interactive: false, confirm }), /needs confirmation/);
   assert.equal(prompts, 0);
   assert.equal(await confirmLegacyUpgrade(plan, { interactive: true, confirm: async () => false }), false);
   await assert.rejects(confirmLegacyUpgrade(plan, {
     interactive: true, confirm: async () => { plan.to = '2.0.4'; return true; },
   }), /changed during confirmation/);
-  assert.match(LEGACY_WARNING, /Pause its callers/);
-  assert.match(LEGACY_WARNING, /Historical orphan coverage remains unproven/);
+  assert.equal(await confirmLegacyUpgrade(plan, { yes: true, interactive: false, confirm }), true);
+  assert.equal(prompts, 0, '--yes does not prompt.');
+  assert.match(LEGACY_WARNING, /Open sessions and calls in progress end/);
+  assert.match(LEGACY_WARNING, /servers\.json, every server setting in it and your client setup are kept/);
 });
 
-test('legacy partial receipts cannot be replaced by modern complete-tree-shaped proof', () => {
+test('legacy stop receipts need a verified root stop and cannot be replaced by modern complete-tree proof', () => {
   const upgrader = new LegacyUpgrader();
   for (const receipt of [
     { stopped: true, activeProcesses: 0 },
-    { legacyRootStopVerified: true, observedDescendantsStopped: false, treeCompleteness: 'unproven', errors: [] },
+    { legacyRootStopVerified: false, observedDescendantsStopped: true, treeCompleteness: 'unproven', errors: [] },
     { legacyRootStopVerified: true, observedDescendantsStopped: true, treeCompleteness: 'complete', errors: [] },
     { legacyRootStopVerified: true, observedDescendantsStopped: true, treeCompleteness: 'unproven', errors: [], activeProcesses: 0 },
-  ]) assert.throws(() => upgrader.assertPartialStop(receipt), /incomplete/);
+  ]) assert.throws(() => upgrader.assertPartialStop(receipt), /not verified/);
   upgrader.assertPartialStop({
     legacyRootStopVerified: true, observedDescendantsStopped: true, treeCompleteness: 'unproven', errors: [],
   });
+  upgrader.assertPartialStop({
+    legacyRootStopVerified: true, observedDescendantsStopped: false, treeCompleteness: 'unproven', errors: ['4242:Win32Exception:5'],
+  });
 });
 
-test('exact retained 1.3 read-only plan and --yes refusal leave service, config, task and CLI unchanged', windows, async () => {
+test('exact retained 1.3 read-only plan and an unconfirmed execute leave service, config, task and CLI unchanged', windows, async () => {
   const fixture = new LegacyUpgradeFixture();
   try {
     const old = await fixture.start();
     const cli = readFileSync(join(fixture.root, 'bin', 'cli.mjs'));
     const plan = await fixture.plan();
-    assert.match(describeUpgrade(plan), /cannot drain or certify every in-flight HTTP/);
+    assert.match(describeUpgrade(plan), /Open sessions and calls in progress end/);
     assert.equal(plan.legacy.processes.treeCompleteness, 'unproven');
+    assert.deepEqual(plan.legacy.processes.observed, []);
     assert.equal(existsSync(plan.instance.directory), false);
-    await assert.rejects(confirmLegacyUpgrade(plan, { yes: true, interactive: true }), /without --yes/);
-    await assert.rejects(fixture.upgrader().execute(plan), /no matching interactive acknowledgement/);
+    await assert.rejects(confirmLegacyUpgrade(plan, { interactive: false }), /needs confirmation/);
+    await assert.rejects(fixture.upgrader().execute(plan), /no matching confirmation/);
     assert.deepEqual(fixture.task.inspect(), [fixture.originalTask]);
     assert.deepEqual(readFileSync(fixture.config), fixture.originalConfig);
     assert.deepEqual(readFileSync(join(fixture.root, 'bin', 'cli.mjs')), cli);
@@ -260,8 +265,10 @@ test('restart-only legacy migration selects new backend and actual old shim on t
     assert.equal(result.port, fixture.port);
     assert.equal(result.legacyStop.legacyRootStopVerified, true);
     assert.equal(result.legacyStop.observedDescendantsStopped, true);
+    assert.equal(result.legacyStop.descendantsStopped, result.legacyStop.descendantsFound);
     assert.equal(result.legacyStop.treeCompleteness, 'unproven');
     assert.equal('activeProcesses' in result.legacyStop, false);
+    assert.match(result.warning, /sessions and calls in progress were ended/);
     const status = await backendStatus(fixture.port);
     assert.equal(status.version, '2.0.3');
     assert.notEqual(status.instanceId, old.instanceId);
@@ -270,7 +277,137 @@ test('restart-only legacy migration selects new backend and actual old shim on t
     assert.deepEqual(readFileSync(join(fixture.home, 'state.json')), fixture.originalState);
     assert.equal(readManagedJson(join(result.directory, 'journal.json')).phase, 'committed');
     assert.deepEqual(fixture.task.read().actions, ['fixture-registered', 'hold', 'repoint', 'enable']);
-    await assert.rejects(fixture.upgrader().execute(plan), /no matching interactive acknowledgement/);
+    await assert.rejects(fixture.upgrader().execute(plan), /no matching confirmation/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a busy 1.3 bridge is upgraded while its sessions start and end, and the config is kept', windows, async () => {
+  const fixture = new LegacyUpgradeFixture();
+  let churning = true;
+  let sessionsStarted = 0;
+  const lanes = [];
+  try {
+    await fixture.start({
+      echo: { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/echo-mcp-server.mjs', import.meta.url))] },
+    });
+    const endpoint = `http://127.0.0.1:${fixture.port}/echo/mcp`;
+    // Each round trip makes 1.3 start a session process and rewrite sessions.json twice.
+    const lane = async () => {
+      while (churning) {
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+              params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'owned', version: '1' } } }),
+          });
+          await response.text();
+          const session = response.headers.get('mcp-session-id');
+          if (session) {
+            sessionsStarted++;
+            await fetch(endpoint, { method: 'DELETE', headers: { 'mcp-session-id': session } });
+          }
+        } catch { await new Promise(resolveWait => setTimeout(resolveWait, 50)); }
+      }
+    };
+    for (let index = 0; index < 3; index++) lanes.push(lane());
+    const plan = await fixture.plan();
+    await fixture.approve(plan);
+    const before = sessionsStarted;
+    const result = await fixture.upgrader().execute(plan);
+    assert.equal(result.status, 'upgraded');
+    assert.ok(sessionsStarted > before, 'Sessions kept starting and ending during the upgrade.');
+    assert.equal(result.legacyStop.legacyRootStopVerified, true);
+    assert.equal((await backendStatus(fixture.port)).version, '2.0.3');
+    assert.deepEqual(readFileSync(fixture.config), fixture.originalConfig);
+  } finally {
+    churning = false;
+    await Promise.all(lanes);
+    await fixture.cleanup();
+  }
+});
+
+test('1.3 session records too large to inspect never strand an upgrade after the stop', windows, async () => {
+  const fixture = new LegacyUpgradeFixture();
+  try {
+    const old = await fixture.start();
+    // Resumable records for servers no longer configured; together over the 1 MiB inspection limit.
+    const records = Object.fromEntries(Array.from({ length: 9000 }, () => [randomUUID(), {
+      server: 'retired', initialize: { protocolVersion: '2025-06-18', clientInfo: { name: 'client', version: '1.0.0' } },
+      at: Date.now(),
+    }]));
+    writeFileSync(join(dirname(fixture.config), 'sessions.json'), JSON.stringify(records));
+    // A target that still compares the records when it starts refuses before anything stops.
+    const refused = await fixture.plan();
+    await fixture.approve(refused);
+    await assert.rejects(fixture.upgrader().execute(refused), /over 1 MiB[\s\S]*Nothing was stopped/);
+    assert.equal((await backendStatus(fixture.port)).instanceId, old.instanceId);
+    assert.deepEqual(fixture.task.inspect(), [fixture.originalTask]);
+    // A target that ignores them reads them only after the stop, and only for the journal.
+    const plan = await fixture.plan({ to: '2.1.2' });
+    await fixture.approve(plan);
+    const result = await fixture.upgrader(fixture.artifact(undefined, '2.1.2')).execute(plan);
+    assert.equal(result.status, 'upgraded');
+    const journal = readManagedJson(join(result.directory, 'journal.json'));
+    assert.equal(journal.phase, 'committed');
+    assert.equal(journal.sessionState, null);
+    assert.equal(journal.legacy.sessions, null);
+    assert.equal((await backendStatus(fixture.port)).version, '2.1.2');
+    assert.deepEqual(readFileSync(fixture.config), fixture.originalConfig);
+  } finally { await fixture.cleanup(); }
+});
+
+test('1.3 session records unreadable after the stop restart 1.3 for a target that compares them', windows, async () => {
+  const fixture = new LegacyUpgradeFixture();
+  try {
+    const old = await fixture.start();
+    const plan = await fixture.plan();
+    await fixture.approve(plan);
+    let grown = false;
+    // The records grow past what can be read only after the size check, just before the stop.
+    const upgrader = fixture.upgrader(undefined, { checkpoint: phase => {
+      if (phase !== 'legacy-stopping' ||
+          grown) return;
+      grown = true;
+      writeFileSync(join(dirname(fixture.config), 'sessions.json'), JSON.stringify({ padding: 'x'.repeat(1024 * 1024) }));
+    } });
+    await assert.rejects(upgrader.execute(plan), /could not be read after the old version stopped/);
+    assert.equal(readManagedJson(join(plan.instance.directory, 'journal.json')).phase, 'legacy-rolled-back');
+    const status = await backendStatus(fixture.port);
+    assert.equal(status.version, '1.3.0');
+    assert.notEqual(status.instanceId, old.instanceId);
+    assert.equal(discoverInstances(fixture.home).length, 0);
+    assert.deepEqual(readFileSync(fixture.config), fixture.originalConfig);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a server 1.3 runs through cmd.exe is stopped with the bridge instead of being left running', windows, async () => {
+  const fixture = new LegacyUpgradeFixture();
+  const heartbeat = join(fixture.directory, 'stubborn.heartbeat');
+  try {
+    // A bare command makes 1.3 start the server under cmd.exe, which Node ends with the bridge.
+    // This server ignores its closed input, as many real servers do.
+    await fixture.start({
+      stubborn: { command: 'node', args: [fileURLToPath(new URL('./fixtures/stubborn-mcp-server.mjs', import.meta.url)), '--heartbeat', heartbeat] },
+    });
+    const response = await fetch(`http://127.0.0.1:${fixture.port}/stubborn/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'owned', version: '1' } } }),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(existsSync(heartbeat), true);
+    const plan = await fixture.plan();
+    await fixture.approve(plan);
+    const result = await fixture.upgrader().execute(plan);
+    assert.equal(result.status, 'upgraded');
+    assert.equal(result.legacyStop.observedDescendantsStopped, true);
+    assert.ok(result.legacyStop.descendantsFound >= 2, 'The cmd.exe wrapper and the server under it were found.');
+    const beat = readFileSync(heartbeat, 'utf8');
+    await new Promise(resolveWait => setTimeout(resolveWait, 1000));
+    assert.equal(readFileSync(heartbeat, 'utf8'), beat, 'The server under the cmd.exe wrapper no longer runs.');
   } finally { await fixture.cleanup(); }
 });
 
@@ -331,7 +468,7 @@ test('known target startup failure restores legacy task, code, backend and old s
   } finally { await fixture.cleanup(); }
 });
 
-test('known observed-child stop failure retains the task hold and never starts the target', windows, async () => {
+test('unverified root stop retains the task hold and never starts the target', windows, async () => {
   const fixture = new LegacyUpgradeFixture();
   try {
     const old = await fixture.start();
@@ -351,14 +488,41 @@ test('known observed-child stop failure retains the task hold and never starts t
         };
       },
     };
-    await assert.rejects(fixture.upgrader(undefined, { legacy: { task: fixture.task, processes } }).execute(plan), /incomplete/);
+    await assert.rejects(fixture.upgrader(undefined, { legacy: { task: fixture.task, processes } }).execute(plan), /not verified/);
     const journal = readManagedJson(join(plan.instance.directory, 'journal.json'));
     assert.equal(journal.phase, 'legacy-stopping');
     assert.equal(journal.legacyStop.observedDescendantsStopped, false);
     assert.equal(fixture.task.inspect()[0].enabled, false);
     assert.equal((await backendStatus(fixture.port)).instanceId, old.instanceId);
     assert.equal(await fixture.cliVersion(), '1.3.0');
-    await assert.rejects(fixture.upgrader().recover(plan.instance.directory), /incomplete/);
+    await assert.rejects(fixture.upgrader().recover(plan.instance.directory), /not verified/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a process the 1.3 bridge started that could not be stopped is reported and does not block activation', windows, async () => {
+  const fixture = new LegacyUpgradeFixture();
+  try {
+    await fixture.start();
+    const plan = await fixture.plan();
+    await fixture.approve(plan);
+    const api = await import('../bin/windows-legacy-process.mjs');
+    const processes = {
+      ...api,
+      prepareLegacyProcesses: async options => {
+        const session = await api.prepareLegacyProcesses(options);
+        return {
+          ...session,
+          // The real stop runs; only its descendant outcome is replaced.
+          stop: async () => ({ ...(await session.stop()), observedDescendantsStopped: false, errors: ['4242:Win32Exception:5'] }),
+        };
+      },
+    };
+    const result = await fixture.upgrader(undefined, { legacy: { task: fixture.task, processes } }).execute(plan);
+    assert.equal(result.status, 'upgraded');
+    assert.equal(result.legacyStop.legacyRootStopVerified, true);
+    assert.equal(result.legacyStop.observedDescendantsStopped, false);
+    assert.match(result.warning, /Not every process the 1\.3 bridge started could be confirmed stopped/);
+    assert.deepEqual(readFileSync(fixture.config), fixture.originalConfig);
   } finally { await fixture.cleanup(); }
 });
 
@@ -446,7 +610,7 @@ test('HTTP work with zero legacy sessions is interrupted once and never replayed
     assert.equal(result.status, 'upgraded');
     await pending;
     assert.equal(calls, 1, 'Migration must not replay the unknown HTTP outcome.');
-    assert.match(result.warning, /not certified or replayed/);
+    assert.match(result.warning, /No call was retried/);
   } finally {
     for (const socket of sockets) socket.destroy();
     if (upstream.listening) await new Promise(resolveClose => upstream.close(resolveClose));
@@ -454,7 +618,7 @@ test('HTTP work with zero legacy sessions is interrupted once and never replayed
   }
 });
 
-test('unattributed historical orphan stays alive and is reported without blocking restart', windows, async () => {
+test('an orphan whose parent already exited stays alive and does not block restart', windows, async () => {
   const fixture = new LegacyUpgradeFixture();
   const identityPath = join(fixture.directory, 'old-orphan.json');
   let identity;
@@ -480,7 +644,7 @@ test('unattributed historical orphan stays alive and is reported without blockin
     const result = await fixture.upgrader().execute(plan);
     assert.equal(result.status, 'upgraded');
     assert.equal(result.legacyStop.treeCompleteness, 'unproven');
-    assert.match(result.warning, /unattributed processes were left untouched/);
+    assert.match(result.warning, /sessions and calls in progress were ended/);
     assert.equal(alive().gone, false);
     const cleaned = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-File', probe,
       '-ProcessId', String(identity.pid), '-CreationTicks', identity.creationTicks, '-StopOwned'], {
@@ -543,7 +707,7 @@ for (const phase of [
         assert.equal(recovered.status, 'rolled-back');
         assert.equal(await fixture.cliVersion(), '1.3.0');
       } else {
-        await assert.rejects(fixture.upgrader().recover(plan.instance.directory), /incomplete|record|uncertain|ENOENT/);
+        await assert.rejects(fixture.upgrader().recover(plan.instance.directory), /not verified|record|uncertain|ENOENT/);
         assert.equal(readManagedJson(join(plan.instance.directory, 'journal.json')).phase, expectedPhase);
       }
     } finally { await fixture.cleanup(); }

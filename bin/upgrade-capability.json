@@ -4,5 +4,6 @@
   "admission": true,
   "cli": true,
   "legacyRestartProtocol": 1,
-  "accountWorkerProtocol": 1
+  "accountWorkerProtocol": 1,
+  "dependencyLock": 1
 }

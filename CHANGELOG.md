@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-15
+
+### Added
+
+- `upgrade --fix-legacy-access` is a one-time step for a Windows 1.3 install that was set up from
+  an administrator terminal. Run it from an administrator terminal. It gives the task's own
+  run-as user full control of that 1.3 task and makes that user the owner of the 1.3
+  `bin\cli.mjs`, and it records the previous permissions in
+  `legacy-upgrade\access-<time>.json` first. Nothing else changes: the task XML, triggers,
+  run-as account and run level, the other permission entries and the file contents stay the
+  same and are checked afterwards. `--plan` shows the change without making it.
+- The Windows release qualification can resume after a failed or killed run with
+  `--resume RUN_DIRECTORY`. Each run records its inputs, controller, Docker engine, Windows
+  build and passed steps in `run-state.json`. A resume refuses any change to those or to the
+  kept evidence, sets the failed attempt aside next to the run and reruns only the steps that
+  did not pass. The offline verifier checks the recorded history; the published regression
+  statement is unchanged.
+
+### Fixed
+
+- Upgrading a Windows 1.3 install that was set up from an administrator terminal no longer fails
+  part-way. Windows makes Administrators the owner of that task and lets your account only read
+  it, and makes Administrators the owner of the files, so the upgrade, which must run as an
+  ordinary user, was refused while copying the CLI file and would then have failed while holding
+  the task. Planning now checks these permissions first and stops before any process capture,
+  download or change. It names each item and the fix. Installs set up from a normal terminal
+  are unaffected.
+- `upgrade --to` from an elevated terminal is now refused before planning and before any
+  confirmation prompt, with the normal-terminal next step. It used to ask for the restart
+  confirmation first and refuse afterwards.
+- Managed upgrades no longer fail behind npm mirrors that publish only SHA-1 checksums, such as
+  some Azure Artifacts upstreams. Each release now carries the SHA-512 dependency lock it was
+  released and tested with (`bin/dependency-lock.json`, declared by `dependencyLock` in
+  `bin/upgrade-capability.json`), and staging installs exactly that lock with `npm ci` through
+  your configured registry, including when `replace-registry-host` is `never`.
+  Staged dependencies no longer move to newer in-range versions at upgrade time. Targets without
+  the lock keep the old resolution, and an entry without SHA-512 integrity now names the package.
+- The Windows legacy process broker now waits up to eight seconds instead of two for each WMI
+  command-line query, and reports the first real failure instead of a generic
+  `Argument query cancelled`. A WMI timeout is reported as `Argument query timed out`. On a busy
+  host with about 1,000 processes the two-second limit made legacy planning fail.
+- `reload` no longer reports a slow bridge as `bridge DOWN`. The bridge may spend its whole
+  pooling budget settling a pending batch before it answers, but the CLI gave up after five
+  seconds. It now waits past that budget and reports a late answer as a timeout. Status
+  checks wait ten seconds instead of two before treating a bridge as down. A refused
+  connection still fails at once.
+- Upgrading a busy Windows 1.3 install no longer fails. The legacy process broker put every
+  process under the 1.3 bridge into the plan and refused when that list changed, but a busy
+  bridge starts and ends a session process every few seconds. It also refused any install
+  with more than 512 such processes (one had 533), and the upgrade refused whenever 1.3
+  rewrote `sessions.json`, which it does on every session start and end. The plan now holds
+  only the supervisor and the bridge. The stop ends the supervisor, holds a handle to every
+  process under the bridge, ends the bridge, and then stops everything it holds plus anything
+  those processes started, up to 2048 processes. Holding them first matters: Node ends a
+  process's direct children with it, and 1.3 runs each bare server command under `cmd.exe`,
+  so ending the bridge first would have left those servers running with no traceable parent.
+  A process it cannot stop is reported and left running instead of blocking the upgrade.
+  Capture and revalidation also get 120 seconds from the request instead of 14 to 15 seconds
+  from the broker's start, which a loaded host could use up before the capture began.
+- A 1.3 upgrade started from inside the 1.3 tree, for example through an MCP server's shell,
+  is now refused before anything changes. It would have stopped itself part-way.
+- A managed upgrade no longer refuses because a client is connected. The bridge counted every
+  open session as active work and refused after eight seconds, and once any client had dropped
+  a stream it refused every later upgrade until it restarted. Each refusal also left the bridge
+  answering 503 until `upgrade --recover`. Now calls in progress and config work get up to
+  eight seconds to finish, and open sessions and calls still running end with the restart.
+  Config work still unfinished then refuses the upgrade, and the upgrader resumes the current
+  version, trying for up to ten seconds while that work settles. A session that starts or ends
+  during the download no longer fails the upgrade either; only `servers.json` must be
+  unchanged. The installed version runs an upgrade, so this applies to upgrades from 2.1.1 on.
+  To upgrade from 2.1.0, close your MCP clients and restart Pacemaker first.
+- `prewarm` no longer crashes on Windows with
+  `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` after the bridge refuses a change. It
+  prints the refusal and exits with status 1. Node 23, 24 before 24.20.0, 25, and 26 before
+  26.7.0 can abort a process that exits soon after `fetch`
+  ([nodejs/node#56645](https://github.com/nodejs/node/issues/56645)), so `prewarm` now talks to
+  the bridge with `node:http` like the rest of the CLI. A bridge that does not answer within ten
+  seconds is now reported by port instead of as `The operation was aborted due to timeout`.
+
+### Changed
+
+- Upgrades now follow one written rule: an upgrade may end open sessions and calls in progress,
+  and never retries a call; it never changes `servers.json` or your client setup. See
+  [upgrades and rollback](docs/upgrades.md#what-an-upgrade-keeps-and-what-it-ends).
+- The Windows 1.3 upgrade accepts `--yes` to confirm the plan shown, like other upgrades, and
+  its confirmation now says what ends and what is kept. It used to require an interactive
+  terminal and ask you to pause callers first. Explicit-account (`--user`) upgrades still need
+  interactive confirmation, because they also create a task for that account.
+- Split the Windows release qualification into a contained lane and a host session lane.
+  The qualification container has no interactive logon, so it now verifies the
+  `source-ordinary` contract and defers the four session-bound test files; those files run
+  on the publishing host under an ordinary, non-elevated interactive account and produce a
+  `session-lane.json` receipt that the offline verifier requires, bound to the same commit.
+  This closes a gap where those four files ran in no automated lane.
+
 ## [2.1.0] - 2026-10-12
 
 Published to npm on 2026-10-14.
@@ -545,7 +640,8 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
-[Unreleased]: https://github.com/girishkvs/mcp-pacemaker/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/girishkvs/mcp-pacemaker/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.1
 [2.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.0
 [2.0.2]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.2
 [2.0.1]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.1

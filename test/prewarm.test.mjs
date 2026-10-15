@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { formatPrewarm, formatUndoCommand, runPrewarm } from '../bin/prewarm.mjs';
 
 async function fixture(t) {
@@ -214,6 +214,46 @@ test('stale configuration errors are shown rather than reported as successful ch
   f.snapshot.prewarm.revision = 'stale';
   await assert.rejects(() => f.run({ enable: 'alpha' }), /Configuration changed/);
   assert.equal(f.output.length, 0);
+});
+
+test('a refused change exits the CLI with status 1 instead of a runtime abort', async (t) => {
+  const f = await fixture(t);
+  f.snapshot.prewarm.revision = 'stale';
+  const home = mkdtempSync(join(tmpdir(), 'pacemaker-prewarm-home-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cli = spawn(process.execPath, [
+    fileURLToPath(new URL('../bin/cli.mjs', import.meta.url)),
+    'prewarm', '--port', String(f.snapshot.port), '--config', f.configPath, '--enable', 'alpha',
+  ], { env: { ...process.env, HOME: home, USERPROFILE: home }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+  let output = '';
+  cli.stdout.on('data', (chunk) => { output += chunk; });
+  cli.stderr.on('data', (chunk) => { output += chunk; });
+  const [code] = await once(cli, 'close');
+  // On Windows, Node 23, 24 before 24.20.0, 25, and 26 before 26.7.0 abort here if prewarm uses fetch.
+  assert.doesNotMatch(output, /Assertion failed/);
+  assert.match(output, /Configuration changed; refresh before applying/);
+  assert.equal(code, 1, output);
+  assert.equal(f.posts.length, 1);
+});
+
+test('nonce, non-JSON and HTTP error replies keep their messages', async (t) => {
+  let reply = (response) => response.writeHead(401).end('bad nonce');
+  const server = http.createServer((request, response) => reply(response));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolveClose) => server.close(resolveClose));
+  });
+  const { port } = server.address();
+  const view = () => runPrewarm({}, { configPath: join(tmpdir(), 'servers.json'), ports: [port], write: () => {} });
+  await assert.rejects(view, /Admin nonce was rejected/);
+  reply = (response) => response.writeHead(200).end('not json');
+  await assert.rejects(view, new RegExp(`Bridge on :${port} returned a non-JSON response \\(200\\)`));
+  reply = (response) => response.writeHead(500, { 'content-type': 'application/json' }).end('{}');
+  await assert.rejects(view, new RegExp(`Bridge on :${port} rejected the request \\(500\\)`));
+  reply = (response) => response.writeHead(503, { 'content-type': 'application/json' }).end('{"error":"Bridge is shutting down."}');
+  await assert.rejects(view, /^Error: Bridge is shutting down\.$/);
 });
 
 test('JSON view returns the same measured snapshot without mutations', async (t) => {

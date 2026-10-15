@@ -54,8 +54,10 @@ with these explicit local paths:
 The verifier does not run tests, npm, Docker, a signing SDK or a network request.
 It reads bounded private evidence, compares original TAR/command receipts and
 re-enumerates the frozen and live inputs. Missing, partial, controls-only,
-changed or old-schema evidence fails. It prints a compact `localRegression`
-statement only after those checks; **it never generates owner acceptance**.
+changed or old-schema evidence fails, as does a run history that does not match
+`run-state.json` (see [Resume an interrupted run](#resume-an-interrupted-run)). It
+prints a compact `localRegression` statement only after those checks; **it never
+generates owner acceptance**.
 
 Fresh current-line inner reports use schema 5; the immutable legacy producer
 retains schema 4. Both retain a private `fixture.tgz` alongside
@@ -202,10 +204,13 @@ three containment controls, six complete source cases and three audit companions
 no host account, image, policy or production guard is changed.
 
 Before the current source suite, the gate invokes the same
-[execution-contract preflight](execution-context.md) as CI. The verifier requires
-its exact original receipt. `ContainerUser` alone does not supply a real WTS logon;
-if the image lacks that capability the source case is blocked. Neither the audit
-companion nor a previously passing subset makes that source case complete.
+[execution-contract preflight](execution-context.md) as CI, for the `source-ordinary`
+contract. The verifier requires its exact original receipt. `ContainerUser` is an
+ordinary caller but supplies no real WTS logon, so the contained suite excludes the four
+`SESSION_REQUIRED_TESTS` files and records them in `sessionDeferredTests`. The host half
+runs exactly those files and the verifier requires their `session-lane.json` receipt,
+bound to the same commit. Neither the audit companion nor a previously passing subset
+makes that source case complete.
 
 Full qualification also takes the two already-retained, hash-pinned archives used
 by [Windows CI](../tools/windows-ci/README.md): the Roslyn compiler package and
@@ -227,6 +232,86 @@ evidence, and do not change the environment of the other gate commands.
 
 PowerShell's module-analysis cache is explicitly placed under each owned command
 home, so profile-less module loading cannot add cache files to the source checkout.
+
+## Resume an interrupted run
+
+A full run takes hours and stops at its first failing case. To keep the steps that
+already passed, run the launcher again with the same arguments, replacing
+`--output NEW_DIRECTORY` with `--resume RUN_DIRECTORY`:
+
+```powershell
+node tools\npm-publication\local-windows.mjs `
+  --npm-cli C:\retained\npm\node_modules\npm\bin\npm-cli.js `
+  --peer-root Q:\checkouts\other-release-line `
+  --resume Q:\evidence\new-run-directory `
+  --node-root C:\retained\nodes `
+  --pwsh-root 'C:\Program Files\PowerShell\7' `
+  --native-packages C:\retained\native-packages
+```
+
+Every run writes `run-state.json` before its first case and updates it as each step
+starts and passes. It records the run binding: run ID, scope, pinned image, the Docker
+engine (server version, API version, OS and kernel), the Windows build and update
+revision (UBR), argument paths, Git root, the complete controller binding, the three Node
+runtime hashes, and canonical hashes of the npm, PowerShell, Git and native-package trees
+and of both source selections (commit, tree, checkout files and retained dependencies).
+The input steps compare their frozen copies with this binding, so an input that changes
+after the run starts fails the run. Each passed step adds a checkpoint with the hash of its
+evidence members and of the command journal up to that point. Runs started before this
+file existed cannot be resumed. The launcher resolves the run path once, so
+`RUN_DIRECTORY` and `RUN_DIRECTORY\` name the same run.
+
+The plan is fixed: the three controls, `inputs-<current>`, `inputs-<legacy>`,
+`session-lane`, the current-line audit and source cases, then the legacy source cases.
+Passed steps always form a prefix of it. A resume:
+
+1. Refuses unless the live binding is identical to the recorded one. A changed controller
+   file, Docker engine, Windows build or update revision, source commit, tree or byte,
+   retained dependency, npm, PowerShell, Git or native-package file, Node runtime, image or
+   argument path refuses, so controls proven on one engine and build never stand for cases
+   run on another. It also refuses a run that already passed, a controls-only run
+   (`--resume` with `--controls-only` is rejected), a run directory without
+   `run-state.json`, a clock that stepped back behind the recorded history, and a second
+   launcher on a run directory that a live launcher holds. Each launcher holds a named
+   pipe derived from its run directory, which Windows releases when the process exits.
+   A Windows cumulative update or a Docker update changes the UBR or engine version, so a
+   run interrupted across one of those cannot be resumed and must start over.
+2. Re-hashes every reused step against its checkpoint: each case directory and its
+   storage-admission receipt, `session-lane.json`, and each input manifest with every
+   copied input byte. It also checks the frozen controller and runtime trees, the empty
+   Docker configuration and the checkpointed command receipts. Any difference refuses.
+3. Sets aside everything after the last checkpoint into the sibling directory
+   `RUN_DIRECTORY.attempts\before-invocation-N`: the failed or partial case directory, its
+   storage-admission receipt, the failed `result.json`, a partial input directory and the
+   command receipts written after that checkpoint. Receipts move from the highest number
+   down, so a resume killed part way still leaves a contiguous journal for the next one.
+   Nothing is deleted. Any other member refuses.
+4. Kills and removes any container that still carries the run's ownership label, with the
+   same stopped-state, zero-PID and absence checks as case cleanup. It does not stop host
+   processes; make sure a killed launcher's session-lane child has exited before resuming.
+5. Keeps the run ID and reruns the first step that has not passed, and every later step,
+   from scratch.
+
+A refusal changes nothing in the run directory. Because the session lane runs the live
+working tree, every run re-verifies all frozen inputs right after the lane, and its receipt
+is reused only after that check passed. Before a run records a pass it checks that its
+evidence inventory can be built. A run cut off after recording the pass, which leaves
+`evidence-manifest.json` missing or partly written, resumes: that invocation is recorded as
+failed and the next one reruns nothing. Any other passed run refuses, and says so if its
+evidence no longer matches its inventory. Each invocation keeps its own deadline; nothing
+bounds the total time across invocations.
+
+The final `result.json` records every invocation in `invocations`: start and end time (an
+interrupted invocation has no end time), status (`failed`, `interrupted` or `passed`), binding
+hash, the steps it reused and ran, and what it set aside or removed. A normal run has one
+invocation. The verifier requires that history to equal `run-state.json` and rejects it
+unless invocation numbers have no gap or duplicate, each invocation reused exactly the
+passed prefix and ran the next steps in plan order, every planned step passed exactly once,
+only the last invocation passed, and every invocation has the same binding hash. The
+binding must match the report's controller, image and runtimes and both frozen input
+manifests, cases must appear in plan order, and every checkpointed evidence member and
+command receipt must still match its checkpoint hash. The compact `localRegression`
+statement is unchanged; resume details stay in the private report.
 
 ## Isolation and evidence
 
@@ -262,10 +347,13 @@ Admission may wait up to 60 seconds for the required free space, recording its
 samples before starting a case. This does not retry any test.
 No Docker daemon settings, existing images, or unrelated containers are changed.
 
-The complete source suite has a dedicated 25-minute harness budget inside a
-30-minute guest-case budget. Ordinary inner commands retain their 15-minute
-default, timeout controls retain 15 seconds, and the whole run remains bounded
-at two hours. The source budget covers complete native-heavy suites; it does not
+The contained source suite has a dedicated 60-minute harness budget on the current
+release line; legacy cases keep the 25-minute budget their own line shipped, and the
+verifier checks each recorded budget against the label the case used. The host session
+lane is bounded separately at 40 minutes. Ordinary inner commands retain their 15-minute
+default, timeout controls retain 15 seconds, and each launcher invocation is bounded by a
+whole-run deadline derived from the cases it plans. A resumed run has no bound across
+invocations. The source budget covers complete native-heavy suites; it does not
 change application/helper deadlines, test concurrency, or test selection.
 Each inner command receipt records its actual `timeoutMs`.
 
@@ -314,7 +402,8 @@ records, not full-source or publication-success reports.
 Each run writes private command vectors, exit/error/signal details, byte hashes,
 guest facts, input manifests and original results. Keep this evidence outside
 the repository. A changed input invalidates the run; do not combine passing
-pieces from different source snapshots into a green report.
+pieces from different source snapshots into a green report. A resumed run combines
+only steps bound to the identical recorded inputs.
 
 ## Publication regression coverage
 
