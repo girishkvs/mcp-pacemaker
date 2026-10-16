@@ -128,6 +128,13 @@ instead of installing bundled Chromium. CI uses bundled Chromium, not that overr
 Both standalone test commands **fail** when preparation is missing or candidate bytes have
 changed. Clean and prepare again after changing package files, built assets, or Node major.
 
+On Windows, run these gates on Node 20, 22, 24.20.0 or a later 24.x, or 26.7.0 and later.
+Released CLIs up to 2.1.0 use `fetch` for `prewarm`, and Node 23, 24 before 24.20.0, 25, and 26
+before 26.7.0 can abort a process that exits soon after `fetch`
+([nodejs/node#56645](https://github.com/nodejs/node/issues/56645)). There, any test that runs a
+released CLI into a refused change (1.3.0, and 2.0.0 in the historical baseline) fails with exit
+code 3221226505 and a libuv `UV_HANDLE_CLOSING` assertion.
+
 Historical compatibility baselines remain explicitly **1.3.0 and 2.0.0**.
 Candidate versions must be canonical stable **1.x legacy / 2.x current** versions.
 The owner selects the actual release and any exact opposite-major patch pair;
@@ -136,12 +143,12 @@ The same harness runs in both maintained branches:
 
 | Preparation | Selected legacy / current pair |
 |---|---|
-| Default in the selected 2.1.0 checkout | Immutable 1.3.0 / packed 2.1.0 |
+| Default in the selected 2.1.1 checkout | Immutable 1.3.0 / packed 2.1.1 |
 | Default in the 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
 | `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
-| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed explicit 1.x peer / packed 2.1.0 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed explicit 1.x peer / packed 2.1.1 |
 
-These selections are not qualification evidence. The 2.1.0 candidate requires fresh
+These selections are not qualification evidence. The 2.1.1 candidate requires fresh
 exact-byte gates; selecting it does not select an opposite-major patch pair.
 Earlier 1.3.1/2.0.2 and 1.3.1/2.0.1 results remain historical.
 

@@ -14,14 +14,33 @@ using System.Web.Script.Serialization;
 
 internal sealed class LegacyProcessBroker
 {
+    // A plan names only the two roots. Plans written by 2.1.0 also list up to 510 descendants,
+    // and recovery still verifies those, so plan bounds stay at their 2.1.0 values.
+    private const int MaximumPlanIdentities = 512;
+    private const int MaximumPlanBytes = 240 * 1024;
+    private const int MaximumMessageBytes = 262144;
+    // One query reads both roots' command lines in each phase.
+    private const int MaximumArgumentQueries = 1;
+    // Descendants are found while stopping. One busy 1.3 host had 533 processes in its tree.
+    private const int MaximumSweptProcesses = 2048;
+    private const int MaximumSweepRounds = 16;
+    private const int MaximumPinPasses = 8;
+    private const long RequestMilliseconds = 15000;
+    private const long PhaseMilliseconds = 120000;
+    private const long StopMilliseconds = 20000;
+    private const long WatchdogMarginMilliseconds = 10000;
     private readonly LegacyNative native = new LegacyNative();
-    private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 262144, RecursionLimit = 20 };
+    private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = MaximumMessageBytes, RecursionLimit = 20 };
     private readonly List<Held> held = new List<Held>();
-    private readonly List<ExcludedIdentity> excluded = new List<ExcludedIdentity>();
+    private readonly HashSet<string> rejected = new HashSet<string>();
+    // The processes that started this broker, by PID and creation time; the sweep never adopts them.
+    private readonly Dictionary<int, long> ancestors = new Dictionary<int, long>();
+    private readonly int brokerId = Process.GetCurrentProcess().Id;
+    private bool swept;
     private readonly List<FileStream> scripts = new List<FileStream>();
     private readonly string user = WindowsIdentity.GetCurrent().User.Value;
     private readonly Stopwatch clock = Stopwatch.StartNew();
-    private long deadline = 15000;
+    private long deadline = RequestMilliseconds;
     private volatile bool committed;
     private string stage = "request";
     private string root;
@@ -31,7 +50,6 @@ internal sealed class LegacyProcessBroker
     private object captureFailure;
     private LegacySnapshot snapshot;
     private LegacyArgumentQueries arguments;
-    private bool revalidating;
     private readonly Stopwatch phaseClock = new Stopwatch();
     private object captureDiagnostics;
     private object revalidationDiagnostics;
@@ -51,6 +69,9 @@ internal sealed class LegacyProcessBroker
             Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false, true)) { AutoFlush = true });
             StartWatchdog();
             var request = Read();
+            // Phase budgets start once the request is read, so a slow broker start on a loaded
+            // host does not consume the capture budget.
+            Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + PhaseMilliseconds + WatchdogMarginMilliseconds);
             if (request.action == "verify")
             {
                 ValidatePlan(request.expected);
@@ -68,20 +89,18 @@ internal sealed class LegacyProcessBroker
             stage = "capture-roots";
             phaseClock.Start();
             arguments = new LegacyArgumentQueries(CheckPhase);
-            arguments.BeginPhase(48);
+            arguments.BeginPhase(MaximumArgumentQueries);
             Held bridge;
             Held supervisor;
             using (var images = new LegacyImageCache(CheckPhase))
             {
-                bridge = Capture(native.Listener(port), null);
-                supervisor = Capture(bridge.Info.parentPid, null);
+                bridge = Capture(native.Listener(port));
+                supervisor = Capture(bridge.Info.parentPid);
                 if (bridge.Info.pid == supervisor.Info.pid ||
                     bridge.Created < supervisor.Created) throw new InvalidOperationException();
                 bridge.Info.parentCreationTime = supervisor.Info.creationTime;
                 bridge.KeepArguments = true;
                 supervisor.KeepArguments = true;
-                bridge.SelectedRoot = true;
-                supervisor.SelectedRoot = true;
                 var roots = new List<Held> { bridge, supervisor };
                 CaptureFacts(roots, images);
                 CheckRootArguments(bridge, supervisor);
@@ -89,9 +108,7 @@ internal sealed class LegacyProcessBroker
                 if (!snapshot.Contains(bridge.Info.pid, supervisor.Info.pid) ||
                     !snapshot.Contains(supervisor.Info.pid, supervisor.Info.parentPid))
                     throw new InvalidOperationException("Snapshot root changed");
-                CaptureChildren(supervisor, 0);
-                var descendants = held.FindAll(value => value != bridge && value != supervisor);
-                CaptureFacts(descendants, images);
+                CheckAncestors(bridge, supervisor);
                 if (!native.Alive(supervisor.Handle) ||
                     !native.Alive(bridge.Handle) ||
                     native.Listener(port) != bridge.Info.pid) throw new InvalidOperationException("Root changed");
@@ -104,8 +121,7 @@ internal sealed class LegacyProcessBroker
                     imageBytesHashed = images.Bytes, planUtf8Bytes = planBytes, memory = native.Memory() };
             }
             if (request.expected != null &&
-                json.Serialize(request.expected) != json.Serialize(plan))
-                throw new InvalidOperationException("Plan changed");
+                !SameRoots(request.expected, plan)) throw new InvalidOperationException("Plan changed");
             token = NewToken();
             Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + 120000);
             Write(new { ok = true, plan, token, diagnostics = captureDiagnostics, brokerIdentity });
@@ -126,16 +142,15 @@ internal sealed class LegacyProcessBroker
                     request.token != token ||
                     request.planSha256 != plan.planSha256) throw new ArgumentException();
                 stage = "revalidate";
-                revalidating = true;
                 phaseClock.Restart();
-                Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + 15000);
-                arguments.BeginPhase(32);
+                Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + PhaseMilliseconds + WatchdogMarginMilliseconds);
+                arguments.BeginPhase(MaximumArgumentQueries);
                 Revalidate(supervisor, bridge);
                 arguments.Dispose();
                 arguments = null;
                 committed = true;
                 stage = "stop";
-                Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + 12000);
+                Interlocked.Exchange(ref deadline, clock.ElapsedMilliseconds + StopMilliseconds + WatchdogMarginMilliseconds);
                 var stopWatch = Stopwatch.StartNew();
                 var receipt = Stop(supervisor, bridge);
                 Write(new { ok = true, receipt, diagnostics = new {
@@ -205,14 +220,14 @@ internal sealed class LegacyProcessBroker
     private Request Read()
     {
         var line = new StringBuilder();
-        while (line.Length < 262144)
+        while (line.Length < MaximumMessageBytes)
         {
             int value = Console.In.Read();
             if (value < 0) throw new EndOfStreamException();
             if (value == 10)
             {
                 var text = line.ToString();
-                if (Encoding.UTF8.GetByteCount(text) + 1 > 262144) throw new ArgumentException("Request bounds");
+                if (Encoding.UTF8.GetByteCount(text) + 1 > MaximumMessageBytes) throw new ArgumentException("Request bounds");
                 return json.Deserialize<Request>(text);
             }
             line.Append((char)value);
@@ -226,26 +241,13 @@ internal sealed class LegacyProcessBroker
         Console.Out.Flush();
     }
 
-    private Held Capture(int id, Held parent)
+    private Held Capture(int id)
     {
         CheckPhase();
-        var known = held.Find(value => value.Info.pid == id);
-        if (known != null)
-        {
-            if (!native.Alive(known.Handle) ||
-                native.Creation(known.Handle) != known.Created ||
-                native.Parent(known.Handle) != known.Info.parentPid ||
-                native.Owner(known.Handle) != user) throw new InvalidOperationException("Capture changed");
-            if (parent != null &&
-                !KnownEdge(known, parent)) return null;
-            return known;
-        }
-        if (held.Count + excluded.Count >= 512) throw new InvalidOperationException("Capture bound");
         var substage = LegacyFailureStage.CaptureOpenQuery;
         long? observedBirth = null;
         int? observedParent = null;
         bool? observedAlive = null;
-        bool? observedParentAlive = null;
         bool? observedOwnerMatch = null;
         var handle = Api.OpenProcess(0x00100000 | 0x1000, false, id);
         try
@@ -260,40 +262,6 @@ internal sealed class LegacyProcessBroker
             substage = LegacyFailureStage.CaptureParent;
             int parentId = native.Parent(handle);
             observedParent = parentId;
-            if (parent != null)
-            {
-                bool parentAlive;
-                try { parentAlive = native.Alive(parent.Handle); }
-                catch (Exception error)
-                {
-                    native.TagFailure(error, LegacyFailureStage.CaptureParentLiveness,
-                        parent.Info.pid, parent.Created, parent.Info.parentPid, ownerMatched: true);
-                    throw;
-                }
-                observedParentAlive = parentAlive;
-                bool bornBeforeParent = created < parent.Created;
-                bool changedEdge = parentId != parent.Info.pid;
-                if (!parentAlive ||
-                    changedEdge)
-                {
-                    captureFailure = new { pid = id, creationTime = created.ToString(CultureInfo.InvariantCulture),
-                        actualParentPid = parentId,
-                        expectedParentPid = parent.Info.pid, parentCreationTime = parent.Info.creationTime,
-                        parentAlive, bornBeforeParent, changedEdge };
-                    throw new InvalidOperationException("Unproven ancestry");
-                }
-                if (bornBeforeParent)
-                {
-                    // A reused creator PID is not ownership of its older survivors.
-                    // This candidate never receives terminate access or enters held.
-                    excluded.Add(new ExcludedIdentity { pid = id,
-                        creationTime = created.ToString(CultureInfo.InvariantCulture),
-                        parentPid = parentId, parentCreationTime = parent.Info.creationTime,
-                        reason = "predates-held-parent" });
-                    handle.Dispose();
-                    return null;
-                }
-            }
             substage = LegacyFailureStage.CaptureOwner;
             var owner = native.Owner(handle);
             observedOwnerMatch = owner == user;
@@ -313,8 +281,7 @@ internal sealed class LegacyProcessBroker
             substage = LegacyFailureStage.CaptureImage;
             var image = native.Image(handle);
             var info = new Identity { pid = id, creationTime = created.ToString(CultureInfo.InvariantCulture),
-                parentPid = parentId, parentCreationTime = parent == null ? null : parent.Info.creationTime,
-                ownerSid = owner, imagePath = image };
+                parentPid = parentId, ownerSid = owner, imagePath = image };
             if (!native.Alive(handle)) throw new InvalidOperationException("Capture changed");
             var result = new Held { Handle = handle, Info = info, Created = created };
             held.Add(result);
@@ -323,52 +290,15 @@ internal sealed class LegacyProcessBroker
         catch (Exception error)
         {
             native.TagFailure(error, substage, id, observedBirth, observedParent,
-                parent == null ? (int?)null : parent.Info.pid, parent == null ? null : parent.Info.creationTime,
-                observedAlive, observedParentAlive, observedOwnerMatch);
+                alive: observedAlive, ownerMatched: observedOwnerMatch);
             handle.Dispose();
             throw;
         }
     }
 
-    private bool KnownEdge(Held child, Held parent)
-    {
-        CheckPhase();
-        if (!native.Alive(child.Handle) ||
-            !native.Alive(parent.Handle) ||
-            native.Creation(child.Handle) != child.Created ||
-            native.Creation(parent.Handle) != parent.Created ||
-            native.Parent(child.Handle) != parent.Info.pid ||
-            child.Info.parentPid != parent.Info.pid ||
-            native.Owner(child.Handle) != user ||
-            native.Owner(parent.Handle) != user)
-            throw new InvalidOperationException("Ancestry changed");
-        if (child.Created < parent.Created)
-        {
-            // The selected root stays held; only this false reused-creator edge is ignored.
-            if (child.SelectedRoot) return false;
-            throw new InvalidOperationException("Unproven ancestry");
-        }
-        if (child.Info.parentCreationTime != parent.Info.creationTime)
-            throw new InvalidOperationException("Ancestry changed");
-        return true;
-    }
-
-    private List<int> Children(int parentId)
-    {
-        CheckPhase();
-        var parent = held.Find(value => value.Info.pid == parentId);
-        if (snapshot == null ||
-            parent == null ||
-            !native.Alive(parent.Handle)) throw new InvalidOperationException("Unproven ancestry");
-        var ids = snapshot.Children(parentId);
-        ids.Sort();
-        return ids;
-    }
-
     private void CheckPhase()
     {
-        if ((!revalidating && clock.ElapsedMilliseconds > 14000) ||
-            (revalidating && phaseClock.ElapsedMilliseconds >= 15000))
+        if (phaseClock.ElapsedMilliseconds >= PhaseMilliseconds)
             throw new InvalidOperationException("Capture bound");
     }
 
@@ -409,23 +339,10 @@ internal sealed class LegacyProcessBroker
         try
         {
             int bytes = Encoding.UTF8.GetByteCount(json.Serialize(value));
-            if (bytes > 240 * 1024) throw new InvalidOperationException("Plan byte bound");
+            if (bytes > MaximumPlanBytes) throw new InvalidOperationException("Plan byte bound");
             return bytes;
         }
         catch (InvalidOperationException) { throw new InvalidOperationException("Plan byte bound"); }
-    }
-
-    private void CaptureChildren(Held parent, int depth)
-    {
-        if (depth >= 8) throw new InvalidOperationException("Depth bound");
-        foreach (int id in Children(parent.Info.pid))
-        {
-            if (id == parent.Info.pid) throw new InvalidOperationException("Ancestry cycle");
-            var child = Capture(id, parent);
-            if (child == null) continue;
-            child.Info.parentCreationTime = parent.Info.creationTime;
-            CaptureChildren(child, depth + 1);
-        }
     }
 
     private void CheckRootArguments(Held bridge, Held supervisor)
@@ -455,6 +372,30 @@ internal sealed class LegacyProcessBroker
             !supervisorValid) throw new InvalidOperationException("Root arguments mismatch");
         bridge.Info.scriptSha256 = HoldScript(bridgeScript);
         supervisor.Info.scriptSha256 = HoldScript(supervisorScript);
+    }
+
+    // The upgrade cannot stop the bridge it runs under. A CLI started from inside the 1.3
+    // tree, for example through an MCP server's shell, is refused here before any change.
+    private void CheckAncestors(Held bridge, Held supervisor)
+    {
+        int id = Process.GetCurrentProcess().Id;
+        long childCreated = long.MaxValue;
+        for (int depth = 0; depth < 64; depth++)
+        {
+            using (var process = Api.OpenProcess(0x1000, false, id))
+            {
+                if (process.IsInvalid) return;
+                long created = native.Creation(process);
+                // A parent PID that now names a newer process is not this process's parent.
+                if (created > childCreated) return;
+                bool insideRoots = id == bridge.Info.pid ||
+                    id == supervisor.Info.pid;
+                if (insideRoots) throw new InvalidOperationException("Run the upgrade from a terminal the 1.3 bridge did not start");
+                ancestors[id] = created;
+                childCreated = created;
+                id = native.Parent(process);
+            }
+        }
     }
 
     private string HoldScript(string path)
@@ -502,19 +443,25 @@ internal sealed class LegacyProcessBroker
 
     private Plan MakePlan(Held supervisor, Held bridge)
     {
-        var observed = new List<Identity>();
-        foreach (var process in held)
-            if (process != supervisor &&
-                process != bridge) observed.Add(process.Info);
-        observed.Sort((left, right) => left.pid.CompareTo(right.pid));
-        excluded.Sort((left, right) => left.pid.CompareTo(right.pid));
         var result = new Plan { protocol = 1, kind = "legacy-observed-process-set", port = port, root = root,
             ownerSid = user, roots = new Roots { supervisor = supervisor.Info, bridge = bridge.Info },
-            observed = observed.ToArray(), excluded = excluded.ToArray(), treeCompleteness = "unproven",
-            scope = "Selected roots and captured proven descendants only; uncaptured and historical orphans are untouched." };
+            observed = new Identity[0], excluded = new ExcludedIdentity[0], treeCompleteness = "unproven",
+            scope = "Selected roots only. When stopping, processes they started are found by parent and stopped; other processes are untouched." };
         result.observedSetSha256 = native.Hash(Encoding.UTF8.GetBytes(json.Serialize(result.observed)));
         result.planSha256 = DigestPlan(result);
         return result;
+    }
+
+    // Sessions start and end all the time, so only the roots bind a reopened plan. A plan
+    // written by 2.1.0 also lists the descendants it captured; those are not compared.
+    private bool SameRoots(Plan expected, Plan actual)
+    {
+        return json.Serialize(RootBinding(expected)) == json.Serialize(RootBinding(actual));
+    }
+
+    private object RootBinding(Plan value)
+    {
+        return new { value.protocol, value.kind, value.port, value.root, value.ownerSid, value.roots };
     }
 
     private string DigestPlan(Plan value)
@@ -531,11 +478,11 @@ internal sealed class LegacyProcessBroker
         if (!native.Alive(supervisor.Handle) ||
             !native.Alive(bridge.Handle) ||
             native.Listener(port) != bridge.Info.pid) throw new InvalidOperationException("Root changed");
-        var live = held.FindAll(value => native.Alive(value.Handle));
-        arguments.Read(live, false);
+        var roots = new List<Held> { bridge, supervisor };
+        arguments.Read(roots, false);
         using (var images = new LegacyImageCache(CheckPhase))
         {
-            foreach (var process in live)
+            foreach (var process in roots)
             {
                 CheckPhase();
                 if (!native.Alive(process.Handle) ||
@@ -547,22 +494,9 @@ internal sealed class LegacyProcessBroker
                     throw new InvalidOperationException("Identity changed");
             }
             RefreshSnapshot();
-            foreach (var process in held)
-            {
-                if (!native.Alive(process.Handle)) continue;
-                if (!snapshot.Contains(process.Info.pid, process.Info.parentPid))
-                    throw new InvalidOperationException("Snapshot held member changed");
-                foreach (int id in Children(process.Info.pid))
-                {
-                    var known = held.Find(value => value.Info.pid == id);
-                    if (known != null)
-                    {
-                        if (!KnownEdge(known, process)) continue;
-                    }
-                    else if (!ApprovedNonmember(process, id))
-                        throw new InvalidOperationException("Observed set expanded; replan");
-                }
-            }
+            if (!snapshot.Contains(bridge.Info.pid, supervisor.Info.pid) ||
+                !snapshot.Contains(supervisor.Info.pid, supervisor.Info.parentPid))
+                throw new InvalidOperationException("Snapshot held member changed");
             if (!native.Alive(supervisor.Handle) ||
                 !native.Alive(bridge.Handle) ||
                 native.Listener(port) != bridge.Info.pid) throw new InvalidOperationException("Root changed");
@@ -572,79 +506,254 @@ internal sealed class LegacyProcessBroker
         }
     }
 
-    private bool ApprovedNonmember(Held parent, int id)
-    {
-        var prior = excluded.Find(value => value.pid == id &&
-            value.parentPid == parent.Info.pid &&
-            value.parentCreationTime == parent.Info.creationTime);
-        if (prior == null) return false;
-        using (var process = Api.OpenProcess(0x00100000 | 0x1000, false, id))
-        {
-            native.Require(!process.IsInvalid);
-            long created = native.Creation(process);
-            return native.Alive(parent.Handle) &&
-                native.Alive(process) &&
-                native.Parent(process) == parent.Info.pid &&
-                created < parent.Created &&
-                created.ToString(CultureInfo.InvariantCulture) == prior.creationTime;
-        }
-    }
-
     private Receipt Stop(Held supervisor, Held bridge)
     {
         var errors = new List<string>();
         var stopClock = Stopwatch.StartNew();
+        // The supervisor goes first so it cannot start another bridge.
         Kill(supervisor, stopClock, errors);
         if (!native.Alive(supervisor.Handle))
         {
+            // When a Node process exits, its job object ends its direct children with it (1.3
+            // wraps each bare server command in cmd.exe), and their own children then name a
+            // parent nobody holds. So the bridge's whole tree is held before the bridge stops.
+            bool settled;
+            Pin(stopClock, errors, out settled);
             Kill(bridge, stopClock, errors);
-            for (int index = held.Count - 1; index >= 0; index--)
-                if (held[index] != supervisor &&
-                    held[index] != bridge) Kill(held[index], stopClock, errors);
+            if (!native.Alive(bridge.Handle)) Sweep(stopClock, errors);
         }
         var result = HeldStatus();
         result.errors = errors.ToArray();
         return result;
     }
 
-    private void Kill(Held process, Stopwatch stopClock, List<string> errors)
+    // A busy bridge starts and ends sessions every few seconds, so its descendants are found
+    // while stopping instead of being frozen into the plan. Each round first holds everything
+    // new that descends from a held process, then stops every held process not yet stopped
+    // and waits for it, even if the tree was still growing. The next round finds anything
+    // those processes started before they died.
+    private void Sweep(Stopwatch stopClock, List<string> errors)
     {
         try
         {
-            if (!native.Alive(process.Handle)) return;
-            if (stopClock.ElapsedMilliseconds >= 8000) throw new TimeoutException();
-            bool terminated = Api.TerminateProcess(process.Handle, 1);
-            int terminationError = terminated ? 0 : Marshal.GetLastWin32Error();
-            uint remaining = (uint)Math.Max(1, 8000 - stopClock.ElapsedMilliseconds);
-            // Parent exit can already be terminating this child. A racing
-            // TerminateProcess failure is reconciled only by this held handle
-            // becoming signaled within the same total stop budget.
-            if (Api.WaitForSingleObject(process.Handle, remaining) != 0)
+            for (int round = 0; round < MaximumSweepRounds; round++)
             {
-                if (!terminated) throw new Win32Exception(terminationError);
-                throw new TimeoutException();
+                // Once the stop budget is spent nothing more can be terminated, so the sweep ends.
+                CheckStop(stopClock);
+                bool settled;
+                int pinned = Pin(stopClock, errors, out settled);
+                var terminations = new List<Termination>();
+                foreach (var process in held)
+                {
+                    if (process.Stopping) continue;
+                    var termination = Terminate(process, stopClock, errors);
+                    if (termination != null) terminations.Add(termination);
+                }
+                bool done = settled &&
+                    pinned == 0 &&
+                    terminations.Count == 0;
+                if (done)
+                {
+                    swept = true;
+                    return;
+                }
+                foreach (var termination in terminations) AwaitExit(termination, stopClock, errors);
+            }
+            errors.Add("sweep:rounds");
+        }
+        catch (Exception error)
+        {
+            errors.Add("sweep:" + (RefusalReason(error) ?? error.GetType().Name));
+        }
+    }
+
+    // Holds every process that descends from a held process, repeating until a snapshot shows
+    // nothing new (settled). Every held handle keeps its PID from being reused, so a process
+    // whose parent PID is held and which started no earlier than that parent was started by it.
+    // A tree still growing after every pass is left to the caller's next round; a snapshot that
+    // cannot be read is reported. Nothing is stopped here, and nothing is thrown.
+    private int Pin(Stopwatch stopClock, List<string> errors, out bool settled)
+    {
+        settled = false;
+        int total = 0;
+        try
+        {
+            for (int pass = 0; pass < MaximumPinPasses; pass++)
+            {
+                var current = new LegacySnapshot();
+                current.Read(() => CheckStop(stopClock));
+                int adopted = 0;
+                // Processes held during this pass are walked in the same pass, so one snapshot
+                // covers the whole tree; later passes only find processes started since.
+                for (int index = 0; index < held.Count; index++)
+                {
+                    var parent = held[index];
+                    foreach (int id in Children(current, parent.Info.pid))
+                    {
+                        if (held.Exists(value => value.Info.pid == id)) continue;
+                        if (Adopt(id, parent, errors) != null) adopted++;
+                    }
+                }
+                total += adopted;
+                if (adopted == 0)
+                {
+                    settled = true;
+                    return total;
+                }
             }
         }
         catch (Exception error)
         {
-            var win32 = error as Win32Exception;
-            errors.Add(process.Info.pid + ":" + error.GetType().Name +
-                (win32 == null ? "" : ":" + win32.NativeErrorCode));
+            Reject("pin:" + (RefusalReason(error) ?? error.GetType().Name), errors);
         }
+        return total;
+    }
+
+    private List<int> Children(LegacySnapshot current, int parentId)
+    {
+        var ids = current.Children(parentId);
+        ids.Sort();
+        return ids;
+    }
+
+    private Held Adopt(int id, Held parent, List<string> errors)
+    {
+        if (id == brokerId) return null;
+        if (held.Count >= MaximumSweptProcesses + 2)
+        {
+            Reject("sweep:bound", errors);
+            return null;
+        }
+        var opened = Api.OpenProcess(0x00100000 | 0x1000 | 1, false, id);
+        if (opened.IsInvalid)
+        {
+            int code = Marshal.GetLastWin32Error();
+            opened.Dispose();
+            // 87: the process exited after the snapshot and nothing holds it any more.
+            if (code != 87) Reject(id + ":OpenProcess:" + code, errors);
+            return null;
+        }
+        try
+        {
+            long created = native.Creation(opened);
+            long ancestorCreated;
+            bool ancestor = ancestors.TryGetValue(id, out ancestorCreated) &&
+                ancestorCreated == created;
+            // A process older than the held parent got that PID from an earlier owner.
+            bool child = native.Parent(opened) == parent.Info.pid &&
+                created >= parent.Created;
+            if (ancestor ||
+                !child)
+            {
+                opened.Dispose();
+                return null;
+            }
+            // An exited child is held as well: its handle keeps its PID, so its own children
+            // stay traceable. Only a live process can belong to another user.
+            bool foreign = native.Alive(opened) &&
+                native.Owner(opened) != user;
+            if (foreign)
+            {
+                opened.Dispose();
+                Reject(id + ":owner", errors);
+                return null;
+            }
+            var result = new Held { Handle = opened, Created = created, Info = new Identity { pid = id,
+                creationTime = created.ToString(CultureInfo.InvariantCulture), parentPid = parent.Info.pid,
+                parentCreationTime = parent.Info.creationTime, ownerSid = user } };
+            held.Add(result);
+            return result;
+        }
+        catch (Exception error)
+        {
+            opened.Dispose();
+            var win32 = error as Win32Exception;
+            Reject(id + ":" + error.GetType().Name + (win32 == null ? "" : ":" + win32.NativeErrorCode), errors);
+            return null;
+        }
+    }
+
+    private void Reject(string reason, List<string> errors)
+    {
+        if (rejected.Add(reason)) errors.Add(reason);
+    }
+
+    private void CheckStop(Stopwatch stopClock)
+    {
+        if (stopClock.ElapsedMilliseconds >= StopMilliseconds) throw new TimeoutException();
+    }
+
+    private void Kill(Held process, Stopwatch stopClock, List<string> errors)
+    {
+        var termination = Terminate(process, stopClock, errors);
+        if (termination != null) AwaitExit(termination, stopClock, errors);
+    }
+
+    private Termination Terminate(Held process, Stopwatch stopClock, List<string> errors)
+    {
+        process.Stopping = true;
+        try
+        {
+            if (!native.Alive(process.Handle)) return null;
+            if (stopClock.ElapsedMilliseconds >= StopMilliseconds) throw new TimeoutException();
+            bool terminated = Api.TerminateProcess(process.Handle, 1);
+            int terminationError = terminated ? 0 : Marshal.GetLastWin32Error();
+            return new Termination { Process = process, Terminated = terminated, Error = terminationError };
+        }
+        catch (Exception error)
+        {
+            RecordStopError(process, error, errors);
+            return null;
+        }
+    }
+
+    private void AwaitExit(Termination termination, Stopwatch stopClock, List<string> errors)
+    {
+        try
+        {
+            uint remaining = (uint)Math.Max(0, StopMilliseconds - stopClock.ElapsedMilliseconds);
+            // Parent exit can already be terminating this child. A racing
+            // TerminateProcess failure is reconciled only by this held handle
+            // becoming signaled within the same total stop budget.
+            if (Api.WaitForSingleObject(termination.Process.Handle, remaining) != 0)
+            {
+                if (!termination.Terminated) throw new Win32Exception(termination.Error);
+                throw new TimeoutException();
+            }
+        }
+        catch (Exception error) { RecordStopError(termination.Process, error, errors); }
+    }
+
+    private void RecordStopError(Held process, Exception error, List<string> errors)
+    {
+        var win32 = error as Win32Exception;
+        errors.Add(process.Info.pid + ":" + error.GetType().Name +
+            (win32 == null ? "" : ":" + win32.NativeErrorCode));
     }
 
     private Receipt HeldStatus()
     {
         bool rootsGone = true;
-        bool observedGone = true;
+        int found = 0;
+        int stopped = 0;
         foreach (var process in held)
         {
-            if (!native.Alive(process.Handle)) continue;
-            if (process.Info.pid == plan.roots.bridge.pid ||
-                process.Info.pid == plan.roots.supervisor.pid) rootsGone = false;
-            else observedGone = false;
+            bool alive = native.Alive(process.Handle);
+            bool root = process.Info.pid == plan.roots.bridge.pid ||
+                process.Info.pid == plan.roots.supervisor.pid;
+            if (root)
+            {
+                if (alive) rootsGone = false;
+                continue;
+            }
+            found++;
+            if (!alive) stopped++;
         }
-        return new Receipt { legacyRootStopVerified = rootsGone, observedDescendantsStopped = observedGone,
+        bool descendantsGone = swept &&
+            stopped == found &&
+            rejected.Count == 0;
+        return new Receipt { legacyRootStopVerified = rootsGone, observedDescendantsStopped = descendantsGone,
+            descendantsFound = found, descendantsStopped = stopped,
             treeCompleteness = "unproven", observedCount = plan.observed.Length,
             excludedCount = plan.excluded.Length, planSha256 = plan.planSha256,
             errors = new string[0], unattributed = "Not discovered or not provable; left untouched." };
@@ -662,8 +771,8 @@ internal sealed class LegacyProcessBroker
             value.roots.supervisor == null ||
             value.observed == null ||
             value.excluded == null ||
-            value.observed.Length > 510 ||
-            value.excluded.Length + value.observed.Length > 510 ||
+            value.observed.Length > MaximumPlanIdentities - 2 ||
+            value.excluded.Length + value.observed.Length > MaximumPlanIdentities - 2 ||
             value.port < 1 ||
             value.port > 65535 ||
             !Path.IsPathRooted(value.root) ||
@@ -728,7 +837,10 @@ internal sealed class LegacyProcessBroker
                 if (index < 2) rootsGone = false; else childrenGone = false;
             }
         }
-        return new Receipt { legacyRootStopVerified = rootsGone, observedDescendantsStopped = childrenGone,
+        // A plan written now lists no descendants, so this read-only check cannot vouch for them.
+        bool descendantsVerified = childrenGone &&
+            value.observed.Length > 0;
+        return new Receipt { legacyRootStopVerified = rootsGone, observedDescendantsStopped = descendantsVerified,
             observedCount = value.observed.Length, excludedCount = value.excluded.Length, treeCompleteness = "unproven",
             planSha256 = value.planSha256, errors = errors.ToArray(),
             unattributed = "Not discovered or not provable; left untouched." };
@@ -747,17 +859,16 @@ internal sealed class LegacyProcessBroker
         // WMI/IO exception text, which can contain paths or command-line content.
         var reasons = new HashSet<string> {
             "Plan changed", "Capture bound", "Capture exited", "Owner mismatch",
-            "Unproven ancestry", "Capture changed", "Ancestry changed", "Ancestry cycle",
-            "Child bound", "Depth bound", "Root arguments mismatch", "Script bound",
-            "Root changed", "Identity changed", "Arguments changed",
-            "Observed set expanded; replan", "Process query changed",
+            "Capture changed", "Child bound", "Root arguments mismatch", "Script bound",
+            "Root changed", "Identity changed", "Arguments changed", "Process query changed",
             "Process query unavailable", "Process query generation changed",
+            "Run the upgrade from a terminal the 1.3 bridge did not start",
             "Argument bounds", "Listener ambiguity", "Loopback listener missing",
             "Broker parent identity lost", "Script argument not fully qualified",
             "Snapshot schema unavailable", "Snapshot enumeration failed", "Snapshot entry bound",
             "Snapshot duplicate entry", "Snapshot identity unavailable", "Snapshot close failed",
             "Snapshot root changed", "Snapshot held member changed", "Argument query bound",
-            "Argument query cancelled", "Image file identity unavailable", "Image file identity changed",
+            "Argument query cancelled", "Argument query timed out", "Image file identity unavailable", "Image file identity changed",
             "Image hash bound", "Plan byte bound", "Request bounds"
         };
         return reasons.Contains(error.Message) ? error.Message : null;
@@ -771,7 +882,14 @@ internal sealed class Held
     internal long Created;
     internal string[] Arguments;
     internal bool KeepArguments;
-    internal bool SelectedRoot;
+    internal bool Stopping;
+}
+
+internal sealed class Termination
+{
+    internal Held Process;
+    internal bool Terminated;
+    internal int Error;
 }
 
 internal sealed class Request
@@ -832,6 +950,8 @@ internal sealed class Receipt
 {
     public bool legacyRootStopVerified { get; set; }
     public bool observedDescendantsStopped { get; set; }
+    public int? descendantsFound { get; set; }
+    public int? descendantsStopped { get; set; }
     public string treeCompleteness { get; set; }
     public int observedCount { get; set; }
     public int excludedCount { get; set; }

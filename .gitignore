@@ -17,3 +17,7 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# PowerShell writes its module cache under the working directory when the
+# ordinary-run scheduled task runs without a profile-backed APPDATA.
+/Microsoft/

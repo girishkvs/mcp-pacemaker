@@ -80,7 +80,7 @@ internal sealed class OwnedApiDenial
         $needle = if ($Variant -eq 'ignore-expected') {
             'if (request.expected != null &&'
         } elseif ($Variant -eq 'deny-observed-stop') {
-            'if (!native.Alive(process.Handle)) return;'
+            'if (!native.Alive(process.Handle)) return null;'
         } elseif ($Variant -eq 'fragmented-utf8') {
             'Console.Out.WriteLine(json.Serialize(value));'
         } elseif ($Variant -eq 'older-nonmember') {
@@ -92,7 +92,7 @@ internal sealed class OwnedApiDenial
         $replacement = if ($Variant -eq 'ignore-expected') {
             'request.expected = null; if (request.expected != null &&'
         } elseif ($Variant -eq 'deny-observed-stop') {
-            'if (!native.Alive(process.Handle)) return; if (process.Info.scriptSha256 == null) throw new Win32Exception(5);'
+            'if (!native.Alive(process.Handle)) return null; if (process.Info.scriptSha256 == null) throw new Win32Exception(5);'
         } elseif ($Variant -eq 'fragmented-utf8') {
             'var data = Encoding.UTF8.GetBytes(json.Serialize(value) + "\n"); var output = Console.OpenStandardOutput(); foreach (byte item in data) { output.WriteByte(item); output.Flush(); if (item >= 0xc0) Thread.Sleep(20); }'
         } elseif ($Variant -eq 'older-nonmember') {

@@ -18,6 +18,7 @@ import { windowsSystemEnvironment } from './local-environment.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
 import { auditArguments, AUDIT_COMMAND_TIMEOUT_MS, AUDIT_MODE_VARIABLE, auditEnvironment, auditEvidence } from './local-audit-report.mjs';
 import { releaseRole } from './local-regression.mjs';
+import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -61,6 +62,19 @@ export function testArguments(script) {
 
 export function selectedTestFiles(args) {
   return args.filter(value => value.startsWith('test/'));
+}
+
+// A Windows container has no interactive logon session, so the files that bind one run in the
+// host session lane instead. `testContract` is what requires every session file to stay
+// registered; this only splits the selection and records the split for the verifier.
+export function containedSelection(selected, version) {
+  if (releaseRole(version) !== 'current') return { contained: selected, deferred: [] };
+  const deferred = selectedTestFiles(selected).filter(file => SESSION_REQUIRED_TESTS.includes(file));
+  return { contained: selected.filter(value => !SESSION_REQUIRED_TESTS.includes(value)), deferred };
+}
+
+export function sourceSuiteLabel(version) {
+  return releaseRole(version) === 'current' ? 'Contained source suite' : 'Complete source suite';
 }
 
 export function testTotals(stdout) {
@@ -348,9 +362,9 @@ export class LocalGate {
     assert.equal(environment[AUDIT_MODE_VARIABLE], undefined, 'Privileged audit mode must not enter the ordinary source suite');
     if (releaseRole(version) === 'current') {
       const context = JSON.parse(this.command('Verify user-runtime execution contract', process.execPath,
-        ['tools/ci/run-tests.mjs', 'source', '--check'], root, false, 15 * 60_000, environment));
-      assert.deepEqual(context, { contract: 'source', platform: 'win32', role: 'user-runtime',
-        verified: true, sessionVerified: true });
+        ['tools/ci/run-tests.mjs', 'source-ordinary', '--check'], root, false, 15 * 60_000, environment));
+      assert.deepEqual(context, { contract: 'source-ordinary', platform: 'win32', role: 'user-runtime',
+        verified: true });
       environment.OS = 'Windows_NT';
       const restored = JSON.parse(this.command('Restore pinned native fixture toolchain',
         'C:\\input\\pwsh\\pwsh.exe', nativeRestoreArguments(), root, false, 15 * 60_000, environment));
@@ -363,7 +377,7 @@ export class LocalGate {
     mkdirSync(temporary);
     symlinkSync(temporary, alias, process.platform === 'win32' ? 'junction' : 'dir');
     for (const key of ['TEMP', 'TMP', 'TMPDIR']) environment[key] = alias;
-    return this.command('Complete source suite', process.execPath, selected,
+    return this.command(sourceSuiteLabel(version), process.execPath, selected,
       root, false, SOURCE_SUITE_TIMEOUT_MS, environment);
   }
 
@@ -462,6 +476,8 @@ export class LocalGate {
       const listed = selectedTestFiles(selected).sort();
       assert.deepEqual(listed, readdirSync(join(this.root, 'test')).filter(file => file.endsWith('.test.mjs'))
         .map(file => `test/${file}`).sort(), 'The complete source suite must execute');
+      const { contained, deferred } = containedSelection(selected, pkg.version);
+      report.sessionDeferredTests = deferred;
       for (const autocrlf of ['false', 'true']) {
         const root = this.checkout(snapshot, autocrlf);
         const checks = report.checks[`checkout-${autocrlf}`] = {
@@ -474,7 +490,7 @@ export class LocalGate {
         checks.uiRebuild = true;
         assert.deepEqual(this.snapshot(root), before, 'UI rebuild modified checkout files');
         if (autocrlf === 'true') continue;
-        const sourceOutput = this.sourceSuite(root, pkg.version, selected);
+        const sourceOutput = this.sourceSuite(root, pkg.version, contained);
         checks.sourceTests = testTotals(sourceOutput);
         if (report.schemaVersion === 5) checks.auditExecution = 'required-privileged-companion';
         else auditEvidence(sourceOutput, pkg.version, process.version);

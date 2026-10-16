@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "binary": "LegacyProcessBroker.exe",
-  "binarySha256": "0d4579af8e4e6ec2c762d924a68586ab719589b3dd4da22e916fb17ee1b6da0b",
+  "binarySha256": "64323058e9c0437409522b6cca6d1a47c32e125980b83a07021932d1d5a317ef",
   "inputs": {
     "targetFramework": ".NETFramework,Version=v4.6.2",
     "platform": "AnyCPU",
@@ -27,8 +27,8 @@
     "sourceEncoding": "UTF-8 without BOM, LF line endings",
     "sourceSha256": {
       "AssemblyInfo.cs": "09f672607b66aff39c457899d270688972e440aafaa43b2cb56c1a2367576356",
-      "LegacyNative.cs": "274b9494d249cc4eb3710181047e094f17bf23b0d9301d777be0d517aebb6710",
-      "LegacyProcessBroker.cs": "9d086ab312398aee9462ba85b85e590b551a33e91bd22ecdf21168194ec1a9c4"
+      "LegacyNative.cs": "28f496cba02ebfbbe07102bc70133198b40846838c0189e0bfcdb91d2e0a95c6",
+      "LegacyProcessBroker.cs": "2edd5f77787498d5323185e00b663084e140c9aec6ebca3921d66078bbc66c2a"
     },
     "buildScriptSha256": "2ffa31155f6aa8f6b4239facb0f062df167a01ac7a7ce6d9ae0be60e60fd0201",
     "referenceSha256": {

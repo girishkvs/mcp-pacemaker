@@ -1,4 +1,4 @@
-# Legacy observed-process broker
+# Legacy process broker
 
 This separate own-source .NET Framework 4.6.2 executable supports an explicitly
 partial, restart-only legacy handoff. It does not change the modern lifetime
@@ -38,28 +38,26 @@ never resolves target arguments against its own cwd or guesses the target cwd.
 Existing case-insensitive full-path comparison and native executable identity
 queries are unchanged.
 
-Child discovery uses one documented `TH32CS_SNAPPROCESS` snapshot per capture
-or revalidation phase. At most 16,384 PID/parent pairs are retained in memory.
-The native entry buffer also contains other OS fields; the broker reads only
-the PID/parent offsets, never marshals names, and clears that buffer after each
-entry. It closes the snapshot before opening candidates. No global pair list
-is returned or logged, and no unrelated entries receive process/token/image
-queries. Snapshot overflow, layout/duplicate/enumeration failure and
-`ERROR_BAD_LENGTH` refuse the whole operation without retry.
+Process discovery uses documented `TH32CS_SNAPPROCESS` snapshots: one per capture
+or revalidation phase to bind the two roots, and one per stop sweep round. At most
+16,384 PID/parent pairs are retained in memory. The native entry buffer also
+contains other OS fields; the broker reads only the PID/parent offsets, never
+marshals names, and clears that buffer after each entry. It closes the snapshot
+before opening candidates. No global pair list is returned or logged, and no
+unrelated entries receive process/token/image queries. Snapshot overflow,
+layout/duplicate/enumeration failure and `ERROR_BAD_LENGTH` refuse a capture or
+revalidation phase without retry; during a stop they are reported, and the sweep
+still stops every process it already holds and tries again in its next round.
 
 Snapshot pairs are discovery hints, not process authority or an atomic tree.
-Every candidate must still bind to an already-held live parent through native
-parent/creation/owner checks. Unknown historical branches remain unproven.
-Fresh revalidation refuses added or changed generations; a reused numeric PID
-cannot replace an exited captured handle.
+A sweep candidate must still bind to a held process through its own native
+parent, creation-time and owner checks. Unknown historical branches stay
+untouched.
 
-Argv queries cover only held live IDs, at most 32 per query and four concurrent
-workers. Each worker owns its connected WMI scope/searcher/cursor. Missing,
-extra, duplicate or stale rows refuse the entire phase. Failed waves stop new
-dispatch and join before a response; the native watchdog remains the hard
-whole-helper bound for blocked calls. Descendant argv is discarded after
-hashing. Already-exited captured descendants remain recorded as gone rather
-than being adopted by PID.
+The argv query covers only the two held roots, in one query per phase run by a
+worker that owns its connected WMI scope/searcher/cursor. Missing, extra,
+duplicate or stale rows refuse the entire phase; the native watchdog remains the
+hard whole-helper bound for a blocked call.
 
 Each phase separately hashes at most 64 executable files, 256 MiB per file and
 512 MiB total. Read handles deny writes/deletion until the phase finishes.
@@ -71,59 +69,75 @@ launcher/task ownership, source hashes, and config-directory nonce/revision.
 Matching process arguments and captured script hashes do **not** make an arbitrary
 script an approved legacy package. Cwd is not a supported config binding.
 
-Prepare is read-only. It captures the roots and a bounded set of currently
-provable descendants **before any stop**. Each ancestry edge is checked against
-a held, still-live parent and child creation time. Script read handles deny
-script modification/deletion during this session. The plan contains:
+Prepare is read-only. It captures **only the two roots** and binds them to the
+listener and to each other. It does not list the bridge's session processes: a
+busy 1.3 bridge starts and ends them every few seconds, so a list would be stale
+before the stop. It also walks its own parent chain, checking creation order at
+each step, and refuses with `Run the upgrade from a terminal the 1.3 bridge did
+not start` if that chain reaches the supervisor or the bridge: such an upgrade
+would stop itself. Script read handles deny script modification/deletion during
+this session. The plan contains:
 
 ```text
 protocol: 1
 kind: "legacy-observed-process-set"
 roots: { supervisor, bridge }
-observed: [captured identities]
-excluded: [proven older nonmembers; never termination targets]
+observed: []   (2.1.0 plans listed descendants here; recovery still verifies them)
+excluded: []
 observedSetSha256
 treeCompleteness: "unproven"
 scope
 planSha256
 ```
 
-Identities include PID, creation time, parent PID/creation time, owner SID, image
-path/hash, argv hash and root script hash. No opaque commit token is in `plan`.
-Passing a previous full `plan` as `expected` requires exact equality, including
-all root generations, hashes and observed members. Changes require a new plan
-and confirmation; no new set is silently substituted.
+Root identities include PID, creation time, parent PID/creation time, owner SID,
+image path/hash, argv hash and root script hash. No opaque commit token is in
+`plan`. Passing a previous `plan` as `expected` binds its roots: protocol, kind,
+port, root, owner and both root identities must match exactly. Descendants are
+not compared, so sessions that started or ended since the plan do not refuse it.
+A changed root generation still requires a new plan and confirmation.
 
-If a query returns a candidate whose actual creator PID equals a still-live held
-parent, but whose creation time predates that parent's held generation, it is
-excluded with PID/birth/parent-birth evidence and reason `predates-held-parent`.
-Only query/synchronize access is opened for this check; an excluded candidate
-never receives terminate access and is not traversed. This handles older
-survivors whose creator's numeric PID was reused. The plan digest binds the
-excluded evidence too. A dead parent, changed live edge, inaccessible query or
-other ambiguous ownership still refuses. Stop rechecks any excluded candidate
-still returned by the same rooted query; changed generations require replanning.
+Only after the caller's per-plan confirmation and holding and rechecking the
+**exact selected** autostart registration may the caller invoke `stop()`. This
+broker does not attest that the task is held. It rechecks the roots, listener and
+argv/image identity, then stops through retained native handles, never by a
+fresh PID lookup:
 
-Cached identities repeat the native generation, parent, owner and liveness
-checks before reuse. If a selected root predates a newer held generation of its
-numeric creator PID, only that false descendant edge is ignored. The root
-remains selected, its parent-birth binding is not rewritten, and it is not added
-to `excluded`. Non-root or unproven cached edges still refuse. Revalidation uses
-the same classification; depth eight and the combined identity limit do not
-change.
+1. Terminate the supervisor and wait for it, so it cannot start another bridge.
+2. Pin: take a snapshot and hold a handle to each process whose live parent PID
+   (read from its own handle, not the snapshot) is a held process and which
+   started no earlier than that process, walking the whole tree in one pass.
+   Repeat until a snapshot shows nothing new, at most eight times. Nothing is
+   stopped here.
+3. Terminate the bridge and wait for it.
+4. Sweep: pin again, then terminate every held process not yet stopped and wait
+   for them, even if that pin found the tree still growing or could not read a
+   snapshot. Repeat until a round's pin settles with nothing new and nothing is
+   left to stop.
 
-Only after explicit per-plan interruption/uncertain-HTTP confirmation and holding
-and rechecking the **exact selected** autostart registration may the caller invoke
-`stop()`. This broker does not attest that the user has paused callers or held the
-task. It rechecks roots, listener, argv/image identity and currently reachable
-members. A newly observed child before commit causes refusal, not silent expansion.
-Then it terminates the selected supervisor, bridge, and admitted descendants
-through their retained native handles, never by a fresh PID lookup.
+Pinning comes first because Node ends a process's direct children together with
+it through a job object, and 1.3 runs each bare server command under a `cmd.exe`
+wrapper. Without the pin, ending the bridge would end the wrappers at once and
+leave the real servers under them with a parent nobody holds. A process that has
+already exited is held too while it can still be opened, so its children stay
+traceable. A wrapper the bridge starts in the few milliseconds between the last
+pin snapshot and the bridge's exit is not held; if it has started its server by
+then, that server is left running like any other untraceable process.
 
-All root/capture ambiguities refuse. After mutation starts, failures are explicit
-and may be partial; never automatically relaunch the old supervisor, replay
-tools, or broaden cleanup. The caller must preserve its task hold and journal
-when stop is uncertain.
+Held handles keep their PIDs from being reused, so a process that names a held
+PID as its parent and started no earlier than it was started by it. A process
+older than that parent got the PID from an earlier owner and is left alone; a
+held root that appears under a pinned process (its creator's PID was reused) is
+already held and is skipped. The broker and its own parent chain, matched by PID
+and creation time, are never adopted. A live process owned by another user is
+reported, not stopped.
+Processes whose parent had already exited before the stop cannot be traced and
+stay untouched.
+
+Root capture ambiguities refuse. After mutation starts, failures are explicit and
+may be partial; never automatically relaunch the old supervisor, replay tools, or
+broaden cleanup. The caller must preserve its task hold and journal when the root
+stop is uncertain.
 
 ### Failure diagnostics
 
@@ -131,9 +145,9 @@ The existing refusal envelope keeps its exception type, native error code,
 stage, reason and `mutationStarted` flag. When available, `captureFailure`
 contains fixed API/substage labels and nullable stored PID, creation, parent,
 liveness and owner-match facts. An initial query-handle denial reports the
-requested PID but `generationKnown: false` and `creationTime: null`. Existing
-ancestry-refusal details are retained. Other call sites can report an API with
-unknown substage/target; unknown fields are not inferred from a PID or exception.
+requested PID but `generationKnown: false` and `creationTime: null`. Other call
+sites can report an API with unknown substage/target; unknown fields are not
+inferred from a PID or exception.
 
 `observation: "stored-observations-not-fresh-proof"` identifies these as prior
 observations, not a new identity check or stop authority. No diagnostic recovery
@@ -146,7 +160,9 @@ Success frames, plans, digests, approvals and stop behavior do not change.
 
 ```text
 legacyRootStopVerified: true|false
-observedDescendantsStopped: true|false
+observedDescendantsStopped: true|false   (every process the sweep found was stopped)
+descendantsFound
+descendantsStopped
 treeCompleteness: "unproven"
 observedCount
 excludedCount
@@ -156,43 +172,53 @@ unattributed: "Not discovered or not provable; left untouched."
 ```
 
 There is no `stopped:true` or `activeProcesses:0` field. A wrapper that exits
-before capture can leave an unprovable descendant. Matching snapshots and empty
-captured sets do not prove no such processes exist. This broker neither counts
-nor kills historical/unattributed orphans.
+before the stop leaves its children with no traceable parent. Matching snapshots
+do not prove no such processes exist. This broker neither counts nor kills
+historical/unattributed orphans. The caller requires `legacyRootStopVerified`;
+a process the sweep could not stop is reported in `errors` and left running.
 
 `verifyLegacyProcessesGone(plan)` validates the protected plan's shape/digest,
-then opens **only its captured IDs** with query/synchronize access. A different
-creation time is an unrelated reused PID and is untouched; a matching live
-identity keeps the receipt false; inaccessible identities keep it unverified.
-It never requests terminate access or performs discovery. The journal's
-authentication/ownership and phase authorization belong to the caller. A hash
-inside the plan is an integrity check, not an authentication credential.
-
-Excluded candidates are never opened by recovery verification and are never
-required to exit. Counts describe this bounded observation, not all historical
-orphans or complete tree coverage.
+then opens **only its captured IDs** (the roots, plus any descendants a 2.1.0 plan
+listed) with query/synchronize access. A different creation time is an unrelated
+reused PID and is untouched; a matching live identity keeps the receipt false;
+inaccessible identities keep it unverified. It never requests terminate access or
+performs discovery, so its `descendantsFound` and `descendantsStopped` are null,
+and for a plan that lists no descendants `observedDescendantsStopped` is false:
+the check cannot vouch for them. The journal's authentication/ownership and phase
+authorization belong to the caller. A hash inside the plan is an integrity check,
+not an authentication credential.
 
 ## Bounds and lifecycle
 
-- At most 512 **combined held and excluded identities**, including both roots,
-  and eight ancestry levels. Any count/depth/byte/query failure refuses the
-  whole plan; no subset is silently accepted.
-- At most 48 argv queries during capture and 32 during revalidation.
-- Initial capture: 15-second native watchdog, 20-second Node response bound.
+- Plans hold at most 512 identities, including both roots, so a 2.1.0 plan is
+  still accepted for recovery checks. A plan written now holds only the roots.
+- The stop holds at most 2048 processes and reads at most 2048 children of one
+  process. Each pin takes at most eight snapshots; a tree still growing after
+  that is pinned further by the next sweep round. The sweep runs at most 16
+  rounds. One busy 1.3 host had 533 processes in its tree. Reaching the process,
+  child or round bound is reported in `errors`; the root stop stands.
+- One argv query during capture and one during revalidation.
+- The native watchdog allows 15 seconds to receive the request. Capture and
+  revalidation then each have 120 seconds, timed from the request rather than
+  from broker start; verification is bounded by the watchdog alone. Each phase
+  adds a 10-second watchdog margin, longer than one 8-second WMI query, so a
+  phase refusal is reported rather than cut off. Node waits 150 seconds for a
+  prepare or verification response.
 - Uncommitted session: 120 seconds; expiration requires fresh prepare.
-- Stop revalidation: 15 seconds; termination/waits share **one eight-second**
-  budget. Node's whole stop exchange is bounded to 30 seconds.
+- Stop: the supervisor, the pin, the bridge and every sweep round share **one
+  20-second** budget. Once it is spent, remaining exits are polled, not awaited,
+  and the sweep ends. Node's whole stop exchange, including revalidation, is
+  bounded to 170 seconds.
 - Close/exit verification: three seconds.
-- Plans: at most 240 KiB UTF-8 before emit/accept. Complete encoded requests:
-  at most 256 KiB; no full command lines or config contents emitted.
+- Plans: at most 240 KiB UTF-8 before emit/accept. Requests and responses: at most
+  256 KiB UTF-8. No full command lines or config contents are emitted.
 - Native parent watch: caller loss before commit releases handles without target
   termination. After commit the already-authorized bounded stop finishes.
 
   Prepare/stop responses include bounded phase timing/resource diagnostics and
   the broker's own PID/FILETIME for owned exit evidence. These values confer no
-  target authority and are not part of the plan digest. Termination order and its
-  single shared eight-second budget are unchanged. A test-only outer cleanup job
-  is not proof that the production stop succeeded.
+  target authority and are not part of the plan digest. A test-only outer
+  cleanup job is not proof that the production stop succeeded.
 
 Detached native launch avoids inherited console/Node child termination, but is
 not an unbounded daemon. Parent loss and deadlines end the broker. Native target

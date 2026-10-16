@@ -138,10 +138,15 @@ export async function controlManagedService({ root, config, port }, action, expe
     id: record.id, token: record.token, action,
     expectedAuthority: expected.authority, expectedSessionState: expected.sessionState,
   });
-  if (response.id !== record.id ||
-      response.ok !== true ||
-      response.instanceId !== record.instanceId ||
-      response.version !== record.version ||
-      response.port !== port) throw new Error(response.error || 'Managed bridge identity/admission could not be verified.');
+  const identified = response.id === record.id &&
+    response.instanceId === record.instanceId &&
+    response.version === record.version &&
+    response.port === port;
+  if (!identified ||
+      response.ok !== true) {
+    // Only a refusal from the identified bridge is definite; anything else leaves the outcome unknown.
+    throw Object.assign(new Error(response.error || 'Managed bridge identity/admission could not be verified.'),
+      { refused: identified && response.ok === false });
+  }
   return response;
 }

@@ -97,6 +97,8 @@ export function unpackUpgrade(bytes, version, destination, nodeVersion = process
       capability.portZero !== true ||
       capability.admission !== true ||
       capability.cli !== true) throw new Error('Target does not support managed readiness/admission/port allocation/CLI dispatch.');
+  if (capability.dependencyLock === 1 &&
+      !files.get('bin/dependency-lock.json')?.bytes.length) throw new Error('Target declares a bundled dependency lock but does not contain it.');
   for (const file of files.values()) {
     if (![0o644, 0o755].includes(file.mode)) throw new Error('Unexpected package file mode.');
   }

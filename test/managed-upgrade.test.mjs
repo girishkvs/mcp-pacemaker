@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
-  copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync,
+  copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
@@ -18,15 +18,15 @@ import { runInNewContext } from 'node:vm';
 import { acquireInstanceLock, createInstance, durableJson, loadInstance, readInstanceState, readRecoveryContext, readManagedJson, verifySelection } from '../bin/managed-state.mjs';
 import { backendStatus, inspectInstance, listenerOpen, startInstance, stopInstance, waitForInstanceExit } from '../bin/managed-runtime.mjs';
 import { ManagedUpgrader, describeUpgrade, planUpgrade, upgradeOptions } from '../bin/managed-upgrade.mjs';
-import { acquireUpgrade, exactVersion, normalizePackResult, verifyArchive } from '../bin/upgrade-package.mjs';
+import { acquireUpgrade, exactVersion, normalizePackResult, unpackUpgrade, verifyArchive } from '../bin/upgrade-package.mjs';
 import { normalizeNpmMetadata } from '../bin/update-check.mjs';
 import { PoolingConfigWriter } from '../bin/pooling-writer.mjs';
 import { ownedPackageSelection, retainedCliDependencies } from './helpers/managed-package.mjs';
 import { normalizeInstanceSelection, registerDefaultCli } from '../bin/cli-dispatch.mjs';
 import { validateSelectedCommand } from '../bin/cli-selection.mjs';
-import { stageCliDependencies } from '../bin/upgrade-dependencies.mjs';
+import { npmMapsPublicRegistry, registryLock, stageCliDependencies } from '../bin/upgrade-dependencies.mjs';
 import { npmCliPath } from '../bin/update-check.mjs';
-import { retainedRegistry } from './helpers/managed-registry.mjs';
+import { retainedDependencyLock, retainedRegistry } from './helpers/managed-registry.mjs';
 
 const source = fileURLToPath(new URL('../', import.meta.url));
 const previousRelease = 'a9fd5be23a50d4f3e3b787b678a8e85bdfb45fa2';
@@ -53,6 +53,7 @@ class UpgradeFixture {
     }
     const pkg = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'));
     writeFileSync(join(root, 'package.json'), JSON.stringify({ ...pkg, version }));
+    writeFileSync(join(root, 'bin', 'dependency-lock.json'), retainedDependencyLock(version));
     modify?.(root);
     return { parent, root };
   }
@@ -141,12 +142,28 @@ class UpgradeFixture {
     return result;
   }
 
+  inheritedEnvironment() {
+    // The contained guest exports npm_config_* policy, including offline=true, for its own npm
+    // use. A fixture that serves its own loopback registry must not inherit that policy, or npm
+    // resolves cache-only and fails with ENOTCACHED before it ever reaches the registry.
+    if (!this.npmEnv) return process.env;
+    return Object.fromEntries(Object.entries(process.env)
+      .filter(([key]) => !key.toLowerCase().startsWith('npm_config_')));
+  }
+
   async cli(...args) {
-    const result = await promisify(execFile)(process.execPath, [join(source, 'bin', 'cli.mjs'), ...args], {
-      encoding: 'utf8', timeout: 180000, windowsHide: true,
-      env: { ...process.env, HOME: this.directory, USERPROFILE: this.directory, ...this.npmEnv },
-    });
-    return result.stdout.trim();
+    try {
+      const result = await promisify(execFile)(process.execPath, [join(source, 'bin', 'cli.mjs'), ...args], {
+        encoding: 'utf8', timeout: 180000, windowsHide: true,
+        env: { ...this.inheritedEnvironment(), HOME: this.directory, USERPROFILE: this.directory, ...this.npmEnv },
+      });
+      return result.stdout.trim();
+    } catch (error) {
+      // The CLI reports upgrade failures as JSON on stdout, which execFile omits from the thrown
+      // message. Without this a container-only exit 1 is undiagnosable from the test receipt alone.
+      error.message += `\nstdout: ${error.stdout ?? ''}\nstderr: ${error.stderr ?? ''}`;
+      throw error;
+    }
   }
 
   async executeGeneratedPrewarm(output) {
@@ -633,7 +650,7 @@ test('SxS explicit free port starts at exactly that port without changing old ba
   } finally { await fixture.cleanup(); }
 });
 
-test('an active tool request refuses bounded drain without interruption or replay', { timeout: 300000 }, async () => {
+test('an upgrade ends an active tool request after the drain grace period and does not replay it', { timeout: 300000 }, async () => {
   const fixture = new UpgradeFixture();
   let releaseRequest;
   let seen;
@@ -653,25 +670,243 @@ test('an active tool request refuses bounded drain without interruption or repla
     }) + '\n');
     writeFileSync(fixture.config, fixture.original);
     const old = await fixture.start();
+    // The restart ends this call, so its rejection is expected and handled from the start.
     request = fetch(`http://127.0.0.1:${old.instance.port}/alpha`, {
       method: 'POST', body: '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"owned"}}',
       headers: { 'content-type': 'application/json' },
-    });
+    }).then(response => response.status, () => 'closed');
     await entered;
-    await assert.rejects(fixture.upgrader().execute(await fixture.plan()), /Active work/);
-    assert.equal((await backendStatus(old.instance.port)).instanceId, old.ready.instanceId);
-    assert.equal((await inspectInstance(old.instance)).held, true, 'A failed drain must keep admission held.');
-    assert.equal((await fetch(`http://127.0.0.1:${old.instance.port}/ui`)).status, 503);
-    assert.equal(calls, 1);
+    const result = await fixture.upgrader().execute(await fixture.plan());
+    assert.equal(result.status, 'upgraded');
+    assert.notEqual(await request, 200, 'The ended call must not report success.');
+    assert.notEqual((await backendStatus(old.instance.port)).instanceId, old.ready.instanceId);
+    assert.equal(calls, 1, 'The ended call was not replayed.');
     assert.deepEqual(readFileSync(fixture.config), fixture.original);
-    releaseRequest();
-    assert.equal((await request).status, 200);
-    assert.equal((await new ManagedUpgrader().recover(old.instance.directory)).status, 'aborted');
-    assert.equal((await inspectInstance(old.instance)).held, false, 'Only explicit recovery resumes admission.');
   } finally {
     releaseRequest?.();
-    if (request) await request.catch(() => {});
+    if (request) await request;
     await new Promise(resolveClose => upstream.close(resolveClose));
+    await fixture.cleanup();
+  }
+});
+
+test('open sessions and a dropped listening stream do not block an upgrade, and the config is kept', { timeout: 300000 }, async () => {
+  const fixture = new UpgradeFixture();
+  const stream = new AbortController();
+  try {
+    fixture.original = Buffer.from(JSON.stringify({
+      echo: { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/echo-mcp-server.mjs', import.meta.url))] },
+    }) + '\n');
+    writeFileSync(fixture.config, fixture.original);
+    const old = await fixture.start();
+    const endpoint = `http://127.0.0.1:${old.instance.port}/echo/mcp`;
+    const initialize = () => fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'owned', version: '1' } } }),
+    });
+    const sessions = [];
+    for (let index = 0; index < 2; index++) {
+      const response = await initialize();
+      assert.equal(response.status, 200);
+      await response.text();
+      sessions.push(response.headers.get('mcp-session-id'));
+    }
+    // 2.1.0 marked a bridge unsafe to upgrade for good once any client dropped a stream like this.
+    const listening = await fetch(endpoint, {
+      headers: { accept: 'text/event-stream', 'mcp-session-id': sessions[0] }, signal: stream.signal,
+    });
+    assert.equal(listening.status, 200);
+    stream.abort();
+    await new Promise(resolveWait => setTimeout(resolveWait, 200));
+    const state = await inspectInstance(fixture.instance);
+    assert.equal(state.unsafe, false);
+    assert.equal(state.busy, true, 'The sessions are still open.');
+    const result = await fixture.upgrader().execute(await fixture.plan());
+    assert.equal(result.status, 'upgraded');
+    assert.notEqual((await backendStatus(old.instance.port)).instanceId, old.ready.instanceId);
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+    const fresh = await initialize();
+    assert.equal(fresh.status, 200, 'The upgraded bridge serves the same server list.');
+    await fresh.text();
+  } finally {
+    stream.abort();
+    await fixture.cleanup();
+  }
+});
+
+test('quiesce still refuses while config work is unfinished and leaves the config unchanged', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    await fixture.start();
+    const transaction = `${fixture.config}.pooling-transaction`;
+    mkdirSync(transaction);
+    try { await assert.rejects(inspectInstance(fixture.instance, 'quiesce'), /Unfinished config work/); }
+    finally { rmSync(transaction, { recursive: true }); }
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+    assert.equal((await inspectInstance(fixture.instance)).held, true, 'A refused drain keeps admission held.');
+    assert.equal((await inspectInstance(fixture.instance, 'resume')).held, false);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a definite refusal before the restart resumes the current bridge at once', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const old = await fixture.start();
+    const edited = Buffer.from('{}\n\n');
+    let released = 0;
+    // The user edits servers.json while the target downloads.
+    const upgrader = fixture.upgrader(undefined, {
+      beforeInterruption: async () => writeFileSync(fixture.config, edited),
+      afterRefusal: async () => { released++; },
+    });
+    await assert.rejects(upgrader.execute(await fixture.plan()), /Configuration changed while staging[\s\S]*serving again/);
+    assert.equal(released, 1, 'What the caller held is released before the journal settles.');
+    assert.equal((await inspectInstance(fixture.instance)).held, false, 'The refused upgrade released admission.');
+    assert.equal((await fetch(`http://127.0.0.1:${fixture.instance.port}/ui`)).status, 200);
+    assert.equal((await backendStatus(fixture.instance.port)).instanceId, old.ready.instanceId);
+    assert.equal(readManagedJson(join(fixture.instance.directory, 'journal.json')).phase, 'aborted');
+    assert.deepEqual(readFileSync(fixture.config), edited, 'The upgrade left the edited config alone.');
+  } finally { await fixture.cleanup(); }
+});
+
+test('a refusal whose hold cannot be released leaves the journal open for recovery', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const old = await fixture.start();
+    const edited = Buffer.from('{}\n\n');
+    const upgrader = fixture.upgrader(undefined, {
+      beforeInterruption: async () => writeFileSync(fixture.config, edited),
+      afterRefusal: async () => { throw new Error('The original task could not be restored (denied).'); },
+    });
+    await assert.rejects(upgrader.execute(await fixture.plan()),
+      /Configuration changed while staging[\s\S]*serving again\. The original task could not be restored \(denied\)\. Run recovery to finish\./);
+    assert.equal(readManagedJson(join(fixture.instance.directory, 'journal.json')).phase, 'quiescing');
+    assert.equal((await inspectInstance(fixture.instance)).held, false, 'The current version serves again.');
+    assert.equal((await fixture.upgrader().recover(fixture.instance.directory)).status, 'aborted');
+    assert.equal((await backendStatus(fixture.instance.port)).instanceId, old.ready.instanceId);
+    assert.deepEqual(readFileSync(fixture.config), edited);
+  } finally { await fixture.cleanup(); }
+});
+
+test('session records that grow past the limit during the download refuse before anything stops', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const old = await fixture.start();
+    const artifact = fixture.artifact('2.0.3');
+    const upgrader = fixture.upgrader(artifact, {
+      acquire: async () => {
+        writeFileSync(join(fixture.home, 'sessions.json'), JSON.stringify({ padding: 'x'.repeat(1024 * 1024) }));
+        return artifact;
+      },
+    });
+    await assert.rejects(upgrader.execute(await fixture.plan()), /over 1 MiB[\s\S]*Nothing was stopped/);
+    assert.equal(existsSync(join(fixture.instance.directory, 'journal.json')), false);
+    assert.equal((await inspectInstance(fixture.instance)).held, false);
+    assert.equal((await backendStatus(fixture.instance.port)).instanceId, old.ready.instanceId);
+  } finally { await fixture.cleanup(); }
+});
+
+test('session records unreadable after the stop roll back a target that compares them', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const old = await fixture.start();
+    const sessions = join(fixture.home, 'sessions.json');
+    // The records grow past what can be read only after the size check, while the drain runs.
+    const upgrader = fixture.upgrader(undefined, {
+      beforeStop: async () => writeFileSync(sessions, JSON.stringify({ padding: 'x'.repeat(1024 * 1024) })),
+    });
+    await assert.rejects(upgrader.execute(await fixture.plan()), /could not be read after the old version stopped/);
+    assert.equal(readManagedJson(join(fixture.instance.directory, 'journal.json')).phase, 'rolled-back');
+    const status = await backendStatus(fixture.instance.port);
+    assert.equal(status.version, '2.0.2');
+    assert.notEqual(status.instanceId, old.ready.instanceId);
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a refusal the current bridge cannot resume yet stays paused until recovery', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  const transaction = `${fixture.config}.pooling-transaction`;
+  try {
+    const old = await fixture.start();
+    // An unresolved config transaction blocks the drain and, until it is resolved, the resume.
+    const upgrader = fixture.upgrader(undefined, { beforeInterruption: async () => mkdirSync(transaction) });
+    await assert.rejects(upgrader.execute(await fixture.plan()),
+      /Unfinished config work[\s\S]*stays paused until `mcp-pacemaker upgrade --recover --instance /);
+    assert.equal(readManagedJson(join(fixture.instance.directory, 'journal.json')).phase, 'quiescing');
+    assert.equal((await inspectInstance(fixture.instance)).held, true, 'Admission stays held for recovery.');
+    rmSync(transaction, { recursive: true });
+    assert.equal((await fixture.upgrader().recover(fixture.instance.directory)).status, 'aborted');
+    assert.equal((await inspectInstance(fixture.instance)).held, false);
+    assert.equal((await backendStatus(fixture.instance.port)).instanceId, old.ready.instanceId);
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+  } finally {
+    rmSync(transaction, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
+test('session records too large to inspect never strand an upgrade after the old bridge stops', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const old = await fixture.start();
+    // Resumable records for servers no longer configured; together over the 1 MiB inspection limit.
+    const records = Object.fromEntries(Array.from({ length: 9000 }, () => [randomUUID(), {
+      server: 'retired', initialize: { protocolVersion: '2025-06-18', clientInfo: { name: 'client', version: '1.0.0' } },
+      at: Date.now(),
+    }]));
+    const sessions = join(fixture.home, 'sessions.json');
+    writeFileSync(sessions, JSON.stringify(records));
+    assert.ok(statSync(sessions).size > 1024 * 1024);
+    // A target that still compares the records when it starts refuses before anything stops.
+    await assert.rejects(fixture.upgrader().execute(await fixture.plan()), /over 1 MiB[\s\S]*Nothing was stopped/);
+    assert.equal(existsSync(join(fixture.instance.directory, 'journal.json')), false);
+    assert.equal((await backendStatus(fixture.instance.port)).instanceId, old.ready.instanceId);
+    // A target that ignores them reads them only after the stop, and only for the journal.
+    const result = await fixture.upgrader(fixture.artifact('2.1.2')).execute(await fixture.plan({ to: '2.1.2' }));
+    assert.equal(result.status, 'upgraded');
+    const journal = readManagedJson(join(fixture.instance.directory, 'journal.json'));
+    assert.equal(journal.phase, 'committed');
+    assert.equal(journal.sessionState, null);
+    assert.equal((await backendStatus(fixture.instance.port)).version, '2.1.2');
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a pooling change whose body arrives after admission closes is refused and the config is kept', { timeout: 180000 }, async () => {
+  const fixture = new UpgradeFixture();
+  let socket;
+  try {
+    fixture.original = Buffer.from(JSON.stringify({
+      echo: { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/echo-mcp-server.mjs', import.meta.url))] },
+    }) + '\n');
+    writeFileSync(fixture.config, fixture.original);
+    await fixture.start();
+    const port = fixture.instance.port;
+    const nonce = readFileSync(join(fixture.home, 'admin.nonce'), 'utf8').trim();
+    const body = JSON.stringify({ mode: 'pool', minWarm: 1 });
+    socket = connect(port, '127.0.0.1');
+    await once(socket, 'connect');
+    let reply = '';
+    socket.on('data', chunk => { reply += chunk; });
+    const closed = once(socket, 'close');
+    // The request is admitted before the hold; its body only arrives once admission is closed.
+    socket.write(`POST /admin/servers/echo/pooling HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n` +
+      `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n` +
+      `x-mcp-nonce: ${nonce}\r\nx-mcp-pooling-batch: 1\r\nConnection: close\r\n\r\n`);
+    await new Promise(resolveWait => setTimeout(resolveWait, 300));
+    const quiesced = inspectInstance(fixture.instance, 'quiesce');
+    await new Promise(resolveWait => setTimeout(resolveWait, 500));
+    socket.write(body);
+    await closed;
+    assert.match(reply, /^HTTP\/1\.1 503/);
+    assert.equal((await quiesced).held, true);
+    assert.deepEqual(readFileSync(fixture.config), fixture.original);
+    assert.equal((await inspectInstance(fixture.instance, 'resume')).held, false);
+  } finally {
+    socket?.destroy();
     await fixture.cleanup();
   }
 });
@@ -728,7 +963,7 @@ test('held admission refuses new traffic and resumes without replay', { timeout:
   } finally { await fixture.cleanup(); }
 });
 
-test('activation binds config and session state before admission opens', { timeout: 180000 }, async () => {
+test('activation binds the config before admission opens; session records may change', { timeout: 180000 }, async () => {
   const fixture = new UpgradeFixture();
   try {
     await fixture.start();
@@ -738,11 +973,7 @@ test('activation binds config and session state before admission opens', { timeo
     await assert.rejects(inspectInstance(fixture.instance, 'activate', expected), /changed before admission/);
     assert.equal((await inspectInstance(fixture.instance)).held, true);
     writeFileSync(fixture.config, fixture.original);
-    const sessions = join(fixture.home, 'sessions.json');
-    writeFileSync(sessions, '{}\n');
-    await assert.rejects(inspectInstance(fixture.instance, 'activate', expected), /changed before admission/);
-    assert.equal((await inspectInstance(fixture.instance)).held, true);
-    unlinkSync(sessions);
+    writeFileSync(join(fixture.home, 'sessions.json'), '{}\n');
     assert.equal((await inspectInstance(fixture.instance, 'activate', expected)).held, false);
   } finally { await fixture.cleanup(); }
 });
@@ -1147,6 +1378,146 @@ test('native npm acquires target CLI dependencies only from an owned registry an
     await assert.rejects(stageCliDependencies(denied, {
       registry, cache: join(fixture.directory, 'corrupt-cache'), run,
     }), /refused or unavailable/);
+  } finally {
+    await new Promise(resolveClose => server.close(resolveClose));
+    await fixture.cleanup();
+  }
+});
+
+test('the release ships its exact dependency lock for managed staging', () => {
+  assert.deepEqual(readFileSync(join(source, 'bin', 'dependency-lock.json')), readFileSync(join(source, 'package-lock.json')),
+    'Copy package-lock.json to bin/dependency-lock.json whenever dependencies or the version change.');
+  assert.equal(JSON.parse(readFileSync(join(source, 'bin', 'upgrade-capability.json'), 'utf8')).dependencyLock, 1);
+});
+
+test('the bundled lock is pointed at the configured registry and each scope registry', () => {
+  const lock = {
+    name: 'mcp-pacemaker', version: '2.0.3', lockfileVersion: 3,
+    packages: {
+      '': { name: 'mcp-pacemaker', version: '2.0.3' },
+      'node_modules/plain': { version: '1.0.0', resolved: 'https://registry.npmjs.org/plain/-/plain-1.0.0.tgz', integrity: 'sha512-a' },
+      'node_modules/@scope/pkg': { version: '1.0.0', resolved: 'https://registry.npmjs.org/@scope/pkg/-/pkg-1.0.0.tgz', integrity: 'sha512-b' },
+      'node_modules/plain/node_modules/@other/dep': { version: '1.0.0', resolved: 'https://registry.npmjs.org/@other/dep/-/dep-1.0.0.tgz', integrity: 'sha512-c' },
+      'node_modules/elsewhere': { version: '1.0.0', resolved: 'https://mirror.example/elsewhere.tgz', integrity: 'sha512-d' },
+    },
+  };
+  const bytes = Buffer.from(JSON.stringify(lock, null, 2) + '\n');
+  const mapped = JSON.parse(registryLock(bytes, 'https://mirror.example/npm', { '@scope': 'https://scope.example/registry/' }).toString('utf8'));
+  assert.equal(mapped.packages['node_modules/plain'].resolved, 'https://mirror.example/npm/plain/-/plain-1.0.0.tgz');
+  assert.equal(mapped.packages['node_modules/@scope/pkg'].resolved, 'https://scope.example/registry/@scope/pkg/-/pkg-1.0.0.tgz');
+  assert.equal(mapped.packages['node_modules/plain/node_modules/@other/dep'].resolved, 'https://mirror.example/npm/@other/dep/-/dep-1.0.0.tgz');
+  assert.equal(mapped.packages['node_modules/elsewhere'].resolved, 'https://mirror.example/elsewhere.tgz');
+  for (const path of Object.keys(lock.packages)) assert.equal(mapped.packages[path].integrity, lock.packages[path].integrity);
+  assert.equal(registryLock(bytes, 'https://registry.npmjs.org/'), bytes, 'The public registry needs no change.');
+});
+
+test('npm maps public-registry lock URLs itself unless replace-registry-host says otherwise', () => {
+  for (const setting of [undefined, 'npmjs', 'always', 'registry.npmjs.org', 'https://registry.npmjs.org/']) {
+    assert.equal(npmMapsPublicRegistry(setting), true, String(setting));
+  }
+  for (const setting of ['never', 'internal.example']) assert.equal(npmMapsPublicRegistry(setting), false, setting);
+});
+
+test('a target that declares a bundled dependency lock must contain it', async () => {
+  const fixture = new UpgradeFixture();
+  try {
+    const artifact = fixture.artifact('2.0.3', root => rmSync(join(root, 'bin', 'dependency-lock.json')));
+    const destination = join(fixture.directory, 'unpacked');
+    mkdirSync(destination);
+    assert.throws(() => unpackUpgrade(artifact.bytes, '2.0.3', destination), /declares a bundled dependency lock but does not contain it/);
+    assert.deepEqual(readdirSync(destination), []);
+  } finally { await fixture.cleanup(); }
+});
+
+test('a bundled release lock stages through a registry that serves only SHA-1 metadata', { timeout: 90000 }, async () => {
+  const fixture = new UpgradeFixture();
+  const name = 'managed-sha1-dependency';
+  const requests = [];
+  let tarball;
+  let registry;
+  // Like some npm mirrors: the packument carries only the SHA-1 shasum, no integrity field.
+  const server = createHttpServer((request, response) => {
+    requests.push(request.url);
+    if (request.url === '/dependency.tgz') {
+      response.end(tarball.bytes);
+      return;
+    }
+    if (request.url !== `/${name}`) { response.writeHead(404).end(); return; }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({
+      name, 'dist-tags': { latest: '1.0.0' }, time: { '1.0.0': '2020-01-01T00:00:00.000Z' },
+      versions: { '1.0.0': { name, version: '1.0.0', main: 'index.cjs',
+        dist: { tarball: `${registry}dependency.tgz`, shasum: createHash('sha1').update(tarball.bytes).digest('hex') } } },
+    }));
+  });
+  try {
+    tarball = fixture.artifact('1.0.0', root => {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.cjs' }));
+      writeFileSync(join(root, 'index.cjs'), 'module.exports = 41;\n');
+    });
+    await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
+    registry = `http://127.0.0.1:${server.address().port}/`;
+    const globalconfig = join(fixture.directory, 'global.npmrc');
+    writeFileSync(globalconfig, '');
+    const npm = process.env.MCP_UPGRADE_TEST_NPM_CLI || npmCliPath();
+    const runner = (file, mapping) => {
+      const userconfig = join(fixture.directory, file);
+      writeFileSync(userconfig, `registry=${registry}\n${mapping}strict-ssl=true\nallow-git=false\nallow-file=false\nallow-directory=false\nmin-release-age=7\nfetch-retries=0\n`);
+      return async (node, args, options) => {
+        const env = Object.fromEntries(Object.entries(options.env ?? process.env)
+          .filter(([key]) => !key.toLowerCase().startsWith('npm_config_')));
+        Object.assign(env, {
+          npm_config_userconfig: userconfig, npm_config_globalconfig: globalconfig,
+          npm_config_registry: registry, npm_config_cache: join(fixture.directory, 'cache'),
+        });
+        return promisify(execFile)(node, [npm, ...args.slice(1)], {
+          ...options, cwd: options.cwd ?? fixture.directory, env,
+        });
+      };
+    };
+    // "never" stops npm from mapping public-registry lock URLs; the upgrader must point them itself.
+    const run = runner('never.npmrc', 'replace-registry-host=never\n');
+    const manifest = JSON.stringify({ name: 'mcp-pacemaker', version: '2.0.3', dependencies: { [name]: '1.0.0' } });
+    const bundledRoot = join(fixture.directory, 'bundled-target');
+    mkdirSync(join(bundledRoot, 'bin'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'package.json'), manifest);
+    writeFileSync(join(bundledRoot, 'bin', 'upgrade-capability.json'), JSON.stringify({ protocol: 1, dependencyLock: 1 }));
+    const lockFor = resolved => JSON.stringify({
+      name: 'mcp-pacemaker', version: '2.0.3', lockfileVersion: 3, requires: true,
+      packages: {
+        '': { name: 'mcp-pacemaker', version: '2.0.3', dependencies: { [name]: '1.0.0' } },
+        [`node_modules/${name}`]: { version: '1.0.0', resolved, integrity: tarball.integrity },
+      },
+    }, null, 2) + '\n';
+    // Release locks name the public registry, which cannot serve this owned package.
+    writeFileSync(join(bundledRoot, 'bin', 'dependency-lock.json'), lockFor('https://registry.npmjs.org/dependency.tgz'));
+    const inventory = await stageCliDependencies(bundledRoot, { registry, cache: join(fixture.directory, 'cache'), run });
+    assert.ok(inventory.some(file => file.path === `node_modules/${name}/index.cjs`));
+    assert.equal(readFileSync(join(bundledRoot, 'package-lock.json'), 'utf8'), lockFor(`${registry}dependency.tgz`));
+    assert.ok(requests.includes('/dependency.tgz'), 'The archive must come from the configured registry.');
+    assert.equal(execFileSync(process.execPath, ['-e', `console.log(require(${JSON.stringify(join(bundledRoot, 'node_modules', name))}))`],
+      { encoding: 'utf8', windowsHide: true }).trim(), '41');
+    assert.equal(requests.includes(`/${name}`), false, 'npm ci from the bundled lock must not re-resolve registry metadata.');
+
+    const defaultRoot = join(fixture.directory, 'default-target');
+    mkdirSync(join(defaultRoot, 'bin'), { recursive: true });
+    for (const file of ['package.json', join('bin', 'upgrade-capability.json'), join('bin', 'dependency-lock.json')]) {
+      copyFileSync(join(bundledRoot, file), join(defaultRoot, file));
+    }
+    const served = requests.length;
+    await stageCliDependencies(defaultRoot, {
+      registry, cache: join(fixture.directory, 'default-cache'), run: runner('default.npmrc', ''),
+    });
+    assert.equal(readFileSync(join(defaultRoot, 'package-lock.json'), 'utf8'), lockFor('https://registry.npmjs.org/dependency.tgz'),
+      'With the default setting npm maps the public URL itself, so the bundled lock is staged unchanged.');
+    assert.ok(requests.slice(served).includes('/dependency.tgz'), 'npm must fetch through the configured registry.');
+
+    const resolvedRoot = join(fixture.directory, 'resolved-target');
+    mkdirSync(resolvedRoot);
+    writeFileSync(join(resolvedRoot, 'package.json'), manifest);
+    await assert.rejects(stageCliDependencies(resolvedRoot, { registry, cache: join(fixture.directory, 'resolved-cache'), run }),
+      /node_modules\/managed-sha1-dependency@1\.0\.0 has sha1 integrity from the registry; SHA-512 is required/);
+    assert.equal(existsSync(join(resolvedRoot, 'node_modules')), false, 'An unverifiable lock must stop before installation.');
   } finally {
     await new Promise(resolveClose => server.close(resolveClose));
     await fixture.cleanup();

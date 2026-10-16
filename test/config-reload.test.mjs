@@ -8,16 +8,19 @@
 // Ports: see the allocation note in auth-token.test.mjs. This file owns 8834-8839.
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import http from 'node:http';
 import { killBridge } from './helpers/kill-bridge.mjs';
+import { POOLING_BUDGET_MS } from '../bin/pooling-execution.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
+const CLI = resolve(__dirname, '..', 'bin', 'cli.mjs');
 const FIXTURE = resolve(__dirname, 'fixtures', 'stubborn-mcp-server.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -194,4 +197,31 @@ test('MCP_CONFIG_WATCH=0 disables the watcher but leaves the admin endpoint work
   assert.equal((await reload(port, tmp)).status, 200);
   const explicit = await req(port, 'POST', '/watched/mcp', { headers: rpc, body: initBody });
   assert.equal(parse(explicit.body).result.serverInfo.name, 'after', 'an explicit reload still works');
+});
+
+// The bridge may spend its whole pooling budget settling a pending batch before it answers a
+// reload. A loaded host made the CLI give up after 5 seconds and report that live bridge as DOWN.
+test('the CLI reload waits out the bridge pooling budget instead of reporting it DOWN', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'mcpka-reload-'));
+  mkdirSync(join(home, '.mcp-pacemaker'), { recursive: true });
+  writeFileSync(join(home, '.mcp-pacemaker', 'servers.json'), '{}');
+  writeFileSync(join(home, '.mcp-pacemaker', 'admin.nonce'), 'slow-reload-nonce');
+  const requests = [];
+  const bridge = http.createServer((request, response) => {
+    requests.push({ method: request.method, url: request.url, nonce: request.headers['x-mcp-nonce'] });
+    setTimeout(() => {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ ok: true, unchanged: true }));
+    }, POOLING_BUDGET_MS + 500);
+  });
+  await new Promise((listening) => bridge.listen(0, '127.0.0.1', listening));
+  try {
+    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    const { stdout } = await promisify(execFile)(process.execPath,
+      [CLI, 'reload', '--port', String(bridge.address().port)], { env, encoding: 'utf8', timeout: 60000 });
+    assert.match(stdout, /no changes/);
+    assert.deepEqual(requests, [{ method: 'POST', url: '/admin/reload', nonce: 'slow-reload-nonce' }]);
+  } finally {
+    bridge.close();
+  }
 });

@@ -1,23 +1,45 @@
 import { readFile } from 'node:fs/promises';
+import { request } from 'node:http';
 import { dirname, join } from 'node:path';
+import { text as readText } from 'node:stream/consumers';
 import { fileURLToPath } from 'node:url';
 import { canonicalPort } from './cli-selection.mjs';
 
+const REQUEST_TIMEOUT_MS = 10_000;
+
+// node:http, not fetch: on Windows, Node 23, 24 before 24.20.0, 25, and 26 before 26.7.0 can abort
+// with a libuv assertion when the CLI exits soon after fetch (nodejs/node#56645).
+async function sendRequest(port, path, { method = 'GET', headers = {}, body } = {}) {
+  const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const outgoing = request({ hostname: '127.0.0.1', port, path, method, headers, signal }, resolve);
+      outgoing.on('error', reject);
+      outgoing.end(body);
+    });
+    return { status: response.statusCode, text: await readText(response) };
+  } catch (error) {
+    if (signal.aborted) {
+      const advice = method === 'GET' ? '' : ' The change may still apply; reread settings before retrying.';
+      throw new Error(`Bridge on :${port} did not answer within ${REQUEST_TIMEOUT_MS / 1000}s.${advice}`);
+    }
+    throw error;
+  }
+}
+
 async function jsonRequest(port, path, options = {}) {
-  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-    ...options,
-    signal: AbortSignal.timeout(10_000),
-  });
+  const response = await sendRequest(port, path, options);
   if (response.status === 401) {
     throw new Error('Admin nonce was rejected. Check --config points to the running bridge, then retry.');
   }
   let result;
   try {
-    result = await response.json();
+    result = JSON.parse(response.text);
   } catch {
     throw new Error(`Bridge on :${port} returned a non-JSON response (${response.status})`);
   }
-  if (!response.ok) {
+  const succeeded = response.status >= 200 && response.status <= 299;
+  if (!succeeded) {
     throw new Error(result.error || `Bridge on :${port} rejected the request (${response.status})`);
   }
   return { status: response.status, body: result };

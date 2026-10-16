@@ -1,45 +1,57 @@
 # mcp-pacemaker
 
-**A local process supervisor and transport bridge for your MCP servers.** Manage server
-lifetime outside your editor or CLI, with opt-in pre-warming and compatible session sharing.
-The long-running bridge has no third-party runtime dependencies; the setup CLI and dashboards
-have their own dependencies.
+**Keep your MCP servers running outside the editor or CLI.** One long-lived local bridge runs your MCP servers and every editor and agent CLI connects to it, so a CLI exiting no longer kills them.
+
+![Demo: two isolated launches, one shared launch, none added on reconnect](docs/media/demo-2.1.0.gif)
+
+```bash
+npm install -g mcp-pacemaker   # Node 22 or 24, run as a normal user
+mcp-pacemaker init             # imports your servers, asks before rewiring any host
+```
 
 [Install from npm](https://www.npmjs.com/package/mcp-pacemaker) ·
 [Report a problem](https://github.com/girishkvs/mcp-pacemaker/issues) ·
-[Release notes](https://github.com/girishkvs/mcp-pacemaker/releases)
+[Release notes](https://github.com/girishkvs/mcp-pacemaker/releases) ·
+[Demo and design write-up](https://girishkonda.com/projects/mcp-pacemaker/)
 
-> This README describes **2.1.0**, the current npm `latest`.
+> This README describes **2.1.1**.
 > See the [release changes](CHANGELOG.md).
+
+## What it does
 
 MCP hosts — editors (VS Code, Cursor, Claude Desktop) **and** CLIs (Claude Code, Copilot CLI,
 Codex, Gemini) — run stdio MCP servers as child processes. When the host restarts, crashes, or
-exits (every one-shot CLI run), **those servers die**. `mcp-pacemaker` runs your servers as
-children of a small, long-lived bridge and exposes each over the MCP HTTP+SSE / Streamable HTTP
-transport. Multiple hosts use one bridge, with an isolated child per session by default.
-Opt into pre-warming or reuse one initialized child for compatible stateless tools sessions
-with [shared mode](#shared-mode). Wire hosts to one bridge, or give each its own.
-A cross-platform supervisor + OS auto-start keep the bridge itself alive across reboots and
-sleep/wake, and a pluggable auth layer injects a fresh token per request for HTTP servers.
+exits (every one-shot CLI run), **those servers die**.
 
-After a restart, a returning client can reuse a recorded session ID to re-establish its handshake
-against a fresh server. This does not restore arbitrary tool state or preserve TCP connections.
-Clients that stop retrying after a dropped connection may still need a reload; socket handoff
-is separate planned work.
+- **Keeps servers running.** `mcp-pacemaker` runs your servers as children of a small,
+  long-lived bridge and exposes each over the MCP HTTP+SSE / Streamable HTTP transport.
+- **Shares one bridge.** Multiple hosts use one bridge, with an isolated child per session by
+  default. Opt into pre-warming or reuse one initialized child for compatible stateless tools
+  sessions with [shared mode](docs/configuration.md#shared-mode). Wire hosts to one bridge, or
+  give each its own.
+- **Survives reboots and token expiry.** A cross-platform supervisor + OS auto-start keep the
+  bridge itself alive across reboots and sleep/wake, and a pluggable auth layer injects a fresh
+  token per request for HTTP servers.
+- **Reconnects returning clients.** After a restart, a returning client can reuse a recorded
+  session ID to re-establish its handshake against a fresh server. This does not restore
+  arbitrary tool state or preserve TCP connections. Clients that stop retrying after a dropped
+  connection may still need a reload; socket handoff is separate planned work.
+- **Shows what is running.** `status`, `top` and a web dashboard show whether each server is up
+  and which clients use it. See [dashboards](docs/dashboards.md).
 
 ## Quick start
 
-Install **mcp-pacemaker 2.1.0** from npm. Use a maintained **Node.js 22 or 24**
+Install **mcp-pacemaker 2.1.1** from npm. Use a maintained **Node.js 22 or 24**
 release; Windows also needs PowerShell 7 and Windows Script Host.
-See [installation requirements](#install) before setup.
+See [installation requirements](docs/install.md) before setup.
 
 ```bash
-npm view mcp-pacemaker@2.1.0 version
-npm install -g mcp-pacemaker@2.1.0
+npm view mcp-pacemaker@2.1.1 version
+npm install -g mcp-pacemaker@2.1.1
 mcp-pacemaker --version
 ```
 
-The version check prints `2.1.0` without running setup.
+The version check prints `2.1.1` without running setup.
 
 > **Run it as an ordinary user.** From 2.1.0 the bridge, supervisor and default upgrades
 > refuse a privileged caller *at startup* — a non-administrator terminal on Windows and a
@@ -48,7 +60,7 @@ The version check prints `2.1.0` without running setup.
 > normal user instead. See the [user-runtime contract](docs/execution-context.md).
 
 Before setup, have a readable JSON host configuration containing server definitions, or
-prepare [`~/.mcp-pacemaker/servers.json`](#serversjson). Supported import sources are
+prepare [`~/.mcp-pacemaker/servers.json`](docs/configuration.md#serversjson). Supported import sources are
 `vscode`, `cursor`, `claude` (Claude Desktop), `copilot-cli` and `gemini`.
 Codex and Claude Code are wiring destinations, not import sources.
 
@@ -108,6 +120,19 @@ them in.
 
 </details>
 
+## Everyday commands
+
+| Command | What it does |
+|---|---|
+| `init [--from source] [--client a,b] [--yes]` | Interactive setup: import one source, wire selected hosts, auto-start, launch |
+| `status` | Bridges, wired hosts, servers, and any server currently failing |
+| `top` / `dashboard` | Live terminal UI / web dashboard |
+| `doctor` | Diagnose config, bridge reachability, host wiring |
+| `uninstall` | Stop managed bridges, remove auto-start, restore available host-file `.bak` copies; native entries are not restored |
+
+The [command reference](docs/operations.md#command-reference) lists every command, including
+`reload`, `logs`, `prewarm`, `upgrade` and `--instance`.
+
 ## Which process-sharing mode?
 
 Sharing a bridge does not automatically share a server process.
@@ -120,20 +145,7 @@ Sharing a bridge does not automatically share a server process.
 
 Shared clients must send identical initialization parameters, including `clientInfo`, and
 empty client capabilities. It is not automatic cross-editor sharing. See
-[shared-mode limits](#shared-mode) before enabling it.
-
-## Choosing a transport tool
-
-Documentation checked September 27, 2026; this is a use-case guide, not a feature benchmark.
-
-| Tool | Consider it when |
-|---|---|
-| [Supergateway](https://github.com/supercorp-ai/supergateway) | You want command-line conversion between stdio and HTTP/SSE/WebSocket transports |
-| [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | You want a Python-based adapter between local stdio clients/servers and remote MCP transports |
-| **mcp-pacemaker** | You want workstation process supervision, host wiring, auto-start, lifecycle diagnostics and explicit isolation/pooling/sharing policies |
-
-These projects have overlapping capabilities. Reconnecting to a fresh server is not recovery
-of arbitrary application state, and a transport bridge is not a sandbox for untrusted tools.
+[shared-mode limits](docs/configuration.md#shared-mode) before enabling it.
 
 ## Supported hosts
 
@@ -155,744 +167,45 @@ loopback.
 **Topologies:** wire every host to one shared bridge (default), or give each host its own bridge
 (`install --client X --port N`) — or any mix. `status`/`doctor` report all bridges + wired hosts.
 
-## Install
+## Choosing a transport tool
 
-Use a maintained **Node.js 22 or 24** release. Node 20 remains a compatibility target but is
-end-of-life, not a recommended secure runtime. The bridge has no npm runtime dependencies;
-the setup CLI and dashboard have their own dependencies.
+Documentation checked September 27, 2026; this is a use-case guide, not a feature benchmark.
 
-**Run as an ordinary user.** From 2.1.0 the bridge, supervisor and default upgrades verify the
-caller before any runtime work and refuse elevated or root callers at startup with
-`User-runtime execution refused: …`. On Linux and macOS that includes `root`, which is the
-default user in most container images, so run the bridge as a normal account there. The
-[user-runtime contract](docs/execution-context.md) describes what is checked and why; explicit
-Windows account administration has a separate
-[controller/worker path](docs/account-upgrades.md).
-
-Install the released package from [npm](https://www.npmjs.com/package/mcp-pacemaker).
-Its repository link should point to
-[`girishkvs/mcp-pacemaker`](https://github.com/girishkvs/mcp-pacemaker).
-Use an exact version for a repeatable installation:
-
-```bash
-npm view mcp-pacemaker@2.1.0 version
-npm install -g mcp-pacemaker@2.1.0
-mcp-pacemaker --version
-```
-
-The current line uses the `latest` npm channel; the maintenance line uses `legacy` when that
-channel has been published. Check the actual registry values before choosing a channel:
-
-```bash
-npm view mcp-pacemaker dist-tags --json
-```
-
-GitHub tags and npm publication are separate: a tag does not establish that the same
-version or channel is available on npm, or that its package bytes are identical.
-`@1` and `@2` are version ranges, not the maintained channels. They can select a version
-withdrawn from a channel. `upgrade --self` resolves the installed major's channel and prints
-an exact-version command; it never installs or downgrades anything.
-
-Use a durable installation directory for a long-running service. Do not register autostart
-from an `npx` cache: that cache may be removed later. Bare CLI invocation can enter the setup
-wizard; use `--version` for a read-only installation check.
-
-Windows setup also needs PowerShell 7 (`pwsh`) and Windows Script Host for its launcher.
-Automatic configuration edits need .NET Framework 4.6.2 or newer. The bundled helper is
-unsigned; npm provenance is not Authenticode signing or an application-control allowlist.
-Windows ARM64 is not validated.
-
-### Version compatibility
-
-This README describes **2.0.x**. For 1.3.x immediate-save behavior, see the
-[legacy documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v1.3.1/README.md)
-and [support policy](SECURITY.md#supported-versions). Those documents do not establish
-that a legacy version is available on npm.
-
-The historical baselines remain **1.3.0 / 2.0.0**. The earlier **1.3.1 / 2.0.1**
-patch-pair evidence is not transferable to a new release. The selected **1.3.1 / 2.0.2**
-pair requires fresh exact-byte compatibility and service-replacement gates.
-A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
-2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending
-or interrupted transactions with 2.x. See the [real-version gates](CONTRIBUTING.md#real-version-compatibility-gates)
-for exact pairs; only the exact executed pairs are covered.
-
-### Command reference
-
-| Command | What it does |
+| Tool | Consider it when |
 |---|---|
-| `init [--from source] [--client a,b] [--yes]` | Interactive setup: import one source, wire selected hosts, auto-start, launch |
-| `status` | Bridges, wired hosts, servers, and any server currently failing |
-| `reload` | Re-read `servers.json` into the running bridge without restarting it |
-| `doctor` | Diagnose config, bridge reachability, host wiring |
-| `prewarm [--port N] [--json]` | One view of stdio candidates, pools, shared-child state and measured process starts |
-| `prewarm --enable <server> [--count N]` | Explicitly enable warm slots; `--disable <server>` turns them off |
-| `logs [--follow] [--since 2h] [--server name] [--grep text]` | Read and filter durable logs, including retained rotation |
-| `top` / `dashboard` | Live terminal UI / web dashboard |
-| `plan --client <host>` | Dry run — show exactly what `install` would change |
-| `import --from <source>` | Build `~/.mcp-pacemaker/servers.json` from one supported JSON host config |
-| `install --client <host> [--port N]` | Wire one host (its own `--port` gives it its own bridge) |
-| `emit --client <host>` | Print the config entries without writing anything |
-| `start` / `stop` | Start or stop bridges (`--port` for one, else all) |
-| `upgrade --to <version> [--plan] [--yes]` | Stage and replace one managed installation, including its CLI, preserving port/config/host wiring |
-| `upgrade --to <version> --sxs [--port N]` | Keep the old instance and start an isolated new one; omitted port is OS-assigned |
-| `upgrade --recover` | Resume or roll back an interrupted managed replacement from its durable journal |
-| `[--instance <directory>]` | Select one installation when discovery finds several; valid before or after the command |
-| `upgrade [--self]` | Legacy host repair; `--self` still prints same-major installation guidance only |
-| `update-check [--json]` | Compare the installed version with its maintained npm channel |
-| `uninstall` | Stop managed bridges, remove auto-start, restore available host-file `.bak` copies; native entries are not restored |
+| [Supergateway](https://github.com/supercorp-ai/supergateway) | You want command-line conversion between stdio and HTTP/SSE/WebSocket transports |
+| [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | You want a Python-based adapter between local stdio clients/servers and remote MCP transports |
+| **mcp-pacemaker** | You want workstation process supervision, host wiring, auto-start, lifecycle diagnostics and explicit isolation/pooling/sharing policies |
+
+These projects have overlapping capabilities. Reconnecting to a fresh server is not recovery
+of arbitrary application state, and a transport bridge is not a sandbox for untrusted tools.
+
+## Upgrades
 
 > Package installation alone does not upgrade a running backend. Use explicit `upgrade --to`
 > for managed replacement. Bare `upgrade` retains the older host-repair behavior.
 
-> On start, pacemaker **probes the port**: it *adopts* an existing pacemaker bridge and *refuses to collide* with a foreign service (the wizard offers another port).
+Managed upgrades need **2.1.0 or newer** and must run as an ordinary user. Start with
+`mcp-pacemaker upgrade --to <exact-version> --plan`, which changes nothing. `--sxs` keeps the
+old instance and starts an isolated new one. Do not overwrite a package directory while its
+supervisor or bridge is running. An upgrade may end open sessions and calls in progress;
+clients reconnect, and no call is retried. It never changes `servers.json` or your client setup.
 
-For a supervisor created by these patch releases, `stop --port N` verifies the matching
-installation/configuration identity, waits for shutdown, and holds managed autostart until an
-explicit `start --port N`. Normal OS shutdown does not create that hold. Use the matching
-installation's CLI. Older or directly launched bridges have no managed stop record and are
-refused rather than reported as stopped; disable their OS autostart and verify shutdown first.
+The [one-time Windows 1.3 restart migration](docs/upgrades.md#one-time-windows-13-restart-migration)
+restarts **Pacemaker, not Windows**. It stops the 1.3 bridge and the processes it started, so
+open sessions end. Confirm it at the prompt or with `--yes`. Run it from a separate durable
+package; do not overwrite the running 1.3 package first. If 1.3 was set up from an
+administrator terminal, run `mcp-pacemaker upgrade --fix-legacy-access` once from an
+administrator terminal first; see [that section](docs/upgrades.md#13-installs-set-up-from-an-administrator-terminal).
 
-On Linux/macOS the control socket lives beside the configuration, independent of `TMPDIR`.
-Its complete path must fit within 103 UTF-8 bytes. `install` and `init` check this before
-changing configuration or autostart; use a shorter configuration location rather than
-relying on an implicit socket-location fallback.
+See [upgrades and rollback](docs/upgrades.md) for recovery, rollback and side-by-side instances.
 
-Isolated and pooled stdio servers support HTTP+SSE (`/<name>/sse`) and Streamable HTTP
-(`/<name>/mcp`). Shared mode requires Streamable HTTP.
+## Uninstall
 
 `install` backs up an existing JSON/TOML host file to `.bak`; repeating it replaces that backup.
 `uninstall` restores available host-file backups, leaves files without backups as-is, and
 keeps `servers.json`. Native Claude Code registrations are not backed up or automatically
 restored; record their original definitions separately and restore them through Claude Code.
-
-### Replacing or rolling back a running installation
-
-These managed-upgrade commands require **2.1.0 or newer**.
-Version 2.0.2 does not include them.
-
-Run the bridge, supervisor, default upgrades and recovery as an **ordinary user**:
-a normal, non-administrator terminal on Windows and a non-root session on Linux/macOS.
-The [user-runtime contract](docs/execution-context.md) rejects privileged or
-unverified callers before runtime work, so a replacement does not inherit different
-authority. Read-only plans remain available. Explicit Windows account administration has a separate
-[controller/worker path and qualification requirements](docs/account-upgrades.md).
-
-For a **stable managed instance created by this implementation**:
-
-```bash
-mcp-pacemaker upgrade --to <exact-version> --plan
-mcp-pacemaker upgrade --to <exact-version>
-# Noninteractive confirmation of the displayed local plan:
-mcp-pacemaker upgrade --to <exact-version> --yes
-
-# Keep the existing service and host wiring:
-mcp-pacemaker upgrade --to <exact-version> --sxs
-mcp-pacemaker upgrade --to <exact-version> --sxs --port 9001
-```
-
-`--to` requires canonical stable SemVer, not `latest`, a range, or a Git/file spec.
-Selecting another major is explicit and printed in the plan; it is not a compatibility
-claim. The target must ship the managed admission/readiness protocol. Older targets
-without that protocol are rejected before interruption, including for automatic SxS ports.
-
-Normal upgrades preserve the selected port: `--port` is valid **only with `--sxs`**.
-Without an SxS port, the actual new loopback listener binds port 0 and stays open;
-the OS-selected port is displayed and saved for later starts. The read-only plan says
-“OS-assigned,” not a guessed port. An explicitly requested busy port fails without adoption.
-SxS gets separate config, nonce, logs and session files. It preserves the source working
-directory for relative server commands and does not rewire any host or enable pooling.
-
-When discovery finds multiple instances, use the exact directory printed by setup/upgrade:
-
-```bash
-mcp-pacemaker upgrade --instance <directory> --to <exact-version> --plan
-mcp-pacemaker start --instance <directory>
-mcp-pacemaker stop --instance <directory>
-```
-
-`--instance <directory>` and `--instance=<directory>` work before or after the
-command. Selection is normalized once, including paths with spaces; conflicting
-selectors or port/config overrides are rejected before an action. Text after `--`
-is not interpreted as a selector. An invalid explicit selection never falls back
-to the default instance.
-CLI port options use canonical decimal integers from 1 to 65535; scientific notation, hex,
-signs, surrounding whitespace and zero-padded spellings are rejected before requests.
-
-Selected `start`, `stop`, `reload`, `prewarm`, `status`, `doctor`, `top`, `logs`,
-`dashboard`, version/help, and upgrade commands use the same instance context.
-The TUI's recycle key uses that instance's port **and nonce directory**; logs use
-its config directory. Bare `mcp-pacemaker --instance <directory>` shows status
-even when SxS has no host-wiring state. Host setup/removal commands (`init`,
-`import`, `install`, `uninstall`) are refused with `--instance`; selection alone
-does not authorize rewriting host configuration or changing autostart.
-Generated prewarm Cancel/Undo commands retain the selected instance and config,
-so they resolve the same CLI version and nonce directory. Windows commands use
-an encoded PowerShell launcher with an explicit native argument list to preserve
-spaces, quotes and shell characters; unmanaged `--config` commands remain supported.
-
-The stable per-instance launcher selects checked version directories. Upgrades never
-overwrite a running package or rewrite per-version autostart tasks. The previous selection
-and package are retained. The existing command entry point dispatches to the committed
-version's CLI and its own dependencies: ordinary `--version`, `status`, `update-check`
-and the next `upgrade` use that version. An unfinished activation keeps the previous
-CLI available for recovery; rollback restores that CLI selection. SxS does not change
-the default CLI. Use `--instance <directory>` to select its CLI explicitly.
-
-Target dependencies are resolved into a private lock and restored with npm's archive
-integrity checks before interruption. Both the lock and installed dependency files enter
-the checked version inventory. Target CLI startup and version are checked before quiescing.
-The target archive and resolved CLI dependencies require SHA-512 integrity metadata.
-SHA-1-only or missing integrity information is rejected before interruption; the
-upgrader does not downgrade its checks to accommodate a registry.
-Acquisition uses the configured npm registry, or explicit
-`--registry`, with no registry fallback or global npm changes. Existing npm permissions,
-TLS, release-age policy and URL-prefix mapping remain in effect; lifecycle scripts are
-disabled for acquisition. For npm 12 mirrors, use your approved command-local
-`replace-registry-host` full-URL-prefix mapping back through that registry—not a
-hard-coded mirror URL or public-registry bypass.
-
-Download, archive integrity, package/engine/native-binary checks and an owned packaged
-startup check finish before interruption. Admission then closes and waits up to eight
-seconds for safe work to drain. Open MCP sessions and unresolved config transactions
-currently cause a refusal; close/settle them and retry. No uncertain tool call or failed
-configuration commit is replayed. This is a **short restart**, not socket handoff or
-zero downtime. Clients and dashboard tabs may need a reload.
-
-The supervisor persists admission hold **before** forwarding quiesce. A lost reply,
-failed drain, bridge crash or replacement child does not release it. Only explicit
-resume/recovery or a verified activation opens admission again. Upgrade stop is tied to
-the drained generation; any replacement generation must remain held.
-
-The activation journal blocks unattended starts after an interrupted transition.
-Selection and launch intent are separate durable transitions. A selected target that
-was provably never launched can recover using the exact previous stopped-generation
-receipt. After launch intent, an empty port alone is not shutdown proof.
-Recovery parses bounded instance/journal identities before checking executable
-bytes. It fully verifies and runs the retained recovery CLI, so a damaged or
-missing target file cannot prevent a safe pre-launch rollback. A damaged previous
-package, stale identity or unknown journal still causes a refusal.
-
-| Journal state | Recovery boundary |
-|---|---|
-| Prepared / quiescing | Explicitly resume the matching previous service |
-| Stopping | Reconcile the exact drained generation |
-| Stopped / selecting / selected | Require the previous completed-stop receipt; the target has no launch intent |
-| Launching | Require a new held generation and verified shutdown; no empty-port inference |
-| Rollback-selecting / rollback-selected | Require the durable rollback stop proof before selecting/restarting previous code |
-| Rollback-launching | Require proof for the newly launched previous generation; otherwise refuse |
-| Admitting / admitting-rollback | Admission may have occurred; no automatic rollback |
-| Committed / rolled-back / aborted | No interrupted activation remains |
-
-Automatic rollback is restricted to startup failure before target admission, with
-unchanged configuration bytes, identity and security and verified shutdown. If admission
-may have occurred, recovery refuses rather than overwriting user state.
-
-```bash
-mcp-pacemaker upgrade --recover --instance <directory> --yes
-```
-
-A crash can leave `upgrade.lock`. Recovery does not steal it based on a reusable PID.
-Verify the original upgrader has exited, preserve the journal, and remove only that
-instance's lock before recovery. Keep packages, configuration and transaction files.
-Journal writes are file-flushed and atomically renamed; Windows directory-entry
-durability across power loss is not claimed.
-
-### One-time Windows 1.3 restart migration
-
-The normal `upgrade --to <exact-version>` confirmation also supports the exact known
-**1.3.0 Windows supervisor/launcher and per-user task shape**, with one port in the
-existing install state. Invoke an upgrade-capable CLI from a separate durable package;
-do not overwrite the running 1.3 package first. `--plan` remains read-only.
-
-This transition restarts **Pacemaker, not Windows**. Pause callers before confirming.
-The interactive confirmation states that clients will disconnect and 1.3 cannot drain
-or certify every in-flight HTTP outcome. Zero reported sessions or child PIDs does not
-prove that HTTP calls finished. Ordinary `--yes` and unattended invocation refuse this
-transition; there is no separate maintenance flag and no automatic call replay.
-
-Target package, CLI dependencies, native identities and packaged startup are verified
-before downtime. A separate broker retains handles for the selected supervisor, bridge
-and a bounded set of provably owned descendants. Only the verified selected task is
-held. Stop uses those handles and verifies their exit before starting the held target
-on the same port. It does not use a name/PID kill or assume task disable stopped the
-running supervisor. Configuration, host wiring and port remain unchanged; the existing
-CLI entry dispatches the newly selected managed CLI.
-
-Preparation stays outside managed discovery until the instance identity and recovery
-journal are durable; the prepared directory is then published together. A pre-journal
-I/O failure leaves the old installation discoverable. Failed preparation is retained,
-not guessed safe to delete. A terminal rolled-back/aborted candidate is excluded only
-after its bounded journal and legacy-source binding validate, so damaged target files
-do not prevent retrying the still-running legacy installation.
-
-The task's **resource owner and full security descriptor** are separate from its run-as
-account. Planning and every task operation require owner/group/DACL/SACL/integrity
-inspection through Task Scheduler. If the required security read is denied or unsupported,
-migration refuses before touching the task; it does not enable privileges or elevate.
-Existing-task updates preserve security rather than reassigning its owner: they clear
-only the temporary definition's embedded descriptor, pass no replacement security
-descriptor, disable automatic principal-ACE edits, and verify the complete raw resource
-descriptor again afterward. Protected backups retain the original raw descriptor and XML.
-Restoration requires exact equality of all non-XML registration/security fields and
-Task Scheduler-normalized XML, ignoring only the exact embedded
-`Task/RegistrationInfo/SecurityDescriptor` representation. Raw revision preconditions,
-backups and the actual returned XML/hash are not rewritten; other metadata or XML drift refuses.
-Concurrent or uncertain security changes require inspection, not permission repair.
-The resource owner may be the runtime user or canonical builtin Administrators;
-that does not change the run-as account. Default scope remains **current user**,
-but Windows execution and recovery require a freshly verified ordinary caller
-before staging or mutation; an elevated or unverified caller refuses rather than
-launching a runtime with different authority. Read-only planning is unchanged.
-Explicit original-account administration uses a task-only
-trusted controller and an original-user worker; see
-[account upgrade scope and qualification](docs/account-upgrades.md).
-`--all-users` is explicitly unsupported.
-
-The legacy receipt reports `legacyRootStopVerified`, `observedDescendantsStopped` and
-`treeCompleteness: "unproven"` separately. This is **not** the modern Job Object
-complete-descendant proof. Historical or uncaptured orphan processes cannot be fully
-attributed; they are left untouched and the limitation is reported without claiming an
-orphan count. The new managed runtime contains future children from birth.
-
-Unknown package/task shapes, changed owner/generation/configuration, a failed captured
-process stop, or a foreign listener prevent activation. A foreign listener is never
-stopped. Original code and protected configuration/task backups are retained. A verified
-pre-admission target failure can restore the original CLI and scoped task and verify a
-fresh legacy backend; uncertain launch, registration or admission outcomes require
-explicit recovery. No configuration is deleted or replayed.
-
-| Legacy journal phase | Recovery boundary |
-|---|---|
-| `legacy-prepared` / `legacy-held` | Verify the original generations and unchanged state; restore only the recorded task hold |
-| `legacy-holding` | Task write outcome may be unknown; inspect before recovery |
-| `legacy-stopping` | Read-only captured-generation absence check; an incomplete observed set refuses recovery |
-| `legacy-stopped` | Revalidate partial stop and free port before safe old-version rollback |
-| `legacy-launching` / `legacy-wiring` | Require modern held-target shutdown proof; a closed port alone is insufficient |
-| `legacy-admitting` | Traffic may have entered; no automatic rollback |
-| Legacy rollback intent phases | An interrupted task/CLI/launch outcome is reported as uncertain, not retried blindly |
-| `legacy-rolled-back` / `legacy-aborted` | Original installation remains selected; the staged managed candidate stays dormant |
-
-A killed migration can also leave the profile's `legacy-upgrade/upgrade.lock`.
-Verify that exact upgrader has exited before removing its lock; never steal it by PID
-guessing. Preserve the journal and backup files.
-
-This adapter does not support direct unregistered bridges, other legacy versions,
-multiple legacy ports, Linux/macOS registrations, or legacy-source SxS. Targets must
-declare `legacyRestartProtocol: 1`; older published targets without it refuse before
-legacy downtime.
-
-Managed SxS keeps its own verified package copy as well as separate runtime state.
-If a crash happens during port-0 startup before the port is durably recorded, recovery
-reports an unknown launch outcome rather than marking it safely aborted. Preserve
-that instance and its journal until readiness or shutdown can be verified.
-
-For an older installation requiring a separately verified manual migration:
-
-Do not overwrite a package directory while its supervisor or bridge is running. Workers and
-native helpers can load later, and dashboard assets are read from disk: replacement can mix
-old and new code even when the original process still reports its old version.
-
-Identify the selected port, installation directory, configuration directory and OS autostart
-entry first. Settle or cancel 2.x batches, recover interrupted transactions with 2.x, and keep
-a protected configuration backup. Disable the selected autostart entry and stop its supervisor
-and bridge before replacing files; prove they cannot restart during replacement. Keep the
-known-good installation until the new backend's version and instance identity are confirmed.
-Re-register the intended autostart path, refresh dashboard tabs, and confirm host wiring.
-
-One global npm prefix holds one package version and its shared command names. Installing the
-other major there replaces it. Separate ports do not isolate credentials, nonces, logs or
-session files: manual side-by-side operation needs separate durable code roots and separate
-configuration directories, plus separate host/HOME state for CLI-managed setup.
-`init/import --config` selects a source host configuration, not an isolated runtime profile.
-There is no package `--profile` or `MCP_HOME` switch; managed SxS uses explicit instance
-directories instead. Do not use an unscoped stop/uninstall
-operation when another instance must remain running.
-
-## Dashboards
-
-Two views of the same live state. Neither is required — the bridge runs headless — but both are
-useful for answering "is this server actually up, and who is using it?"
-
-### Web dashboard
-
-`mcp-pacemaker dashboard`, or open `http://127.0.0.1:<port>/ui`. It streams over SSE, so it
-updates on its own without polling or a refresh.
-
-![Web dashboard: one card per server, showing sessions, warm pool, pids and connected agents](docs/images/dashboard.png)
-
-Per server it shows the transport (`stdio` / `http`), the sharing policy (`pool` when pre-warming),
-live sessions against the cap, request count, the actual OS pids, the warm-pool count, how long
-ago it was last used, and **which clients are connected** — above, one server is shared by
-VS Code and Claude Code while others are held by Copilot, Cursor and Codex. `Recycle` restarts
-that server's processes; it is disabled for servers with no session to restart. The live log at
-the bottom is the bridge's own log, filterable.
-
-### Pre-warming controls
-
-The **Pre-Warming** tab puts every stdio candidate, current pool and shared server in one table.
-It shows cold-start p50/p95, observed peak sessions, process starts, warm/target counts,
-shared-child state and pending work, and an action.
-HTTP proxies are excluded because the bridge does not launch their processes.
-
-Choose **Enable pre-warming (N)** on a slow-server card or in the table. The button shows
-the exact warm count and the extra resident-process cost before you click. Nothing enables
-it automatically. **Disable pre-warming** removes idle warm children without killing active
-sessions after the change is applied.
-
-Changes are batched in a **complete pending copy** of `servers.json`. Every accepted change
-resets a five-second countdown. When editing stops, reload validates the pending copy, retains
-the original as `servers.previous.json`, flips the pending file into place, and activates the
-new settings. The dashboard shows **Pending** or **Applying** until that succeeds; active
-mode and warm counts are not changed early. **Reload now** flushes the same batch immediately.
-
-**Cancel batch** discards a pending batch without changing active settings. **Undo batch**
-stages the full previous configuration for another five-second batch, only if no intervening
-active-file edit has occurred. These actions affect the entire batch; the dashboard names all
-affected servers. An unrelated pending batch must be cancelled or applied before Undo.
-
-The same controls are available without a browser:
-
-```sh
-mcp-pacemaker prewarm --port 8791
-mcp-pacemaker prewarm --port 8791 --enable filesystem --count 2
-mcp-pacemaker prewarm --port 8791 --disable filesystem
-# Changes are queued; the printed command cancels a pending batch or undoes it after application.
-```
-
-Use `--config <path>` when the bridge's config and admin nonce are outside the default
-directory. `--json` returns the measured snapshot. The CLI and UI use the same server
-eligibility and recommendation data; a missing latency sample is not reported as a zero-cost
-startup. The CLI returns after staging, so consecutive commands can join the same batch.
-`prewarm` shows pending settings separately from active values. Config remains strict JSON,
-not JSONC; the pending copy preserves unrelated JSON and requires a matching active revision.
-Conflicts are reported rather than overwriting someone else's edit.
-
-On Windows, saves run with the normal bridge account and use **directory-inherited auditing**.
-The dashboard gives a non-blocking notice: custom per-file audit rules may not carry forward
-to the new active copy. The retained original keeps its original metadata. No audit-read
-privilege, UAC prompt, or permanently elevated bridge is required.
-
-This does not permit broader access to configuration data. Candidates must have appropriate
-access restrictions before any configuration bytes are written, and supported integrity
-protections must be retained. Actual source write denial or unsupported protection remains
-an error. Configuration operations run in a serialized worker so file inspection does not
-block MCP traffic.
-
-Windows security inspection uses the bundled, own-source .NET Framework helper rather than
-starting PowerShell or compiling code on each write. Automatic edits require .NET Framework
-4.6.2 or later; modern Windows includes it. The helper's source, build instructions and
-integrity metadata are [included in the package](tools/windows-security-helper/README.md).
-Windows ARM64 execution is not yet validated.
-
-Staging requests and file commits each have a bounded execution budget; the acknowledged
-five-second batching delay does not keep the original HTTP request open. A commit already in
-progress can finish after its deadline. The result distinguishes a pre-commit failure from
-a committed or unknown outcome; it never automatically retries or claims a timed-out write
-was rolled back.
-
-The two file moves are not an atomic exchange. Reload coordinates them with validated recovery
-state and non-replacing destination placement. Existing MCP traffic continues using the
-previous in-memory configuration during the flip; an external reader can briefly find the
-active path absent. Recovery must not overwrite a file created by an external editor.
-Reread the settings after an uncertain result.
-
-### Upgrading from 1.3.0
-
-Version 2.0.0 changes the configuration-save protocol; it does not require a new `servers.json`
-format. Update the bridge and CLI together, then reload any open dashboard pages. A 1.3.0
-client with a current nonce gets HTTP 409 before staging, with an instruction to update the
-client. An already-open tab retains the old nonce after a bridge restart and gets HTTP 401;
-refresh it to load the new dashboard and admin session.
-
-Custom API clients must send `x-mcp-pooling-batch: 1`. Treat HTTP 202 as acceptance, not
-completion, and follow the returned batch ID in `prewarm.batches` until it is applied,
-cancelled or failed. CLI scripts must likewise wait for application before relying on new
-settings. Undo now restores the complete batch and may affect several servers.
-Updated clients still understand the immediate HTTP 200 response from a 1.3.0 bridge.
-
-Before downgrading, cancel or apply pending changes with 2.0 and resolve any interrupted
-transaction using 2.0 recovery. Stop that bridge before starting 1.3.0 with the active config.
-Do not use a 1.3.0 binary to recover 2.0 transaction files or delete those files to bypass a
-recovery error. Keep a protected backup of the configuration before changing versions.
-If the writer worker exits, further automatic edits are refused until the bridge restarts;
-existing MCP sessions continue.
-
-### Health
-
-The `Health` tab runs the same checks as `mcp-pacemaker doctor`, so you can see them without a
-terminal.
-
-![Health tab: Node version, config validity, per-server status and the admin nonce path](docs/images/health.png)
-
-It checks the Node version, that the config parses, every server definition (including a stdio
-server whose relative path will not resolve from the directory it would run in — a failure that
-is otherwise silent until a client first calls it, and a server named after one of the bridge's
-own routes, which is unreachable), any server currently failing, and that the admin nonce file
-exists.
-
-### Terminal dashboard
-
-`mcp-pacemaker top` is the same data as an Ink TUI, for when a browser is inconvenient:
-
-```
-🫀 mcp-pacemaker top                                     ● :8850 · up 176s · v1.1.0
-SERVER            TYPE   HEALTH  SESS  WARM  REQ    PID       TOKEN   ERROR / CLIENTS
-filesystem        stdio  ok      2     1/1   8      186276,12 -       ⇄ Visual Studio Code,Claude Code
-github            stdio  ok      1     -     2      146436    -       ⇄ GitHub Copilot
-sqlite            stdio  ok      1     -     2      102108    -       ⇄ Cursor
-slow-tool         stdio  ok      1     -     2      103776    -       ⇄ Codex CLI
-search-api        http   FAIL×3  0     -     4      -         42m     upstream rejected the crede
-docs-api          http   ?       0     -     0      -         -
-↑↓ select · r recycle · q quit
-```
-
-`HEALTH` is `ok` when the last request to that server succeeded, `FAIL×n` after n consecutive
-failures, and `?` when nothing has called it yet — deliberately not `ok`, since no evidence is not
-the same as working. `WARM` shows `warm/minWarm` for pooled servers and `-` for the rest, `TOKEN`
-the time left on a cached credential, and the last column either the connected clients or the last
-error. `↑↓` selects a row and `r` recycles it.
-
-## Reading durable logs
-
-```sh
-mcp-pacemaker logs --since 2h --server filesystem
-mcp-pacemaker logs --follow --grep timeout
-mcp-pacemaker logs --config /path/to/servers.json --since 2026-09-07T12:00:00Z
-```
-
-`logs` reads `bridge.log.1` then `bridge.log` beside the selected config, including when
-the bridge is stopped. `--since` accepts durations in seconds/minutes/hours/days or an ISO
-timestamp with timezone. `--server` matches the exact log-header server name; `--grep` is
-a case-insensitive literal match, not a regular expression. Matching multiline records retain
-their header and context.
-
-`--follow` handles complete new lines, split UTF-8 writes, truncation and rollover until
-interrupted. It warns if rotation has already discarded an unread generation. Only retained
-history is available; it cannot recover logs the bridge has deleted. Individual lines over
-1 MiB fail explicitly rather than being silently truncated.
-
-## Editing servers.json while it runs
-
-Save the file and the bridge picks it up. Servers whose definition did not change are left
-completely alone — same processes, same live sessions — so adding one server does not cost you the
-fourteen that were already working:
-
-```bash
-$ mcp-pacemaker reload           # or just save the file; the bridge watches it
-✓ reloaded /Users/you/.mcp-pacemaker/servers.json on :8850
-·   added:   postgres
-·   changed: github
-·   2 session(s) restarted; untouched servers kept theirs
-```
-
-A file that does not parse, or a server with neither `command` nor `url`, is **rejected whole** —
-the bridge logs why and keeps serving the last good config, so a half-written save cannot take your
-servers down. Set `MCP_CONFIG_WATCH=0` to require an explicit `reload` instead of watching.
-
-## Server health
-
-Every server carries a health verdict in `/api/status`, `doctor`, `top` and the dashboard:
-
-| State | Meaning |
-|---|---|
-| `ok` | The last request to this server succeeded |
-| `failing` | Recent requests are failing, with a count of how many in a row |
-| `unknown` | Nothing has called it yet |
-
-This is passive and free — it is derived from traffic the bridge is already proxying. A JSON-RPC
-error *from* the server counts as healthy (it answered); a 401/403, a 5xx, a spawn failure or a
-non-zero exit counts as failing, and the state clears the moment a request succeeds again.
-
-A server nobody calls stays `unknown` forever, which is honest but not much help if its credential
-quietly expires overnight. `MCP_HEALTH_INTERVAL_MS` adds a periodic probe for HTTP servers so they
-get a verdict without waiting for a client:
-
-```bash
-MCP_HEALTH_INTERVAL_MS=300000 mcp-pacemaker start    # probe every 5 minutes
-```
-
-It is off by default because a probe is a real request to somebody else's service. Set
-`"healthIntervalMinutes": 0` on a server to exclude just that one, or a number to give it its own
-interval. stdio servers are not probed: a probe would mean spawning a process, which costs more
-than the request it is meant to pre-empt.
-
-## HTTP API
-
-Everything the dashboards show is plain HTTP on the same loopback port, so you can script it.
-Read endpoints need no auth; administrative writes require a nonce.
-
-| Endpoint | Method | Returns |
-|---|---|---|
-| `/status` | GET | Tiny liveness probe: `ok`, `service`, `version`, `port` and the server names. Used to tell a pacemaker bridge apart from a foreign service on the same port |
-| `/api/status` | GET | Full snapshot — every server with sessions, pids, warm count, request count, `health`, `lastError`, connected clients |
-| `/api/doctor` | GET | The health checks, as JSON |
-| `/api/events` | GET (SSE) | The same snapshot pushed every 2s — what the dashboard consumes |
-| `/api/logs` | GET (SSE) | Bridge log: replays the last 100 lines, then streams. For anything older, read `bridge.log` next to your config |
-| `/admin/recycle/<name>` | POST | Restart a server's processes. Omit `<name>` to recycle everything |
-| `/admin/reload` | POST | Flush a pending configuration batch, or re-read an externally edited `servers.json`. Only changed definitions are reconfigured |
-| `/admin/servers/<name>/pooling` | POST | Stage enable/disable or batch cancel/undo with admin nonce, bounded input and a matching config revision |
-| `/<name>/mcp` | POST/GET/DELETE | Streamable HTTP transport for that server |
-| `/<name>/sse` | GET | HTTP+SSE transport for that server |
-| `/.well-known/oauth-protected-resource/<name>` | GET | OAuth discovery relayed from the upstream, for HTTP servers where the client authenticates |
-
-Pooling mutations require `x-mcp-pooling-batch: 1`. A staged change returns **HTTP 202** with
-`pending: true`, a batch ID, a private cancel/undo receipt, and the public snapshot. Acceptance
-is not activation. `prewarm.batches` in the snapshot reports bounded pending, applying and
-completed outcomes; it does not expose receipt tokens or full configurations.
-Clients without the batch header are rejected before a change is queued, rather than letting
-an older client report a queued save as already enabled.
-Rich snapshots carry an instance-scoped `snapshotVersion` so a delayed HTTP response or older
-SSE frame cannot replace newer active settings or prematurely expire a batch receipt.
-
-```bash
-# is a server actually running, and who is using it?
-curl -s http://127.0.0.1:8850/api/status | jq '.servers[] | {name, sessions, pids, clients}'
-
-# watch the bridge log
-curl -N http://127.0.0.1:8850/api/logs
-
-# force a restart of one server (nonce is written next to servers.json)
-curl -X POST http://127.0.0.1:8850/admin/recycle/filesystem \
-  -H "x-mcp-nonce: $(cat ~/.mcp-pacemaker/admin.nonce)"
-```
-
-`/admin/*` is guarded twice: the request must arrive on loopback, **and** carry the nonce that the
-bridge writes to `admin.nonce` next to your config at startup. The nonce is new on every start, so
-only same-box tooling that can read that file — the CLI, and the dashboard the bridge itself
-served — can change anything.
-
-## servers.json
-
-Config lives at `~/.mcp-pacemaker/servers.json`. `import` fills it from your existing client
-config and **carries over `audience`/`auth`/`headers`**, so HTTP servers usually need no hand-editing.
-See [`examples/servers.example.json`](examples/servers.example.json).
-
-```jsonc
-{
-  "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
-
-  "my-api": {
-    "type": "http",
-    "url": "https://my-service.example.com/mcp",
-    "auth": { "type": "command", "command": "my-cli print-token", "refreshMinutes": 50 }
-  }
-}
-```
-
-**Auth options** (per HTTP server):
-
-| `auth.type` | Behavior |
-|---|---|
-| `command` | Runs any command that prints a token on stdout; the result is cached and auto-refreshed (`refreshMinutes`). Provider-agnostic — see below. |
-| `env` | Uses `process.env[var]`. |
-| `static` | Fixed `header` + `value`. |
-| `none` | No header is added — the **client** authenticates, and the bridge relays OAuth discovery and challenges for it. |
-
-`auth.type: "command"` is deliberately just "run this and use what it prints", so it works with
-whatever issues tokens in your environment. Some examples — none of these are special-cased:
-
-```jsonc
-// Azure
-{ "type": "command", "command": "az account get-access-token --resource api://<id> --query accessToken -o tsv" }
-// Google Cloud
-{ "type": "command", "command": "gcloud auth print-access-token" }
-// AWS (e.g. a signed token from your own helper)
-{ "type": "command", "command": "aws-token-helper --profile prod" }
-// HashiCorp Vault
-{ "type": "command", "command": "vault read -field=token secret/my-api" }
-// 1Password / any secret manager
-{ "type": "command", "command": "op read op://vault/my-api/token" }
-// A plain script
-{ "type": "command", "command": "./scripts/get-token.sh" }
-```
-
-By default the token is sent as `Authorization: Bearer <token>`; set `header` to send it
-somewhere else (for example `{ "header": "X-Api-Key" }`).
-
-**How long a credential is cached.** If the command returns a JWT, its `exp` claim decides —
-`refreshMinutes` is only an upper bound and a fallback for opaque credentials. This matters
-because token CLIs serve from their own cache: `az account get-access-token` will hand back a
-token it minted earlier that may be nearly spent, and trusting a flat window would keep a dead
-token in play. If the upstream rejects a credential the bridge supplied, that 401 is reported on
-the server (`doctor`, `/api/status` → `lastError`) and the credential is discarded rather than
-reused — the client is never asked to log in for a server the bridge authenticates.
-
-> **Azure shorthand.** A bare `"audience": "<res>"` expands to
-> `az account get-access-token --resource <res> …`. That is a convenience for Azure users only —
-> every other provider uses `auth.command` above.
-
-## Security
-
-- The bridge binds **`127.0.0.1` only** (local loopback) — not reachable off-box.
-- Tokens are **minted from your own already-authenticated CLI** and cached in memory; **never written to disk**.
-- The **bridge** (the process that runs 24/7) has **zero third-party dependencies**; the setup CLI uses `commander` / `@clack/prompts` / `picocolors` / `smol-toml`, and the TUI adds `ink` / `react`.
-
-## Multi-agent & resource controls
-
-Multiple hosts/agents can share one bridge — each gets its own isolated session by default,
-and HTTP servers share the cached token across all of them. The dashboard, `top`, and
-`mcp-pacemaker status` show **which agents are connected** to each server.
-
-| Control | Env / config | Default | Effect |
-|---|---|---|---|
-| Idle reaper | `MCP_IDLE_TIMEOUT_MS` | `1800000` (30 min) | free Streamable HTTP children idle past the timeout. Safe by default because a returning client's session is transparently re-established. `0` disables |
-| Concurrency cap | `MCP_MAX_SESSIONS_PER_SERVER`, or per-server `maxSessions` | `0` (unlimited) | reject new sessions past the cap (HTTP 503) |
-| Queue at the cap | `MCP_QUEUE_TIMEOUT_MS` | `10000` (10s) | at the cap, wait this long for a slot before returning 503, so a burst is absorbed rather than failed. `0` rejects immediately |
-| Sharing policy | per-server `sharing` (+ `minWarm`) | `isolated` | `isolated` = one child per session; `pool` pre-starts exclusive children; `shared` reuses one initialized child for compatible stateless tools sessions. Both alternatives require explicit activation |
-| Cold-start gate | `MCP_MAX_CONCURRENT_SPAWNS`, `MCP_SPAWN_GATE_WAIT_MS` | `2`, `15000` | how many package-manager-backed servers may cold-start at once. `npx`, `uvx`, `dnx` and friends share one cache, and starting several together can corrupt it — this queues them. Detected from the command, or forced either way with per-server `sharedPackageCache`. Servers that use no package manager are never gated. If no slot frees within the wait, the spawn proceeds ungated rather than hold a client request. `0` disables |
-| Pooling advice | `MCP_POOL_ADVICE_MS`, `MCP_WARM_MAX` | 2s, 8 | recommend pooling once a server's measured cold start passes this, and cap the suggested (and auto-sized) pool here. Advice only — the bridge never enables pooling on its own |
-| Session resume | `MCP_RESUME`, `MCP_RESUME_TTL_MS` | on, 24h | re-establish a session id the bridge has not seen — after a restart, recycle or idle reap. `MCP_RESUME=0` disables |
-| Scheduled recycle | per-server `recycleMinutes`, or `MCP_RECYCLE_MINUTES` | off | restart a server periodically, for servers holding a credential they can only refresh interactively |
-| Request timeouts | `MCP_REQUEST_TIMEOUT_MS` / `MCP_INIT_TIMEOUT_MS` | 30s / 180s | `initialize` also pays for spawning the server, so it gets a longer budget than ordinary calls |
-| Credential refresh | `MCP_TOKEN_REFRESH_LEAD_MS` | `300000` (5 min) | renew a cached token before it expires instead of discovering the expiry on a request. A JWT's own `exp` still caps how long it is cached |
-| Durable log | `MCP_LOG_MAX_BYTES` | `5242880` (5 MB) | `bridge.log` next to your config, rolled to `bridge.log.1` at this size. `0` disables. The dashboard only keeps the last few hundred lines in memory, which a chatty client fills in minutes |
-| Config watching | `MCP_CONFIG_WATCH` | on | reload `servers.json` when it is saved. `0` requires an explicit `mcp-pacemaker reload`. Either way, only servers whose definition changed are restarted, and an unparseable file is rejected without disturbing anything |
-| Health probing | `MCP_HEALTH_INTERVAL_MS`, or per-server `healthIntervalMinutes` | off | periodically call an HTTP server so it has a health verdict before a client needs it. Passive health from real traffic is always on and costs nothing |
-
-### Measuring process churn
-
-For stdio servers, `/api/status` reports `spawn.total` (successful process launches),
-`spawn.attempts`, `spawn.failures`, `spawn.warmAdoptions`, `spawn.sessionStarts`, and
-`spawn.sessionResumes`. Launches include classic SSE, Streamable HTTP, warm-pool refill,
-and replacements after recycle or resume. Adopting an existing warm child does not count
-as another launch. The unit is one bridge-launched process, not all of its descendants.
-
-These cumulative counters do not share the 50-sample latency limit. They reset when the
-bridge process restarts; compare snapshots only within the same `instanceId`. `startedAt`
-identifies that interval. Save the final snapshot before a planned restart for a before/after
-comparison. HTTP-proxied servers have no local process counters (`spawn: null`).
-
-`spawn.samples` and p50/p95/max still describe the latest 50 directly observed, successful
-cold initializations, not all launches. Latencies are `null` until observed; a warm child's
-idle lifetime is not a cold-start sample. The existing `requests` count covers routed HTTP
-requests, not just `tools/call`; do not label it as a tool-call count.
-
-### Shared mode
-
-Set `"sharing": "shared"` on a stdio server only when its tools are stateless, operate on
-explicit inputs and use one common credential context. This is an operator assertion, not
-something latency or matching capabilities can prove. Leave workspace-, conversation- or
-client-account-dependent servers isolated.
-
-Compatible sessions have identical full initialization parameters, including `clientInfo`,
-and empty client capabilities. One child receives one real initialization; each virtual session
-gets its own IDs, progress, cancellation and tools-list cursors. Only the upstream's actual
-tools capability is exposed. Roots, sampling, elicitation, tasks, resource subscriptions and
-other stateful methods are not supported. Incompatible clients fail explicitly, without
-silently falling back to a different mode.
-
-Deleting one session leaves the others running. The initialized child is retained between
-compatible reconnects for up to `sharedLingerMs` (30 minutes by default). Recycle drains work,
-then replaces the generation on later use. A timeout or child exit never triggers automatic
-replay of a potentially executed tool call.
-
-The server keeps its existing credential provider and configured `recycleMinutes`. Shared
-mode does not promise silent credential renewal. The dashboard and `prewarm` CLI show the
-actual shared-child state, members, queued work and cumulative process launches.
-See [the shared-session contract](docs/shared-sessions.md) for limits and failure semantics.
-
-## Uninstall
 
 ```bash
 mcp-pacemaker uninstall      # use the CLI from the matching installed version
@@ -900,7 +213,7 @@ mcp-pacemaker uninstall      # use the CLI from the matching installed version
 
 This stops managed bridges, removes auto-start entries and restores available host-file
 backups. It leaves files without backups and native Claude Code registrations unchanged.
-It is not scoped to one port; review [replacement and rollback](#replacing-or-rolling-back-a-running-installation)
+It is not scoped to one port; review [replacement and rollback](docs/upgrades.md#replacing-or-rolling-back-a-running-installation)
 first if another instance must remain running. Do not fetch a different CLI with `npx`
 to remove an existing installation.
 
@@ -910,11 +223,37 @@ After the installed service has been removed successfully, remove the global npm
 npm uninstall -g mcp-pacemaker
 ```
 
+## Security
+
+- The bridge binds **`127.0.0.1` only** (local loopback) — not reachable off-box.
+- Tokens are **minted from your own already-authenticated CLI** and cached in memory; **never written to disk**.
+- The **bridge** (the process that runs 24/7) has **zero third-party dependencies**; the setup CLI uses `commander` / `@clack/prompts` / `picocolors` / `smol-toml`, and the TUI adds `ink` / `react`.
+
+See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerability. The
+[HTTP API](docs/http-api.md) page explains how administrative requests are guarded.
+
+## Documentation
+
+- [Install details](docs/install.md) — Node and Windows requirements, the ordinary-user rule and npm channels
+- [Configuration](docs/configuration.md) — `servers.json`, auth, live edits, resource controls and shared mode
+- [Commands and operations](docs/operations.md) — every command, start and stop, durable logs and server health
+- [Dashboards](docs/dashboards.md) — the web dashboard, pre-warming controls, the health tab and `top`
+- [HTTP API](docs/http-api.md) — endpoints, pooling batches and the admin nonce
+- [Upgrades and rollback](docs/upgrades.md) — managed upgrades, `--sxs`, recovery and the Windows 1.3 migration
+- [Version compatibility](docs/compatibility.md) — 1.3.x and 2.x pairs, and upgrading from 1.3.0
+- [User-runtime contract](docs/execution-context.md) — what the ordinary-user check verifies
+- [Shared sessions](docs/shared-sessions.md) — the full shared-mode contract
+- [Account upgrades](docs/account-upgrades.md) — explicit original-account upgrades on Windows
+- [Roadmap](docs/roadmap.md) — planned work, including socket handoff
+
 ## Project
 
 - [CHANGELOG.md](CHANGELOG.md) — release notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and how regression tests are expected to be proven
 - [SECURITY.md](SECURITY.md) — threat model and how to report a vulnerability
+- Publishing and qualification: [npm publishing](docs/npm-publishing.md),
+  [local publication gate](docs/local-publication-gate.md) and
+  [cross-host live validation](docs/cross-host-live-validation.md)
 
 ## License
 

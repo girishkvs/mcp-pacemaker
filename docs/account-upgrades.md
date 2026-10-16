@@ -46,7 +46,11 @@ Administrators membership, and complete native authorization checks. Restricted,
 AppContainer, impersonating or unverified cross-account contexts refuse.
 No account label, saved administrator flag or group membership alone grants
 authority. The product does not request UAC, enable privileges, impersonate,
-supply passwords, create accounts or change existing permissions.
+supply passwords, create accounts or change existing permissions. The one
+exception is outside this path: the default-scope `upgrade --fix-legacy-access`
+step, which an administrator runs explicitly for a 1.3 install that was set up
+from an administrator terminal. It changes only that task's run-as user entry and
+the owner of that install's `bin\cli.mjs`.
 
 ## Where code executes
 
@@ -122,9 +126,11 @@ possible. Manual/external task starts are not claimed suppressed. Conflicting
 generations or revisions refuse. Because `IgnoreNew` can block a second task run
 while the worker is active, verified legacy rollback launches the original
 supervisor locally **inside the original-user worker**, not as the administrator.
-Legacy captured roots and observed descendants are checked for the worker's
-session before stop; native held-generation revalidation remains stop authority.
-Excluded or unattributed historical processes are never session-query or kill targets.
+Legacy captured roots are checked for the worker's session before stop; native
+held-generation revalidation remains stop authority. Plans no longer list
+descendants: the processes the 1.3 bridge started are found and stopped by the
+broker during the stop, through the same handles, without a separate session query.
+Processes that cannot be traced to the bridge are never session-query or kill targets.
 The compact session request accepts at most 512 unique captured identities and
 128 KiB of UTF-8. PID, FILETIME and current-account/session fields are checked
 before discovery. Session queries use at most 32 exact IDs per batch and four
@@ -137,6 +143,13 @@ Declining the runtime-upgrade prompt after worker bootstrap restores the exact
 pre-bootstrap task revision after fresh authorization. No staging or stop is
 authorized by that decline. Failed authorization or restoration remains an
 explicit uncertain outcome.
+
+An upgrade refused before anything stops, for example because `servers.json`
+changed while the target downloaded, puts the current version back in service
+and restores the original task before its journal settles, so a later
+`--recover` changes nothing. If the current version could not be resumed or the
+task could not be restored, the journal stays open and `--recover` finishes the
+job.
 
 ### Controller-only failure before instance publication
 

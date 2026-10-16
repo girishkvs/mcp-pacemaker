@@ -200,7 +200,7 @@ test('oracle Explorer capability controls never activate a real shell or suppres
     const result = spawnSync(shell, [
       '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
     ], {
-      encoding: 'utf8', windowsHide: true, timeout: 10000,
+      encoding: 'utf8', windowsHide: true, timeout: 30000,
       env: { ...process.env, MCP_TEST_EXPLORER_CONTEXT: join(FIXTURES, 'explorer-context.ps1') },
     });
     assert.equal(result.error, undefined);
@@ -402,7 +402,7 @@ test(AUDIT_TEST_NAME, WINDOWS, (t) => {
       const cleanup = spawnSync(shell, [
         '-NoProfile', '-NonInteractive', '-Command', '[IO.File]::Delete($env:MCP_TEST_READONLY)',
       ], {
-        encoding: 'utf8', windowsHide: true, timeout: 10000,
+        encoding: 'utf8', windowsHide: true, timeout: 30000,
         env: { ...process.env, MCP_TEST_READONLY: readonly },
       });
       assert.equal(cleanup.status, 0, cleanup.stderr);

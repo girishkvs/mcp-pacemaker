@@ -76,7 +76,7 @@ export const LOCAL_CONTROLLER = Object.freeze([
   'offline-stage/control.cjs',
   'offline-stage/loader.cjs', 'stage-issuer.mjs', 'stage-loader.mjs', 'stage-sdk-loader.json',
   'offline-stage/services.cjs', 'stage-fulcio.mjs',
-  'local-audit-report.mjs', 'provenance.mjs',
+  'local-audit-report.mjs', 'provenance.mjs', 'local-run-state.mjs',
 ].map(name => `tools/npm-publication/${name}`).concat([
   'test/helpers/local-regression-fixture.mjs', 'tools/npm-publication/source-gates.mjs',
   'tools/windows-ci/restore-toolchain.ps1',

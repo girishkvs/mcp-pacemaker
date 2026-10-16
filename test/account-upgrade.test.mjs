@@ -327,3 +327,77 @@ for (const [kind, failsStartup] of [['legacy', false], ['legacy', true], ['manag
     }
   });
 }
+
+for (const restoreFails of [false, true]) {
+test(`original-account managed upgrade refused before the stop ${restoreFails ? 'stays recoverable when the task restore fails' : 'restores the task and settles'}`, windows, async () => {
+  const fixture = new LegacyUpgradeFixture({ taskOwner: 'builtin-administrators' });
+  let registry;
+  let adapter;
+  try {
+    await fixture.start();
+    fixture.task.stableRecords = () => [minimalTaskRecord(fixture.task.read().current)];
+    const plan = await fixture.plan();
+    await fixture.approve(plan);
+    const { directory } = await fixture.upgrader().execute(plan);
+    const old = await backendStatus(fixture.port);
+    registry = await retainedRegistry(fixture.artifact(undefined, '2.0.4'), '2.0.4');
+    adapter = new OwnedAccountTask(fixture, registry.url, { original: fixture.task.read().current });
+    const edited = Buffer.concat([readFileSync(fixture.config), Buffer.from('\n')]);
+    const api = adapter.timedApi();
+    const createTaskChannel = api.createTaskChannel;
+    api.createTaskChannel = async options => {
+      const channel = await createTaskChannel(options);
+      const receive = channel.receive;
+      channel.receive = async () => {
+        const packet = await receive();
+        // The user edits servers.json while the target downloads, so the drain is refused.
+        if (packet.frame.verb === 'HOLD') writeFileSync(fixture.config, edited);
+        return packet;
+      };
+      return channel;
+    };
+    const actor = await channelApi.queryTaskChannelCaller();
+    adapter.sessionId = actor.identity.sessionId;
+    const invoke = args => runAccountController(fileURLToPath(new URL('../', import.meta.url)), {
+      explicit: true, targetSid: actor.identity.ownerSid, instance: directory, args,
+    }, { task: adapter, channelApi: api, confirm: async () => true, report: () => {} });
+    const restore = adapter.restore.bind(adapter);
+    if (restoreFails) adapter.restore = async () => { throw new Error('Owned task restoration denied'); };
+    await assert.rejects(invoke(['upgrade', '--to', '2.0.4', '--registry', registry.url]),
+      restoreFails ? /Owned task restoration denied/ : /worker failed; original task restored/);
+    assert.equal(await adapter.workerExit, 1, fixture.log);
+    const controller = readManagedJson(join(dirname(adapter.currentBinding.manifestPath), 'controller-journal.json'));
+    assert.equal((await backendStatus(fixture.port)).instanceId, old.instanceId);
+    assert.deepEqual(readFileSync(fixture.config), edited, 'The refused upgrade left the edited config alone.');
+    if (restoreFails) {
+      assert.match(fixture.log, /Configuration changed while staging[\s\S]*serving again\. The original task could not be restored/);
+      assert.equal(controller.phase, 'uncertain');
+      assert.equal(readManagedJson(join(directory, 'journal.json')).phase, 'quiescing', 'The journal stays open for recovery.');
+      assert.notDeepEqual(adapter.record, adapter.original);
+      adapter.restore = restore;
+      // Recovery resumes, settles the journal and restores the task.
+      assert.equal((await invoke(['upgrade', '--recover'])).status, 'aborted');
+      assert.equal(await adapter.workerExit, 0, fixture.log);
+      assert.deepEqual(adapter.actions, ['bootstrap', 'bootstrap', 'restore']);
+    } else {
+      assert.match(fixture.log, /Configuration changed while staging/);
+      assert.equal(controller.phase, 'failed-restored');
+      assert.deepEqual(adapter.actions, ['bootstrap', 'restore']);
+    }
+    assert.deepEqual(adapter.record, adapter.original);
+    assert.equal(readManagedJson(join(directory, 'journal.json')).phase, 'aborted');
+    // Recovery now finds a settled operation and changes nothing.
+    const actions = [...adapter.actions];
+    assert.equal((await invoke(['upgrade', '--recover'])).status, 'aborted');
+    assert.deepEqual(adapter.actions, actions);
+    assert.equal((await backendStatus(fixture.port)).instanceId, old.instanceId);
+  } catch (error) {
+    throw new Error(`Owned account operation failed: ${error.message}\nWorker output:\n${fixture.log}`, { cause: error });
+  } finally {
+    if (adapter?.workerExit) await adapter.workerExit;
+    await registry?.close();
+    try { await fixture.cleanup(); }
+    finally { adapter?.retainAndRemoveOperations(); }
+  }
+});
+}

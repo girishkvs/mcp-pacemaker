@@ -71,7 +71,7 @@ The public workflow separates three roles rather than assuming an OS label impli
 | --- | --- | --- |
 | `test (ubuntu-latest\|macos-latest, 20\|22\|24)` | Stock hosted | Ordinary user-runtime source and compatibility suites |
 | `windows-ordinary (20\|22\|24)` | Stock hosted Windows | Install, syntax, pinned native toolchain, three reproducible native builds, the actual refusal of an elevated built-in Administrator, then the `source-ordinary` and `compatibility` contracts run as a provisioned disposable standard account |
-| Windows session lane | Ordinary interactive Windows session | The four `SESSION_REQUIRED_TESTS` files, through the local publication gate |
+| Windows session lane | Ordinary interactive Windows session | The four `SESSION_REQUIRED_TESTS` files, run on the publishing host by the local publication gate's host half |
 
 A stock hosted Windows runner signs in as the built-in Administrator with a full elevated token, and
 Task Scheduler ignores `RunLevel` for that account, so that account cannot host the ordinary
@@ -83,10 +83,16 @@ unexecuted.
 
 A provisioned account signs in with a password logon and has no interactive logon session, so the
 four `SESSION_REQUIRED_TESTS` files that bind one stay in the session lane. They are still required,
-not skipped: `tools/npm-publication/local-gate.mjs` runs the complete source suite for the current
-release and requires `role: user-runtime` with `sessionVerified: true`. A Windows container without a
-real logged-on account cannot satisfy that, and neither can a hosted job. `testContract` asserts the
-two Windows lanes cover every registered file exactly once, so no file can fall out of both.
+not skipped. The qualification container cannot host them either, because `ContainerUser` has no
+interactive logon session. The two halves of the local publication gate therefore split the suite.
+Inside the container, `tools/npm-publication/local-gate.mjs` verifies the `source-ordinary` contract,
+runs the contained source suite and records the session files in `sessionDeferredTests`. On the host,
+`tools/npm-publication/local-windows.mjs` runs the `session-required` contract through
+`tools/windows-ci/ordinary-run.mjs`, whose scheduled task supplies an ordinary, non-elevated caller
+inside a real interactive session, and writes `session-lane.json`. `verify-local.mjs` requires that
+receipt to report `role: user-runtime` with `sessionVerified: true`, zero failures, exactly the
+registered session files, and the same commit the contained cases qualified. `testContract` asserts
+the two Windows lanes cover every registered file exactly once, so no file can fall out of both.
 
 The CI provider bounds job lifetime and owns job teardown; the contract entry
 point does not claim to provide VM or network isolation.

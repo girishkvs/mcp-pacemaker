@@ -33,6 +33,30 @@ export class WindowsLegacyTaskAdapter {
   repoint(port, expected, launcher) { return this.call('repoint', port, { expected, launcher }); }
   enable(port, expected) { return this.call('enable', port, { expected }); }
   restore(port, expected, original) { return this.call('restore', port, { expected, original }); }
+
+  callAccess(operation, port, cliPath, input) {
+    if (process.platform !== 'win32') throw new Error('Legacy access checks are supported only for the known Windows 1.3 registration.');
+    const script = fileURLToPath(new URL('../autostart/windows/legacy-access.ps1', import.meta.url));
+    let output;
+    try {
+      output = execFileSync('pwsh', [
+        '-NoProfile', '-NonInteractive', '-File', script, '-Operation', operation, '-Port', String(port), '-CliPath', cliPath,
+      ], {
+        input: input ? JSON.stringify(input) : '', encoding: 'utf8',
+        windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024,
+      });
+    } catch (error) {
+      let reply;
+      try { reply = JSON.parse(String(error.stdout ?? '')); } catch { throw error; }
+      throw Object.assign(new Error(String(reply.error)), { changed: Array.isArray(reply.changed) ? reply.changed : [] });
+    }
+    return JSON.parse(output);
+  }
+
+  // Read-only: what the ordinary runtime user cannot do to the task and bin/cli.mjs.
+  access(port, cliPath) { return this.callAccess('inspect', port, cliPath); }
+  // Elevated only: fixes the gaps reported by access(), bound to its returned descriptors.
+  grantAccess(port, cliPath, expected) { return this.callAccess('grant', port, cliPath, { expected }); }
   assertRestored(port, actual, original) {
     const { xml: actualXml, xmlSha256: actualHash, ...actualFields } = actual;
     const { xml: originalXml, xmlSha256: originalHash, ...originalFields } = original;

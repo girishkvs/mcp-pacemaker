@@ -1,21 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import semver from 'semver';
 import {
   acquireInstanceLock, createInstance, directoryIdentity, durableJson,
   readInstanceState, readManagedJson, readRecoveryContext, snapshotPackage, verifySelection,
   legacyMigrationPhases,
 } from './managed-state.mjs';
 import { inspectInstance, listenerOpen, startInstance, stopInstance } from './managed-runtime.mjs';
-import { PoolingFiles } from './pooling-files.mjs';
+import { MAX_CONFIG_BYTES, PoolingFiles } from './pooling-files.mjs';
 import { registerDefaultCli } from './cli-dispatch.mjs';
 import { servicePaths } from './service-control.mjs';
 import { WindowsLegacyTaskAdapter } from './legacy-task.mjs';
 import { requireUserRuntimeContext } from './runtime-context.mjs';
 import {
-  legacyPlanDigest, parseLegacyRegistration, requireLegacyApproval, verifyLegacyConfig, verifyLegacyListener, verifyLegacyPackage,
+  legacyPlanDigest, legacySessionState, parseLegacyRegistration, requireLegacyApproval, verifyLegacyConfig, verifyLegacyListener, verifyLegacyPackage,
 } from './legacy-installation.mjs';
 
 export const legacyPhases = legacyMigrationPhases;
@@ -148,6 +149,7 @@ export class LegacyUpgrader {
     await requireUserRuntimeContext();
     const approvalDigest = legacyPlanDigest(plan);
     requireLegacyApproval(plan);
+    this.requireSessionRecords(plan.instance.config, plan.to);
     this.verifySource(plan.instance, plan.legacy);
     await this.taskMatches(plan.instance, plan.legacy.registration);
     const operation = randomUUID();
@@ -174,6 +176,8 @@ export class LegacyUpgrader {
       const target = await this.stage({ ...plan, instance: { ...plan.instance, directory: work } }, operation);
       const capability = readManagedJson(join(target.root, 'bin', 'upgrade-capability.json'));
       if (capability.legacyRestartProtocol !== 1) throw new Error('Target does not support legacy restart recovery; old service was not touched.');
+      // The records can grow while the target downloads, so their size is checked again.
+      this.requireSessionRecords(plan.instance.config, target.version);
       const recovery = snapshotPackage(target.root, join(work, 'recovery'));
       verifySelection(recovery);
       this.verifySource(plan.instance, plan.legacy);
@@ -247,7 +251,12 @@ export class LegacyUpgrader {
       const legacyStop = await session.stop();
       this.transition(instance, journal, 'legacy-stopping', { legacyStop });
       this.assertPartialStop(legacyStop);
-      this.transition(instance, journal, 'legacy-stopped', { legacyStop });
+      // The 1.3 bridge has stopped, so its session records no longer change. An older target
+      // still compares them at admission.
+      const sessions = this.sessionRecords(instance.config);
+      this.transition(instance, journal, 'legacy-stopped', {
+        legacyStop, sessionState: sessions, legacy: { ...journal.legacy, sessions },
+      });
       return await this.activate(instance, journal);
     } catch (error) {
       if (journal &&
@@ -268,14 +277,53 @@ export class LegacyUpgrader {
     }
   }
 
+  // Targets before 2.1.1 compare session records when they start, reading at most 1 MiB of them.
+  comparesSessionRecords(version) {
+    const ignoresRecords = semver.valid(version) &&
+      semver.gte(version, '2.1.1');
+    return !ignoresRecords;
+  }
+
+  // Refuse such a target before anything is downloaded or stopped instead of restarting into a
+  // rollback. Only the size is checked, so a session starting or ending meanwhile cannot make
+  // this refuse.
+  requireSessionRecords(config, version) {
+    if (!this.comparesSessionRecords(version)) return;
+    const path = join(dirname(config), 'sessions.json');
+    const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0;
+    if (size > MAX_CONFIG_BYTES) {
+      throw new Error(`Session records in ${path} are over 1 MiB, more than ${version} can compare when it starts. Upgrade to 2.1.1 or newer instead. Nothing was stopped.`);
+    }
+  }
+
+  // Records that could not be read after the stop would make such a target refuse admission,
+  // where rollback is no longer automatic. Refusing here, while the journal is still at
+  // `legacy-stopped`, restarts 1.3.
+  requireReadSessionRecords(config, journal) {
+    const unread = this.comparesSessionRecords(journal.target.version) &&
+      journal.sessionState === null &&
+      existsSync(join(dirname(config), 'sessions.json'));
+    if (unread) {
+      throw new Error(`Session records could not be read after the old version stopped, and ${journal.target.version} compares them when it starts.`);
+    }
+  }
+
+  // Read once the 1.3 bridge has stopped. A file the integrity helper refuses, such as one
+  // over 1 MiB, must not strand an upgrade whose old version is already down.
+  sessionRecords(config) {
+    try { return legacySessionState(config); }
+    catch { return null; }
+  }
+
+  // An upgrade may end the old bridge's sessions; only the supervisor and bridge must be proven
+  // stopped. A process the bridge started that could not be stopped is reported, not a refusal.
   assertPartialStop(receipt) {
     if (receipt?.legacyRootStopVerified !== true ||
-        receipt.observedDescendantsStopped !== true ||
+        typeof receipt.observedDescendantsStopped !== 'boolean' ||
         receipt.treeCompleteness !== 'unproven' ||
         !Array.isArray(receipt.errors) ||
-        receipt.errors.length ||
         'stopped' in receipt ||
-        'activeProcesses' in receipt) throw new Error('Legacy root/observed-set shutdown is incomplete. Registration remains held; no activation was authorized.');
+        'activeProcesses' in receipt) throw new Error('Legacy supervisor and bridge shutdown is not verified. Registration remains held; no activation was authorized.');
   }
 
   async verifyOldStopped(instance, journal) {
@@ -286,6 +334,7 @@ export class LegacyUpgrader {
   }
 
   async activate(instance, journal) {
+    this.requireReadSessionRecords(instance.config, journal);
     await this.verifyOldStopped(instance, journal);
     this.verifySource(instance, journal.legacy);
     await this.taskMatches(instance, journal.legacy.taskCurrent);
@@ -317,8 +366,14 @@ export class LegacyUpgrader {
     return {
       status: 'upgraded', directory: instance.directory, port: instance.port, version: journal.target.version,
       legacyStop: journal.legacyStop,
-      warning: 'Legacy HTTP outcomes were not certified or replayed. Historical orphan coverage is unproven; unattributed processes were left untouched.',
+      warning: this.stopWarning(journal.legacyStop),
     };
+  }
+
+  stopWarning(receipt) {
+    const ended = 'Open 1.3 sessions and calls in progress were ended; clients reconnect. No call was retried.';
+    if (receipt.observedDescendantsStopped) return ended;
+    return `${ended} Not every process the 1.3 bridge started could be confirmed stopped; see legacyStop.errors.`;
   }
 
   selectCli(instance, journal) {
@@ -407,7 +462,8 @@ export class LegacyUpgrader {
     this.assertRestoredTask(instance.port, journal.legacy.taskCurrent, journal.legacy.registration);
     this.transition(instance, journal, 'legacy-rollback-launching');
     await this.task.start(instance.port, journal.legacy.taskCurrent);
-    const deadline = Date.now() + RESTART_OBSERVATION_MS;
+    const started = Date.now();
+    const deadline = started + RESTART_OBSERVATION_MS;
     let lastError;
     while (Date.now() < deadline) {
       try {
@@ -424,7 +480,7 @@ export class LegacyUpgrader {
       await new Promise(resolveWait => setTimeout(resolveWait, 100));
     }
     throw new Error('Legacy restart outcome is uncertain; retained code, task and journal require inspection.' +
-      (lastError ? ` Last observation after ${RESTART_OBSERVATION_MS} ms: ${lastError.message}` : ''),
+      (lastError ? ` Last observation after ${Date.now() - started} ms: ${lastError.message}` : ''),
       { cause: lastError });
   }
 

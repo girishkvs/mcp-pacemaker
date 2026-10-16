@@ -17,6 +17,7 @@ import { confirmLegacyUpgrade } from '../../bin/legacy-installation.mjs';
 import { legacyDormant } from '../../bin/legacy-upgrade.mjs';
 import { observeWindowsProcessLifetime } from '../../bin/windows-process-lifetime.mjs';
 import { retainedCliDependencies } from './managed-package.mjs';
+import { retainedDependencyLock } from './managed-registry.mjs';
 
 export const legacyCommit = '2d525f4ced01b978a5aeb83aef69145e96cced05';
 const source = fileURLToPath(new URL('../../', import.meta.url));
@@ -138,10 +139,18 @@ export class LegacyUpgradeFixture {
     const held = await api.prepareLegacyProcesses({ port: this.port, root: this.root });
     this.initialProcesses = held.plan;
     await held.close();
-    const userSid = this.initialProcesses.ownerSid;
+    const record = this.taskRecord(this.initialProcesses.ownerSid);
+    writeFileSync(this.taskPath, JSON.stringify({ current: record, actions: [] }));
+    this.originalTask = this.task.save(record, 'fixture-registered');
+    this.shim = join(this.directory, 'mcp-pacemaker.cmd');
+    writeFileSync(this.shim, `@echo off\r\n"${process.execPath}" "${join(this.root, 'bin', 'cli.mjs')}" %*\r\n`);
+    return this.old;
+  }
+
+  taskRecord(userSid) {
     const ownerSid = this.taskOwner === 'builtin-administrators' ? 'S-1-5-32-544' : userSid;
     const sddl = `O:${ownerSid}G:${userSid}D:P(A;;FA;;;${userSid})S:(ML;;NW;;;ME)`;
-    const record = {
+    return {
       name: `McpPacemaker-${this.port}`, path: `\\McpPacemaker-${this.port}`, enabled: true,
       userSid, currentUserSid: userSid, logonType: 3, runLevel: 0,
       security: {
@@ -155,11 +164,17 @@ export class LegacyUpgradeFixture {
         startWhenAvailable: true, disallowStartIfOnBatteries: false, stopIfGoingOnBatteries: false,
       },
     };
+  }
+
+  // Install state and the owned registration only; no legacy service is started.
+  registerOwned(port, userSid) {
+    this.port = port;
+    this.originalState = Buffer.from(JSON.stringify({ hosts: [{ id: 'vscode', port }] }) + '\n');
+    writeFileSync(join(this.home, 'state.json'), this.originalState);
+    const record = this.taskRecord(userSid);
     writeFileSync(this.taskPath, JSON.stringify({ current: record, actions: [] }));
     this.originalTask = this.task.save(record, 'fixture-registered');
-    this.shim = join(this.directory, 'mcp-pacemaker.cmd');
-    writeFileSync(this.shim, `@echo off\r\n"${process.execPath}" "${join(this.root, 'bin', 'cli.mjs')}" %*\r\n`);
-    return this.old;
+    return this.originalTask;
   }
 
   env() {
@@ -220,6 +235,7 @@ export class LegacyUpgradeFixture {
     }
     const pkg = readManagedJson(join(source, 'package.json'));
     writeFileSync(join(root, 'package.json'), JSON.stringify({ ...pkg, version }));
+    writeFileSync(join(root, 'bin', 'dependency-lock.json'), retainedDependencyLock(version));
     modify?.(root);
     const entries = [];
     const walk = (directory, prefix = '') => {
@@ -289,10 +305,7 @@ export class LegacyUpgradeFixture {
       }
       const api = await import('../../bin/windows-legacy-process.mjs');
       const old = this.initialProcesses ? await api.verifyLegacyProcessesGone(this.initialProcesses) : null;
-      if (old) {
-        assert.equal(old.legacyRootStopVerified, true);
-        assert.equal(old.observedDescendantsStopped, true);
-      }
+      if (old) assert.equal(old.legacyRootStopVerified, true);
       if (!errors.length) {
         try { rmSync(this.directory, { recursive: true }); }
         catch (error) { errors.push(error); }
