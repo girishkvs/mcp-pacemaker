@@ -33,7 +33,9 @@ import { killBridge } from './helpers/kill-bridge.mjs';
 //   8874                        health (peer error codes)
 //   8875                        pooling-deadlines
 //
-// Free at the time of writing: 8828, 8854-8859, 8861, 8868-8869, 8876, 8878+.
+//   8885                        request-origin
+//   8886-8888                   child-write-race
+// Free at the time of writing: 8828, 8854-8859, 8861, 8868-8869, 8876, 8878-8884, 8889+.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -52,6 +52,16 @@ export class LocalGitConfig {
   }
 
   options() {
-    return ['-c', `core.worktree=${this.root}`, '-c', 'extensions.worktreeConfig=false'];
+    return gitRootOptions(this.root);
   }
+}
+
+// Binds a Git command to `root`. The local gate puts these first on each Local Git command it
+// records, and the offline verifier rebuilds them from here, so this part cannot drift apart.
+// Ownership is not a trust signal here: every executable configuration path this repository
+// could inherit is rejected above and re-verified after each command, so a checkout owned by
+// another account (a CI workspace, a shared agent) is read under the same guarantees.
+export function gitRootOptions(root) {
+  return ['-c', `safe.directory=${root}`, '-c', `core.worktree=${root}`,
+    '-c', 'extensions.worktreeConfig=false'];
 }

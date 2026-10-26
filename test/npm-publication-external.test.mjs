@@ -23,6 +23,8 @@ import { captureConsumerLicenseEvidence } from '../tools/npm-consumer/license-ev
 import {
   assertHostedScannerContext, installScanners, releaseExecutable, retainScannerProvenance, SCANNER_RELEASES,
 } from '../tools/npm-publication/install-scanners.mjs';
+import { scanPublicationRequest } from '../tools/publication-scanners/publication.mjs';
+import { PRODUCER_RISK_REVIEW } from '../tools/publication-scanners/advisories.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 test('scanner bootstrap retains exact create-only safe provenance for the original collector', t => {
@@ -63,7 +65,7 @@ function fixture(t, temporaryParent = tmpdir()) {
   const pkg = { name: 'mcp-pacemaker', version: '2.0.1', license: 'MIT' };
   const paths = [
     'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs', 'bin/pooling-writer.mjs',
-    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs', 'bin/pooling-errors.mjs',
+    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
     'bin/pooling-execution.mjs', 'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs',
     'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs',
     'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist/index.html', 'ui/dist/assets/app.js',
@@ -150,6 +152,45 @@ async function scanner({ request, policyPath, publicPackages }) {
     }])),
   };
 }
+
+test('External source aggregation blocks OSV findings covered only by the retired review', async t => {
+  t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
+  const f = fixture(t);
+  const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
+  write(f.sourceRoot, 'ui/package-lock.json', lockBytes);
+  const rootLockBytes = readFileSync(new URL('./fixtures/producer-root-risk-2.0.2-lock.json', import.meta.url));
+  write(f.sourceRoot, 'package-lock.json', rootLockBytes);
+  const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
+    Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
+      entry.name ?? path.split('node_modules/').at(-1))))];
+  const request = { ...f.request, version: '2.0.2', publicPackages: names };
+  const report = await aggregateExternalGates(request, {
+    run: gitRunner(f),
+    scanPublication: async options => {
+      const ordinary = await scanner({ ...options, publicPackages: ['fixture-public'] });
+      const risk = await scanPublicationRequest({
+        request: { ...options.request, requiredGates: ['producer-advisories'] }, publicPackages: names,
+        bindingReader: async () => ({ syntheticSourceBinding: true }),
+        fetchImpl: async (_url, init) => new Response(JSON.stringify({ results: JSON.parse(init.body).queries
+          .map(query => ({ vulns: PRODUCER_RISK_REVIEW.advisories
+            .filter(item => item.package === query.package.name && item.version === query.version)
+            .map(item => ({ id: item.id, modified: '2026-10-06T00:00:08Z' })) })) }),
+        { headers: { 'Content-Type': 'application/json' } }),
+      });
+      ordinary.gates['producer-advisories'] = risk.gates['producer-advisories'];
+      ordinary.scannerDetails = risk.scannerDetails;
+      return ordinary;
+    },
+  });
+  assert.equal(report.status, 'failed');
+  assert.equal(report.gates['producer-advisories'].riskAcceptance, undefined);
+  assert.equal(report.gates['producer-advisories'].status, 'failed');
+  assert.equal(report.error.gate, 'producer-advisories');
+  assert.notEqual(report.gates['producer-advisories'].advisoryFree, true);
+  assert.equal(report.scannerDetails.advisories.rawFindingCount, 4);
+  assert.equal(report.scannerDetails.advisories.findings[0].status, 'blocked');
+  assert.equal(report.gates['native-release-identity'], undefined, 'Later gates must not run after advisory rejection');
+});
 function commandEvidence(args, stdout = '') {
   const command = { file: resolve('synthetic-node'), args, cwd: resolve('synthetic-root') };
   return { exitCode: 0, command, commandSha256: hash(JSON.stringify(command)),
@@ -233,16 +274,21 @@ function replacementFixture(f) {
   const stdout = JSON.stringify(result);
   const args = [join(f.sourceRoot, 'tools/service-replacement/check.mjs'),
     '--legacy-tarball', join(f.root, 'legacy.tgz'), '--legacy-sha256', approvedArtifacts.legacy.sha256,
-    '--current-tarball', join(f.root, 'current.tgz'), '--current-sha256', artifact.sha256];
+    '--legacy-version', approvedArtifacts.legacy.version,
+    '--current-tarball', join(f.root, 'current.tgz'), '--current-sha256', artifact.sha256,
+    '--current-version', approvedArtifacts.current.version];
   const evidence = commandEvidence(args, stdout);
   evidence.command.cwd = f.sourceRoot;
   evidence.commandSha256 = hash(JSON.stringify(evidence.command));
   return { result, stdout, approvedArtifacts, evidence };
 }
 function artifactRequest(f) {
+  const replacement = replacementFixture(f);
+  const peer = replacement.approvedArtifacts.legacy;
   return { ...f.request, phase: 'artifact', root: f.extractedRoot, extractedRoot: f.extractedRoot,
+    approval: { ...f.request.approval, peerArtifact: { version: peer.version, sha256: peer.sha256 } },
     requiredGates: ARTIFACT_GATES, artifact, tarball: join(f.root, 'current.tgz'),
-    matrix: matrixFixture(f.nativeIdentity), replacement: replacementFixture(f),
+    matrix: matrixFixture(f.nativeIdentity), replacement,
     sourceReport: { phase: 'source', commit, nativeIdentity: f.nativeIdentity,
       gates: { 'native-release-identity': { status: 'passed' } } } };
 }
@@ -618,55 +664,6 @@ test('consumer and license failures emit fixed recovery hints, never raw command
   assert.equal(exact.error.reviewRequired, reviewRequired);
 });
 
-const runtimeCommonPaths = [
-  'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs',
-  'bin/pooling-writer.mjs', 'bin/pooling-config.mjs', 'bin/pooling-execution.mjs',
-  'bin/windows/PoolingSecurityHelper.exe', 'supervisor/supervise.mjs',
-  'supervisor/bridge-child.mjs', 'supervisor/supervise.sh', 'supervisor/supervise.ps1',
-  'ui/dist/index.html', 'ui/dist/assets/app.js',
-];
-const runtimeCurrentOnlyPaths = [
-  'bin/pooling-editor.mjs', 'bin/pooling-files.mjs', 'bin/pooling-errors.mjs',
-  'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs',
-];
-
-function runtimeFixture(t, version) {
-  const extractedRoot = mkdtempSync(join(realpathSync.native(tmpdir()), 'runtime-closure-unit-'));
-  t.after(() => rmSync(extractedRoot, { recursive: true }));
-  const paths = [...runtimeCommonPaths, ...(version === '2.0.1' ? runtimeCurrentOnlyPaths : [])];
-  for (const path of paths) write(extractedRoot, path, `Synthetic ${version} ${path}`);
-  const request = { version, extractedRoot, artifact: { sha256: 'a'.repeat(64) } };
-  const consumers = [{ platform: 'linux', node: 'v24.21.0', npm: '12.0.2',
-    installScripts: 'default', installedBin: true, bridgeAndUi: true, sha256: request.artifact.sha256 }];
-  return { request, consumers, paths };
-}
-
-for (const version of ['1.3.1', '2.0.1']) {
-  test(`runtime closure accepts ${version}'s own runtime layout`, t => {
-    const { request, consumers, paths } = runtimeFixture(t, version);
-    const result = verifyRuntimeClosure(request, consumers);
-    assert.deepEqual(result.files.map(file => file.path).sort(), paths.sort());
-  });
-
-  for (const path of ['bin/pooling-config.mjs', 'bin/pooling-writer.mjs', 'bin/pooling-execution.mjs']) {
-    test(`runtime closure rejects missing ${path} for ${version}`, t => {
-      const { request, consumers } = runtimeFixture(t, version);
-      rmSync(join(request.extractedRoot, path));
-      assert.throws(() => verifyRuntimeClosure(request, consumers),
-        { code: 'ENOENT', path: join(request.extractedRoot, path) });
-    });
-  }
-}
-
-for (const path of runtimeCurrentOnlyPaths) {
-  test(`current runtime closure still rejects missing ${path}`, t => {
-    const { request, consumers } = runtimeFixture(t, '2.0.1');
-    rmSync(join(request.extractedRoot, path));
-    assert.throws(() => verifyRuntimeClosure(request, consumers),
-      { code: 'ENOENT', path: join(request.extractedRoot, path) });
-  });
-}
-
 test('runtime closure needs the actual lazy writer, not only a version result', t => {
   const f = fixture(t);
   const request = artifactRequest(f);
@@ -674,6 +671,17 @@ test('runtime closure needs the actual lazy writer, not only a version result', 
   assert.ok(verifyRuntimeClosure(request, consumers).files.some(file => file.path === 'bin/pooling-writer.mjs'));
   rmSync(join(f.extractedRoot, 'bin/pooling-writer.mjs'));
   assert.throws(() => verifyRuntimeClosure(request, consumers));
+});
+
+test('a 1.x runtime closure does not require the 2.x pooling editor and file modules', t => {
+  const f = fixture(t);
+  const current = artifactRequest(f);
+  const consumers = normalizeMatrix(current);
+  for (const path of ['bin/pooling-editor.mjs', 'bin/pooling-files.mjs']) rmSync(join(f.extractedRoot, path));
+  assert.throws(() => verifyRuntimeClosure(current, consumers), /ENOENT.*pooling-editor\.mjs/);
+  const legacy = verifyRuntimeClosure({ ...current, version: '1.3.2' }, consumers);
+  assert.ok(legacy.files.some(file => file.path === 'bin/pooling-writer.mjs'));
+  assert.ok(legacy.files.some(file => file.path === 'bin/pooling-execution.mjs'));
 });
 
 test('missing replacement cannot pass artifact aggregation; OSV finding blocks licenses', async t => {
@@ -779,6 +787,32 @@ test('T32 requires supplied actual command result, four ordered replacements and
     copy.replacement.stdout = JSON.stringify(copy.replacement.result);
     copy.replacement.evidence.stdoutSha256 = hash(copy.replacement.stdout);
     assert.throws(() => verifyReplacement(copy));
+  }
+});
+
+test('SYNTHETIC T32 verification binds multiple selected versions and immutable peer pins', t => {
+  for (const current of ['2.0.2', '2.7.13']) {
+    const request = artifactRequest(fixture(t));
+    const receipt = request.replacement;
+    request.version = current;
+    receipt.approvedArtifacts.current.version = current;
+    receipt.result.artifacts.current.version = current;
+    for (const step of receipt.result.steps) {
+      if (step.from.startsWith('2.')) step.from = current;
+      if (step.to.startsWith('2.')) step.to = current;
+      step.ui.version = step.to;
+    }
+    receipt.evidence.command.args[12] = current;
+    receipt.evidence.commandSha256 = hash(JSON.stringify(receipt.evidence.command));
+    receipt.stdout = JSON.stringify(receipt.result);
+    receipt.evidence.stdoutSha256 = hash(receipt.stdout);
+    request.approval = { peerArtifact: { version: '1.3.1', sha256: receipt.approvedArtifacts.legacy.sha256 } };
+    assert.equal(verifyReplacement(request).steps.length, 4);
+    request.approval.peerArtifact.version = '1.3.2';
+    assert.throws(() => verifyReplacement(request));
+    request.approval.peerArtifact.version = '1.3.1';
+    request.approval.peerArtifact.sha256 = '0'.repeat(64);
+    assert.throws(() => verifyReplacement(request));
   }
 });
 

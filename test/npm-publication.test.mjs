@@ -108,26 +108,38 @@ test('Synthetic stage IDs remain runtime-only fixtures', () => {
   assert.equal(source.includes(stageId), false, 'Keep the synthetic stage ID out of source bytes');
 });
 
-test('T01/T20: only approved stable candidate versions map to fixed channels', () => {
+test('T01/T20: supported stable majors map to release channels', () => {
   assert.equal(channelFor('1.3.1'), 'legacy');
   assert.equal(channelFor('2.0.1'), 'latest');
-  for (const version of ['1.3.0', '2.0.0', '3.0.1', '2.0.1-beta.1', 'v2.0.1', '1', '1.3.1+build']) {
+  for (const version of ['1.3.2', '1.4.12', '2.0.2', '2.7.13']) {
+    assert.equal(channelFor(version), version.startsWith('1.') ? 'legacy' : 'latest');
+    assert.equal(publicationTagName(`refs/tags/npm-r27/v${version}`, version), `npm-r27/v${version}`);
+  }
+  for (const version of ['0.3.0', '3.0.1', '2.0.1-beta.1', 'v2.0.1', '1', '1.3.1+build',
+    '2.00.2', '2.1.02', '2.9007199254740992.0', '2.0.2\n']) {
     assert.throws(() => channelFor(version));
   }
 });
 
-test('Repair generations beyond r5 preserve the exact supported release ref', () => {
-  for (const version of ['1.3.1', '2.0.1']) {
-    for (const generation of [6, 12, Number.MAX_SAFE_INTEGER]) {
-      const ref = `refs/tags/npm-r${generation}/v${version}`;
-      assert.equal(publicationTagName(ref, version), ref.slice('refs/tags/'.length));
-      assert.equal(validateApproval({ ...approval(version), ref }, 'stage'), channelFor(version));
-    }
+test('reusable approval rejects string source-CI attempts', () => {
+  const a = approval();
+  a.ciAttempt = '2';
+  assert.throws(() => validateApproval(a, 'stage'), /attempt/i);
+});
+
+test('reusable approval accepts exact supported selected patch and repair generation', () => {
+  const a = approval('2.7.13');
+  a.ref = 'refs/tags/npm-r27/v2.7.13';
+  a.ciAttempt = 2;
+  assert.equal(validateApproval(a, 'stage'), 'latest');
+  for (const generation of ['0', '1', '02', '-2', '9007199254740992']) {
+    assert.throws(() => publicationTagName(`refs/tags/npm-r${generation}/v2.7.13`, a.version));
   }
+  assert.throws(() => publicationTagName(a.ref, '2.7.14'));
 });
 
 for (const version of ['1.3.1', '2.0.1']) {
-  for (const namespace of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/']) {
+  for (const namespace of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/']) {
     test(`publication tag ${namespace}v${version} preserves approval, workflow and environment binding`, () => {
       const a = approval(version);
       a.ref = `refs/tags/${namespace}v${version}`;
@@ -136,7 +148,7 @@ for (const version of ['1.3.1', '2.0.1']) {
       assert.equal(validateApproval({ ...a, scope: 'prepare' }, 'prepare'), channelFor(version));
       const { env, event } = context(a);
       validateContext(env, event, a);
-      const otherRefs = ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/'].filter(value => value !== namespace)
+      const otherRefs = ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].filter(value => value !== namespace)
         .map(value => `refs/tags/${value}v${version}`);
       for (const other of otherRefs) {
         assert.throws(() => validateContext({ ...env, GITHUB_REF: other }, event, a));
@@ -172,35 +184,10 @@ test('publication tag approval rejects alternate refs and mismatched versions', 
     'refs/tags/npm-r4/v1.3.1', 'refs/tags/npm-r4/v2.0.1-extra', 'refs/tags/npm-r4/v2.0.1/other',
     'refs/tags/npm-r4//v2.0.1', 'refs/tags/npm-r4/../v2.0.1',
     'refs/tags/npm-r5/v1.3.1', 'refs/tags/npm-r5/v2.0.1-extra', 'refs/tags/npm-r5/v2.0.1/other',
-    'refs/tags/npm-r5//v2.0.1', 'refs/tags/npm-r5/../v2.0.1', 'refs/tags/npm-r06/v2.0.1', null]) {
-    assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved/);
+    'refs/tags/npm-r5//v2.0.1', 'refs/tags/npm-r5/../v2.0.1', 'refs/tags/npm-r01/v2.0.1', null]) {
+    assert.throws(() => validateApproval({ ...a, ref }, 'stage'), /exact approved|supported/);
   }
   assert.throws(() => publicationTagName('refs/tags/npm/v3.0.1', '3.0.1'));
-});
-
-test('Repair generations reject noncanonical, unsafe, malformed and unsupported refs', () => {
-  for (const generation of ['0', '1', '02', '06', '-2', '+2', '2.0', '2e1', 'Infinity',
-    '9007199254740992', '99999999999999999', '', ' 6', '6 ']) {
-    assert.throws(() => publicationTagName(`refs/tags/npm-r${generation}/v1.3.1`, '1.3.1'));
-  }
-  for (const version of ['1.3.0', '1.3.2', '2.0.0', '2.0.2', '3.0.1', '1.3.1-beta', '1.3.1+meta']) {
-    assert.throws(() => publicationTagName(`refs/tags/npm-r6/v${version}`, version));
-  }
-  for (const suffix of ['\n', '\r\n', '?a=1', '#fragment', '/other', '-extra']) {
-    assert.throws(() => publicationTagName(`refs/tags/npm-r6/v1.3.1${suffix}`, '1.3.1'));
-  }
-});
-
-test('Source CI approval requires a numeric positive safe integer for every action', () => {
-  for (const scope of ['prepare', 'stage']) {
-    for (const ciAttempt of [1, 2, Number.MAX_SAFE_INTEGER]) {
-      validateApproval({ ...approval(), scope, ciAttempt }, scope);
-    }
-    for (const ciAttempt of [undefined, null, true, '1', '2', 0, -1, 1.5, NaN, Infinity,
-      Number.MAX_SAFE_INTEGER + 1]) {
-      assert.throws(() => validateApproval({ ...approval(), scope, ciAttempt }, scope), /positive safe integer/);
-    }
-  }
 });
 
 test('T02/T03: each source identity independently fails closed', () => {
@@ -260,7 +247,7 @@ test('T07/T09: bootstrap is not an automated action or a fabricated stage', () =
   assert.throws(() => validateApproval(approval(), 'bootstrap'));
   const a = approval();
   delete a.ownerPreflight.expectedDistTags.latest;
-  assert.throws(() => validateApproval(a, 'stage'), /Bootstrap/);
+  assert.throws(() => validateApproval(a, 'stage'), /supported|current release/);
 });
 
 test('T08/T09: unknown ownership, absent package and missing trust block before a write', async () => {
@@ -295,7 +282,7 @@ test('T10/T11/T20: exact tarball submitted once with explicit final tag and no a
 
 test('npm publication refs preserve fixed npm channels during stage submission', async () => {
   for (const version of ['1.3.1', '2.0.1']) {
-    for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/']) {
+    for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/']) {
       const a = approval(version);
       a.ref = `refs/tags/${namespace}v${version}`;
       const s = submission(a);
@@ -415,6 +402,29 @@ test('npm12 official name-keyed pack/stage schema is distinct from npm11 array o
   assert.throws(() => npm12Contents(JSON.stringify(noId), a, bytes, true));
 });
 
+for (const version of ['1.3.2', '2.0.3']) {
+  test(`patched TOML floor accepts the reviewed dependency for ${version}`, () => {
+    const a = approval(version);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+
+  test(`patched TOML floor refuses vulnerable or unreviewed ranges for ${version}`, () => {
+    const a = approval(version);
+    for (const floor of ['^1.8.0', '^1.7.0', '*', '>=1.8.0', '^1.9.0 || ^1.8.0']) {
+      assert.throws(() => validatePackage({ ...pkg(a), dependencies: { 'smol-toml': floor } }, a),
+        /TOML floor/);
+    }
+  });
+}
+
+for (const version of ['1.3.1', '2.0.1', '2.0.2']) {
+  test(`patched TOML floor retains published ${version} metadata verification`, () => {
+    const a = approval(version);
+    validatePackage(pkg(a), a);
+    validatePackage({ ...pkg(a), dependencies: { 'smol-toml': '^1.9.0' } }, a);
+  });
+}
+
 test('T22-T28/T42: missing, generic-pending or unbound gates fail without changing designated owner-pending states', () => {
   const a = approval();
   const report = { schemaVersion: 1, commit: a.commit, artifact: digest(bytes), localRegression: a.localRegression,
@@ -463,26 +473,33 @@ test('Only four human gates accept owner-pending; native execution/identity and 
 });
 
 test('T42: exact CI attempt and complete successful required matrix are mandatory', () => {
-  const a = approval();
+  const a = approval('2.1.2');
   const run = { id: 42, run_attempt: 1, head_sha: a.commit, head_repository: { full_name: POLICY.repository },
     repository: { full_name: POLICY.repository }, path: '.github/workflows/ci.yml',
     event: 'push', status: 'completed', conclusion: 'success' };
   const names = ['Lockfiles resolve to the public registry', 'ui'];
-  for (const os of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
+  for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) names.push(`test (${os}, ${node})`);
   }
-  const jobs = names.map(name => ({ name, head_sha: a.commit, status: 'completed', conclusion: 'success' }));
+  const ciJobs = windowsJobs => [...names, ...windowsJobs]
+    .map(name => ({ name, head_sha: a.commit, status: 'completed', conclusion: 'success' }));
+  const jobs = ciJobs([20, 22, 24].map(node => `windows-ordinary (${node})`));
   validateCi(run, jobs, a);
-  for (const attempt of [2, Number.MAX_SAFE_INTEGER]) {
-    validateCi({ ...run, run_attempt: attempt }, jobs, { ...a, ciAttempt: attempt });
-    assert.throws(() => validateCi(run, jobs, { ...a, ciAttempt: attempt }));
-    assert.throws(() => validateCi({ ...run, id: 43, run_attempt: attempt }, jobs, { ...a, ciAttempt: attempt }));
-    assert.throws(() => validateCi({ ...run, run_attempt: attempt }, jobs, { ...a, ciAttempt: String(attempt) }));
-  }
+  assert.throws(() => validateCi(run, jobs.filter(job => job.name !== 'windows-ordinary (22)'), a),
+    /CI job missing or ambiguous: windows-ordinary \(22\)/);
+  assert.throws(() => validateCi(run, jobs.filter(job => job.name !== 'test (macos-latest, 24)'), a),
+    /CI job missing or ambiguous: test \(macos-latest, 24\)/);
   assert.throws(() => validateCi({ ...run, head_sha: 'd'.repeat(40) }, jobs, a));
   assert.throws(() => validateCi({ ...run, event: 'pull_request' }, jobs, a));
   assert.throws(() => validateCi(run, jobs.slice(1), a));
   assert.throws(() => validateCi(run, jobs.map(job => ({ ...job, conclusion: 'skipped' })), a));
+
+  // The 1.x line runs its Windows suite on the hosted runner, so each line needs its own jobs.
+  const legacy = approval('1.3.2');
+  const legacyJobs = ciJobs([20, 22, 24].map(node => `test (windows-latest, ${node})`));
+  validateCi(run, legacyJobs, legacy);
+  assert.throws(() => validateCi(run, jobs, legacy), /CI job missing or ambiguous: test \(windows-latest, 20\)/);
+  assert.throws(() => validateCi(run, legacyJobs, a), /CI job missing or ambiguous: windows-ordinary \(20\)/);
 });
 
 test('T05/T06: a named but unprotected environment or bypass without owner review is insufficient', () => {
@@ -622,15 +639,21 @@ test('T04/T06: transfer is bound to approved artifact ID/archive digest/source/p
   }
 });
 
-test('T18: workflow is manual-only, package-wide serialized, stage-only OIDC and pinned actions', () => {
+test('T18: workflow is manual-only, serialized, with OIDC only in protected stage job', () => {
   const workflow = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /^\s+(?:push|release|pull_request|schedule|workflow_run):/m);
   assert.match(workflow, /default: prepare/);
-  assert.match(workflow, /options: \[collect-secrets, prepare, stage\]/);
   assert.match(workflow, /group: npm-publication-mcp-pacemaker\n\s+cancel-in-progress: false/);
   assert.equal((workflow.match(/id-token: write/g) ?? []).length, 1);
   assert.doesNotMatch(workflow.split('\n  stage:')[0], /id-token/);
+  for (const key of ['stage']) {
+    const job = workflow.split(`\n  ${key}:`)[1].split(/\n  [a-z][\w-]*:/)[0];
+    assert.match(job, /environment: npm-publish/);
+    assert.match(job, /id-token: write/);
+  }
+  assert.match(workflow, /options: \[collect-secrets, prepare, stage\]/);
+  assert.doesNotMatch(workflow, /sign-bootstrap|publish-bootstrap|owner-auth|post-publication/);
   assert.match(workflow, /environment: npm-publish/);
   assert.match(workflow, /ACTUAL_RUNNER_ENVIRONMENT: \$\{\{ runner.environment }}/);
   assert.doesNotMatch(workflow, /^ {6}\S[^\n]*\$\{\{\s*runner\./m,

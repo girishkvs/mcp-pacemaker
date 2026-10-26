@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { run } from '../../tools/compatibility/fixtures.mjs';
 import { CompatibilityBridge, assertImmediate, assertPending, assertSnapshot } from './bridge.mjs';
 
-const AUDIT_UNAVAILABLE = 'Automatic pooling edits require readable audit policy so security can be preserved. No config data was written.';
+export const AUDIT_UNAVAILABLE = 'Automatic pooling edits require readable audit policy so security can be preserved. No config data was written.';
 
 async function callerAuthority(env) {
   const identity = process.platform === 'win32'
@@ -23,7 +23,7 @@ function fileState(path) {
     .map((name) => [name, String(stat[name])]));
 }
 
-async function legacyScope(bridge, legacy) {
+export async function legacyScope(bridge, legacy) {
   if (process.platform !== 'win32') return 'posix';
   const output = await run(join(legacy, 'bin', 'windows', 'PoolingSecurityHelper.exe'), ['inspect'], {
     env: { ...bridge.env, MCP_POOL_SOURCE: bridge.config }, timeout: 10000,

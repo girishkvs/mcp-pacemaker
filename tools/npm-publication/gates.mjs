@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { releaseRole } from './local-regression.mjs';
 import { publicationHelperEnvironment } from './local-regression-hosted.mjs';
 import { spawnSync } from 'node:child_process';
 import {
@@ -12,7 +13,7 @@ import {
   fixturePlan, ownedDirectory, removeOwnedDirectory,
 } from '../compatibility/fixtures.mjs';
 import { POLICY, digest, sameDigests, validatePackage, validateGateStatus } from './policy.mjs';
-import { lockedCoordinates } from '../publication-scanners/advisories.mjs';
+import { classifyNativeAudit, lockedCoordinates } from '../publication-scanners/advisories.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
 import { validateConsumerLicenseEvidence } from '../npm-consumer/license-evidence.mjs';
 import { safeLicenseDiagnostic } from './runtime-licenses.mjs';
@@ -270,22 +271,27 @@ export class GateRunner {
     sameDigests(digest(readFileSync(path)), artifact);
   }
 
-  run(label, executable, args, cwd = this.root, environment = this.env) {
+  run(label, executable, args, cwd = this.root, environment = this.env, auditContext) {
     const result = spawnSync(executable, args, {
       cwd, env: environment, encoding: 'utf8', shell: false, maxBuffer: 32 * 1024 * 1024,
     });
     const transcript = JSON.stringify({
-      exitCode: result.status, signal: result.signal,
+      exitCode: result.status, signal: result.signal, error: result.error?.code ?? null,
       stdout: result.stdout ?? '', stderr: result.stderr ?? '',
     });
     const log = join(this.owned.dir, `command-${this.logs.length + 1}.json`);
     writeFileSync(log, transcript, { flag: 'wx', mode: 0o600 });
     this.logs.push(log);
     assert.equal(result.error, undefined, `${label}: executable failed to start; no retry`);
-    assert.equal(result.status, 0, `${label} failed; private evidence: ${log}; no retry`);
+    assert.equal(result.signal, null, `${label}: executable signalled; no retry`);
+    const advisory = auditContext ? classifyNativeAudit(result.stdout ?? '', {
+      exitCode: result.status, error: result.error, signal: result.signal, stderr: result.stderr ?? '',
+    }, auditContext) : undefined;
+    if (!auditContext) assert.equal(result.status, 0, `${label} failed; private evidence: ${log}; no retry`);
     return {
       stdout: (result.stdout ?? '').trim(),
       rawStdout: result.stdout ?? '',
+      ...(advisory ? { advisory, auditContext } : {}),
       evidence: {
         ...evidenceFor(`${label}; Node ${POLICY.node}; npm ${POLICY.npm}`, transcript),
         exitCode: result.status,
@@ -298,9 +304,26 @@ export class GateRunner {
   }
 
   npm(args, label) {
-    return this.run(label, process.execPath, [this.cli,
+    let auditContext;
+    let lockPath;
+    if (args.includes('audit')) {
+      const ui = args[0] === '--prefix' && args[1] === 'ui';
+      assert.deepEqual(args, [...(ui ? ['--prefix', 'ui'] : []), 'audit', '--json', '--audit-level=low'],
+        'Only the exact full producer audit command may classify finding exit1');
+      lockPath = join(this.root, ...(ui ? ['ui'] : []), 'package-lock.json');
+      const lockBytes = readFileSync(lockPath);
+      auditContext = { phase: 'source', version: this.package.version, scope: ui ? 'producer-ui' : 'producer-root',
+        lockSha256: digest(lockBytes).sha256, lockBytes };
+    }
+    const result = this.run(label, process.execPath, [this.cli,
       `--userconfig=${this.config.user}`, `--globalconfig=${this.config.global}`,
-      `--registry=${POLICY.registry}`, `--cache=${join(this.owned.dir, 'cache')}`, ...args]);
+      `--registry=${POLICY.registry}`, `--cache=${join(this.owned.dir, 'cache')}`, ...args],
+    this.root, this.env, auditContext);
+    if (auditContext) {
+      assert.equal(digest(readFileSync(lockPath)).sha256, auditContext.lockSha256, 'Producer audit lock changed');
+      assert.equal(readJson(join(this.root, 'package.json')).version, auditContext.version, 'Producer audit release changed');
+    }
+    return result;
   }
 
   script(name, args = []) {
@@ -338,7 +361,7 @@ export class GateRunner {
       assert.equal(manifest.runtimeMajor, POLICY.node.split('.')[0], 'Compatibility fixtures used a different Node major');
       assert.deepEqual(manifest.plan, fixturePlan(this.package.version));
       if (binding) {
-        const role = this.package.version === '1.3.1' ? 'legacy' : 'candidate';
+        const role = releaseRole(this.package.version) === 'legacy' ? 'legacy' : 'candidate';
         assert.equal(manifest.sources[role].archiveSha256, binding.artifact.sha256,
           'Compatibility fixtures did not use the approved tarball');
       }

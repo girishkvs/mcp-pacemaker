@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { releaseRole } from '../npm-publication/local-regression.mjs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -29,7 +30,7 @@ export function consumerOptions(args) {
   }
   assert.ok(values['--tarball'], '--tarball is required');
   assert.match(values['--sha256'] ?? '', /^[a-f0-9]{64}$/, 'A SHA-256 digest is required');
-  assert.ok(['1.3.1', '2.0.1'].includes(values['--version']), 'An explicitly supported patch version is required');
+  releaseRole(values['--version']);
   assert.match(values['--name'] ?? '', /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/,
     'A package name is required');
   return {

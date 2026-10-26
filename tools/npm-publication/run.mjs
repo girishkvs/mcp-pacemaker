@@ -12,12 +12,17 @@ import { inspectTarball } from './tarball.mjs';
 import { scannerEnvironment, temporaryEnvironment } from './gate-environment.mjs';
 import { githubReaders, readGithubPages, zipFiles, validateMatrixContext, verifyPreparedBundle, verifyMatrixReports } from './matrix.mjs';
 import { downloadPeer, validatePeerApproval } from './peer.mjs';
+import { bootstrapWorkflow, validateBootstrapContext, signBootstrapOnce } from './bootstrap.mjs';
+import { readCandidateEvidence, readRemoteSource, readProtectedEnvironment, readSigningRun,
+  readAbsentRegistry } from './bootstrap-readers.mjs';
+import { npmProvenance } from './provenance.mjs';
 import { validateLocalApproval, validateLocalManifest, validatePreparedLocal } from './local-regression.mjs';
 import { LocalSourceReader, validateSourceSubject } from './local-source.mjs';
 import { readOwnerLocalAcceptance, publicationHelperEnvironment } from './local-regression-hosted.mjs';
 import { validateCapture } from './stage-capture.mjs';
 import { reconcileStageCapture } from './stage-capture-hosted.mjs';
 import { scanSource, toolsFromEnvironment } from '../publication-scanners/secrets.mjs';
+import { requiresProducerAdvisoryEvidence } from '../publication-scanners/advisories.mjs';
 import { makeSecretCollection, secretCollectionFiles, secretHash, secretId } from './secret-report.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -90,6 +95,17 @@ export function cleanNpmEnvironment(env, home, stage = false) {
   return result;
 }
 
+export function bootstrapEnvironment(env, home) {
+  const child = cleanNpmEnvironment(env, home, true);
+  for (const key of ['GITHUB_API_URL', 'GITHUB_REPOSITORY_OWNER', 'GITHUB_ACTOR',
+    'GITHUB_TRIGGERING_ACTOR', 'GITHUB_JOB', 'GITHUB_EVENT_PATH', 'RUNNER_OS', 'RUNNER_ARCH',
+    'ACTUAL_RUNNER_ENVIRONMENT', 'NPM_PUBLICATION_CLI']) {
+    assert.ok(env[key], `Missing bootstrap context: ${key}`);
+    child[key] = env[key];
+  }
+  return child;
+}
+
 async function github(path) {
   assert.ok(process.env.GITHUB_TOKEN, 'Read-only GitHub job token required');
   const response = await fetch(`https://api.github.com/repos/${POLICY.repository}/${path}`, {
@@ -109,7 +125,7 @@ async function jobs(runId, attempt) {
     'jobs', { incompleteMessage: 'Incomplete CI job pagination', countMessage: 'Unexpected CI job count' });
 }
 
-async function sourceAndCi(approval, { continuing = false, collectionProof = false } = {}) {
+export async function sourceAndCi(approval, { continuing = false, collectionProof = false } = {}) {
   validateLocalApproval(approval, { continuing });
   validateSource(source(approval), approval);
   validatePackage(json(join(root, 'package.json')), approval);
@@ -127,6 +143,13 @@ async function sourceAndCi(approval, { continuing = false, collectionProof = fal
   if (collectionProof) return { runId: String(ci.id), attempt: ci.run_attempt, commit: ci.head_sha,
     completedAt: new Date(ci.updated_at).toISOString() };
   return { runId: ci.id, attempt: ci.run_attempt, headSha: ci.head_sha, conclusion: ci.conclusion };
+}
+
+export function sourceLocks() {
+  return {
+    root: digest(readFileSync(join(root, 'package-lock.json'))).sha256,
+    ui: digest(readFileSync(join(root, 'ui/package-lock.json'))).sha256,
+  };
 }
 
 function toolchain() {
@@ -189,6 +212,7 @@ async function prepare(approval) {
   validateSource(source(approval), approval);
   assert.equal(digest(readFileSync(join(root, 'package-lock.json'))).sha256, locks.root);
   assert.equal(digest(readFileSync(join(root, 'ui/package-lock.json'))).sha256, locks.ui);
+  const sourceGateReport = json(sourceReport);
   const prepared = {
     schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version: approval.version,
     major: Number(approval.version[0]), channel: channelFor(approval.version),
@@ -198,6 +222,10 @@ async function prepare(approval) {
     ci, toolchain: { node: POLICY.node, npm: POLICY.npm }, producerLocks: locks,
     artifact: { filename: 'candidate.tgz', ...digest(bytes), files: inspection.files },
     sourceReportSha256: digest(readFileSync(sourceReport)).sha256,
+    ...(requiresProducerAdvisoryEvidence(approval.version) ? { producerAdvisories: {
+      source: sourceGateReport.source, checks: sourceGateReport.checks,
+      gate: sourceGateReport.gates['producer-advisories'],
+    } } : {}),
     publicPackages: approval.publicPackages,
     preparationApproval: { approver: approval.approver, approvedAt: approval.approvedAt, scope: 'prepare' },
     localRegression: approval.localRegression, localRegressionReview: approval.localRegressionReview,
@@ -209,6 +237,7 @@ async function prepare(approval) {
     },
     publicationApproval: { status: 'not-authorized' },
   };
+  validatePreparedLocal(prepared, approval, approval, sourceGateReport);
   save(join(output, 'prepared.json'), prepared);
   assert.deepEqual(readdirSync(output).sort(), ['candidate.tgz', 'prepared.json', 'source-gates.json']);
   const preparedSha256 = digest(readFileSync(join(output, 'prepared.json'))).sha256;
@@ -435,20 +464,79 @@ async function stage(approval) {
   });
 }
 
+async function signBootstrap(approval) {
+  validateBootstrapContext({ env: process.env, event: json(process.env.GITHUB_EVENT_PATH), approval });
+  // Reject inherited credentials/config before loading a signing library or starting a child.
+  cleanNpmEnvironment(process.env, resolve(process.env.RUNNER_TEMP), true);
+  const api = npmProvenance(process.env.NPM_PUBLICATION_CLI);
+  const readers = githubReaders(process.env);
+  const workflow = bootstrapWorkflow(process.env);
+  const locks = sourceLocks();
+  let candidate;
+  const revalidate = async () => {
+    validateBootstrapContext({ env: process.env, event: json(process.env.GITHUB_EVENT_PATH), approval });
+    await sourceAndCi(approval);
+    const source = await readRemoteSource(approval, readers);
+    assert.equal(source.repositoryId, workflow.repositoryId);
+    assert.equal(source.ownerId, workflow.ownerId);
+    assert.deepEqual(await readSigningRun(approval, workflow.runId, readers, false), workflow);
+    const environment = await readProtectedEnvironment(approval, workflow.runId, readers);
+    assert.deepEqual(sourceLocks(), locks);
+    candidate = await readCandidateEvidence(approval, locks, readers);
+    assert.equal(String(candidate.repository.id), workflow.repositoryId);
+    return { source, environment, preparation: candidate.evidence, registry: await readAbsentRegistry() };
+  };
+  await revalidate();
+  const { output: ledger, home } = workspace('npm-bootstrap-ledger');
+  const env = bootstrapEnvironment(process.env, home);
+  const tarball = join(home, 'candidate.tgz');
+  const context = join(home, 'bootstrap-context.json');
+  const bundle = join(home, 'provenance.sigstore');
+  const files = candidate.files;
+  writeFileSync(tarball, files.get('candidate.tgz'), { flag: 'wx', mode: 0o600 });
+  save(context, { approval, workflow,
+    manifestBase64: files.get('manifest.json').toString('base64') });
+  let sequence = 0;
+  const result = await signBootstrapOnce({
+    approval, files, locks, workflow, revalidate, verifyBundle: api.verifyBundle, cache: join(home, 'tuf'),
+    record: state => save(join(ledger, `sign-${sequence++}.json`), state),
+    sign: () => {
+      validateBootstrapContext({ env: process.env, event: json(process.env.GITHUB_EVENT_PATH), approval });
+      validateSource(source(approval), approval);
+      sameDigests(digest(readFileSync(tarball)), approval.artifact);
+      run(process.execPath, [join(root, 'tools/npm-publication/sign-provenance.mjs'),
+        context, tarball, bundle], { cwd: home, env });
+      sameDigests(digest(readFileSync(tarball)), approval.artifact);
+      return readFileSync(bundle);
+    },
+  });
+  sameDigests(digest(readFileSync(tarball)), approval.artifact);
+  const output = join(resolve(process.env.RUNNER_TEMP), 'npm-bootstrap-signed');
+  mkdirSync(output, { mode: 0o700 });
+  for (const [name, bytes] of files) writeFileSync(join(output, name), bytes, { flag: 'wx', mode: 0o600 });
+  writeFileSync(join(output, 'provenance.sigstore'), result.bundleBytes, { flag: 'wx', mode: 0o600 });
+  save(join(output, 'bootstrap.json'), result.receipt);
+  console.log(JSON.stringify({ status: result.receipt.phase,
+    receiptSha256: digest(readFileSync(join(output, 'bootstrap.json'))).sha256,
+    bundleSha256: result.receipt.provenance.sha256, npmWrite: 'not-performed' }));
+}
+
 export async function main(command) {
   assert.ok(['collect-secrets', 'prepare', 'finalize', 'transfer', 'stage'].includes(command), 'Unknown publication command');
   const event = json(process.env.GITHUB_EVENT_PATH);
   const action = event.inputs?.action;
+  assert.ok(['collect-secrets', 'prepare', 'stage'].includes(action), 'Obsolete or unsupported workflow action');
   const approval = JSON.parse(event.inputs?.approval ?? '');
   validateLocalApproval(approval, { continuing: command === 'finalize' });
   // Finalization continues the same source-approved run; it does not consume a new approval.
   if (command === 'finalize') validateMatrixContext(process.env, approval, event);
   else validateApproval(approval, action);
   validateContext(process.env, event, approval);
-  assert.equal(action, command === 'collect-secrets' ? command : ['prepare', 'finalize'].includes(command) ? 'prepare' : 'stage');
+  assert.equal(action, ['sign-bootstrap', 'collect-secrets'].includes(command) ? command : ['prepare', 'finalize'].includes(command) ? 'prepare' : 'stage');
   if (command === 'collect-secrets') await collectSecrets(approval);
   else if (command === 'prepare') await prepare(approval);
   else if (command === 'finalize') await finalize(approval);
+  else if (command === 'sign-bootstrap') await signBootstrap(approval);
   else if (command === 'transfer') {
     await sourceAndCi(approval);
     await transfer(approval);

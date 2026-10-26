@@ -11,12 +11,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import net from 'node:net';
 import {
   LocalGate, localEnvironment, main, retainedDependencies, testArguments, testTotals,
-  SOURCE_SUITE_TIMEOUT_MS, uiTestArguments, validateContainment,
+  SOURCE_SUITE_TIMEOUT_MS, sourceSuiteLabel, uiTestArguments, validateContainment,
+  nativeRestoreArguments, LOCAL_NATIVE_PATHS,
 } from '../../tools/npm-publication/local-gate.mjs';
-import { AUDIT_MODE, AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
+import { AUDIT_MODE_VARIABLE } from '../../tools/npm-publication/local-audit-report.mjs';
 import { validateSdkContract } from '../../tools/npm-publication/local-sdk-check.mjs';
 import { CURRENT_REF } from '../../tools/compatibility/fixtures.mjs';
 import { POLICY, channelFor, digest } from '../../tools/npm-publication/policy.mjs';
+import { releaseRole } from '../../tools/npm-publication/local-regression.mjs';
 import { verifyStaged } from '../../tools/npm-publication/verify-staged.mjs';
 import { stageCaptureFixture } from './stage-capture-fixture.mjs';
 import { stageProofFixture } from './stage-proof-fixture.mjs';
@@ -60,7 +62,7 @@ class SdkFixture {
     this.runs = 0;
     this.version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
     for (const directory of ['npm-publication', 'compatibility', 'publication-scanners',
-      'npm-consumer', 'third-party-notices']) {
+      'npm-consumer', 'third-party-notices', 'windows-legacy', 'windows-process-lifetime', 'windows-task-channel']) {
       cpSync(join(ROOT, 'tools', directory), join(this.gate.root, 'tools', directory), { recursive: true });
     }
     for (const path of ['package.json', 'tools/npm-publication/local-sdk-check.mjs',
@@ -72,7 +74,7 @@ class SdkFixture {
     write(npm, 'node_modules/sigstore/package.json', '{"name":"sigstore","version":"5.0.0","main":"index.js"}');
     write(npm, 'node_modules/sigstore/index.js',
       'exports.verify = () => { throw new Error("Unit stub must never verify a signature"); };');
-    if (this.version === '2.0.1') {
+    if (releaseRole(this.version) === 'current') {
       // Only dispatch/shape stubs. No retained npm modules, authentication or signature generation.
       write(this.gate.root, 'tools/npm-publication/owner-sdk.mjs', `
         export const PROFILE_SOURCE_SHA256 = '1'.repeat(64);
@@ -129,7 +131,7 @@ test('actual lane UI manifest selects existing tests or the legitimate legacy ab
     assert.deepEqual(selected, testArguments(ui.scripts.test));
     assert.ok(selected.length > 2);
   } else {
-    assert.equal(pkg.version, '1.3.1');
+    assert.equal(releaseRole(pkg.version), 'legacy');
     assert.equal(existsSync(join(ROOT, 'ui/test')), false);
     assert.equal(selected, null);
   }
@@ -142,7 +144,7 @@ test('only legacy may omit UI tests; new scripts and nested files must all be se
   delete ui.scripts.test;
   write(gate.root, 'ui/package.json', JSON.stringify(ui));
   assert.equal(uiTestArguments(gate.root, ui.version), null);
-  assert.throws(() => uiTestArguments(gate.root, '9.0.0'), /Unsupported UI test lane/);
+  assert.throws(() => uiTestArguments(gate.root, '9.0.0'), /supported/);
   ui.version = '2.0.1';
   write(gate.root, 'ui/package.json', JSON.stringify(ui));
   assert.throws(() => uiTestArguments(gate.root, ui.version), /UI suite is required/);
@@ -193,19 +195,20 @@ test('TAP line parser preserves numeric, duplicate, separator and accounting sem
 
 test('fresh-child actual lane dispatch uses minimal stubs, never retained npm or absent legacy owner modules', t => {
   const sdk = new SdkFixture(t);
-  if (sdk.version === '1.3.1') {
-    for (const file of ['owner-sdk.mjs', 'provenance.mjs']) {
-      assert.equal(existsSync(join(sdk.gate.root, 'tools/npm-publication', file)), false);
-    }
+  const legacy = releaseRole(sdk.version) === 'legacy';
+  if (legacy) {
+    // The 1.x line now carries the shared owner SDK. Remove it to prove the legacy lane never
+    // needs it. Its `verify-staged.mjs` still uses `provenance.mjs`, so that file stays.
+    rmSync(join(sdk.gate.root, 'tools/npm-publication/owner-sdk.mjs'));
   }
   const result = sdk.run();
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
   const record = JSON.parse(result.stdout);
-  assert.equal(record.contract, sdk.version === '1.3.1'
+  assert.equal(record.contract, legacy
     ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
-  if (sdk.version === '1.3.1') assert.equal(record.module, 'verify-staged.mjs');
+  if (legacy) assert.equal(record.module, 'verify-staged.mjs');
   if (process.version === `v${POLICY.node}`) {
     assert.equal(record.version, sdk.version);
     for (const key of ['authenticated', 'published', 'provenanceVerified', 'signatureVerified', 'releaseReady']) {
@@ -220,13 +223,14 @@ test('SDK lane dispatch fails closed on unsupported lanes, absent modules, and i
   const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
   const changes = [
     sdk => write(sdk.gate.root, 'package.json', JSON.stringify({ name: POLICY.name, version: '9.0.0' })),
-    ...(version === '1.3.1' ? [
+    ...(releaseRole(version) === 'legacy' ? [
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'package.json', '{"name":"npm","version":"11.0.0"}'),
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'node_modules/sigstore/package.json',
         '{"name":"sigstore","version":"4.0.0","main":"index.js"}'),
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'node_modules/sigstore/index.js', 'exports.verify = {};'),
       sdk => write(sdk.gate.root, 'tools/npm-publication/verify-staged.mjs', 'export const verifyStaged = {};'),
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/verify-staged.mjs')),
+      sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/provenance.mjs')),
     ] : [
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/owner-sdk.mjs')),
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/provenance.mjs')),
@@ -400,31 +404,57 @@ for (const version of ['1.3.1', '2.0.1']) {
   test(`source suite child receives CI mode without hosted authority for ${version}`, t => {
     const gate = fixture(t);
     gate.env.CI = 'inherited-marker';
+    const command = gate.command.bind(gate);
+    let restores = 0;
+    gate.command = (label, executable, args, cwd, binary, timeout, environment) => {
+      if (label === 'Verify user-runtime execution contract') {
+        assert.equal(executable, process.execPath);
+        assert.deepEqual(args, ['tools/ci/run-tests.mjs', 'source-ordinary', '--check']);
+        return JSON.stringify({ contract: 'source-ordinary', platform: 'win32', role: 'user-runtime',
+          verified: true });
+      }
+      if (label === 'Restore pinned native fixture toolchain') {
+        restores++;
+        assert.equal(executable, 'C:\\input\\pwsh\\pwsh.exe');
+        assert.deepEqual(args, nativeRestoreArguments());
+        assert.equal(environment.OS, 'Windows_NT');
+        assert.equal(timeout, 15 * 60_000);
+        return JSON.stringify(LOCAL_NATIVE_PATHS);
+      }
+      return command(label, executable, args, cwd, binary, timeout, environment);
+    };
     const script = `process.stdout.write(JSON.stringify({
       ci: process.env.CI,
       audit: process.env[${JSON.stringify(AUDIT_MODE_VARIABLE)}],
       github: process.env.GITHUB_ACTIONS,
       token: process.env.GITHUB_TOKEN,
       npmToken: process.env.NPM_TOKEN,
+      compiler: process.env.MCP_NATIVE_COMPILER,
+      references: process.env.MCP_NATIVE_REFERENCES,
       temporary: require('node:os').tmpdir(),
       physicalTemporary: require('node:fs').realpathSync.native(require('node:os').tmpdir())
     }));`;
     const output = gate.sourceSuite(gate.root, version, ['-e', script]);
     assert.deepEqual(JSON.parse(output), {
-      ci: 'true', ...(version === '2.0.1' ? { audit: AUDIT_MODE } : {}),
+      ci: 'true',
+      ...(version === '2.0.1' ? { compiler: LOCAL_NATIVE_PATHS.CompilerPath,
+        references: LOCAL_NATIVE_PATHS.ReferenceAssemblyPath } : {}),
       temporary: join(gate.work, 'source-test-temp-alias'),
       physicalTemporary: realpathSync.native(join(gate.work, 'source-test-temp')),
     });
     assert.equal(gate.env.CI, 'inherited-marker');
+    assert.equal(restores, version === '2.0.1' ? 1 : 0);
     assert.equal(gate.env[AUDIT_MODE_VARIABLE], undefined);
     assert.equal(gate.env.TEMP, gate.env.HOME);
     const receipt = JSON.parse(readFileSync(join(gate.output, gate.steps[0].file)));
-    assert.equal(receipt.label, 'Complete source suite');
+    assert.equal(receipt.label, sourceSuiteLabel(version));
     assert.equal(receipt.executable, process.execPath);
     assert.deepEqual(receipt.args, ['-e', script]);
     assert.equal(receipt.cwd, gate.root);
     assert.equal(receipt.timeoutMs, SOURCE_SUITE_TIMEOUT_MS);
     assert.equal(receipt.exitCode, 0);
+    gate.env[AUDIT_MODE_VARIABLE] = 'restricted-token';
+    assert.throws(() => gate.sourceSuite(gate.root, version, ['-e', script]), /Privileged audit mode/);
   });
 }
 
@@ -643,10 +673,12 @@ test('SDK contract controls use actual owner/provenance shapes without importing
     pacote: { manifest() {} } };
   const provenance = { verifyBundle() {}, generate() {},
     subject: (name, version, sha512) => ({ name: `pkg:npm/${name}@${version}`, digest: { sha512 } }) };
-  validateSdkContract(libraries, provenance);
-  assert.throws(() => validateSdkContract({ ...libraries, publish: { publish() {} } }, provenance));
-  assert.throws(() => validateSdkContract({ ...libraries, profile: {} }, provenance));
-  assert.throws(() => validateSdkContract(libraries, { ...provenance, subject: () => ({}) }));
+  for (const version of ['2.0.1', '2.0.2', '2.7.13']) {
+    validateSdkContract(libraries, provenance, version);
+    assert.throws(() => validateSdkContract({ ...libraries, publish: { publish() {} } }, provenance, version));
+    assert.throws(() => validateSdkContract({ ...libraries, profile: {} }, provenance, version));
+    assert.throws(() => validateSdkContract(libraries, { ...provenance, subject: () => ({}) }, version));
+  }
   assert.equal(typeof net.connect, 'function');
 });
 

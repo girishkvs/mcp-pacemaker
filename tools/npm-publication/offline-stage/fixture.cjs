@@ -4,7 +4,7 @@ const { gzipSync } = require('node:zlib');
 const sha = (bytes, algorithm = 'sha256', encoding = 'hex') =>
   createHash(algorithm).update(bytes).digest(encoding);
 const stageId = '11111111-1111-1111-1111-111111111111';
-function fixture(version = '1.3.1') {
+function fixture(version) {
   const manifest = { name: 'mcp-pacemaker', version,
     description: 'SYNTHETIC OFFLINE FIXTURE — NOT A RELEASE',
     repository: { type: 'git', url: 'git+https://github.com/girishkvs/mcp-pacemaker.git' } };
@@ -27,7 +27,7 @@ function fixture(version = '1.3.1') {
     integrity: `sha512-${sha(bytes, 'sha512', 'base64')}` };
   const ref = `refs/tags/v${version}`;
   const record = { schemaVersion: 1, name: manifest.name, version,
-    channel: version === '1.3.1' ? 'legacy' : 'latest',
+    channel: version.startsWith('1.') ? 'legacy' : 'latest',
     source: { ref, tagObject: 'a'.repeat(40), commit: 'b'.repeat(40), tree: 'c'.repeat(40) },
     workflow: { ref: `girishkvs/mcp-pacemaker/.github/workflows/npm-publish.yml@${ref}`,
       commit: 'b'.repeat(40), runId: '123', attempt: 1 },

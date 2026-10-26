@@ -8,6 +8,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { releaseRole, releaseVersions } from '../npm-publication/local-regression.mjs';
 
 export const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export const LEGACY_REF = '2d525f4ced01b978a5aeb83aef69145e96cced05';
@@ -64,7 +65,7 @@ export function preparationOptions(args) {
 }
 
 export function fixturePlan(version, { historical = false, peerVersion } = {}) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), `Unsupported candidate version: ${version}`);
+  releaseRole(version);
   const plan = {
     mode: historical ? 'historical' : peerVersion ? 'patch-pair' : 'candidate-vs-release',
     legacy: { version: '1.3.0', source: 'release', ref: LEGACY_REF },
@@ -74,12 +75,11 @@ export function fixturePlan(version, { historical = false, peerVersion } = {}) {
     assert.equal(peerVersion, undefined, 'Historical fixtures cannot contain a patch candidate');
     return plan;
   }
-  const role = version === '1.3.1' ? 'legacy' : 'candidate';
+  const role = releaseRole(version) === 'legacy' ? 'legacy' : 'candidate';
   const peerRole = role === 'legacy' ? 'candidate' : 'legacy';
   plan[role] = { version, source: 'root' };
   if (peerVersion !== undefined) {
-    const expected = version === '1.3.1' ? '2.0.1' : '1.3.1';
-    assert.equal(peerVersion, expected, 'The peer must be the explicitly supported opposite-major patch');
+    releaseVersions([version, peerVersion]);
     plan[peerRole] = { version: peerVersion, source: 'peer' };
   }
   return plan;

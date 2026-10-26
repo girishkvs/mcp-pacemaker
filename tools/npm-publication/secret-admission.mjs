@@ -35,8 +35,7 @@ export async function verifyCollectionSource(report, root, tools = {}, readSourc
 
 export function validateCollectionJobs(jobs, approval, report) {
   assert.ok(Array.isArray(jobs) && jobs.length > 0 && jobs.length <= 16);
-  const inactive = ['source', 'prepare', 'stage',
-    ...(approval.version === '2.0.1' ? ['sign-bootstrap', 'publish-bootstrap'] : [])];
+  const inactive = ['source', 'prepare', 'stage'];
   const names = jobs.map(job => job.name).sort();
   // GitHub retains the declared name when a matrix job is skipped before expansion.
   assert.ok(JSON.stringify(names) === JSON.stringify([...inactive, 'consumers', SECRET_COLLECTION_JOB].sort()) ||

@@ -1,44 +1,52 @@
-# Preparing and staging npm candidates
+# Collecting, preparing, and staging npm candidates
 
-This workflow supports only the reviewed `mcp-pacemaker` **1.3.1** (`legacy`) and
-**2.0.1** (`latest`) candidates. It does not establish name availability, publish
-a version, approve a stage, change a dist-tag, or configure an account or trust.
+The active workflow supports canonical stable **1.x legacy** (`legacy`) and
+**2.x current** (`latest`) versions. Unknown majors, prereleases, build metadata,
+leading zeros and unsafe integer components are rejected. Support is not release
+authorization: the owner selects each exact version, source and comparison artifact.
+This checkout is the 1.x legacy line. It targets the **1.3.2** legacy-line candidate
+(channel `legacy`). Selection and local preparation are not publication approval or
+evidence that its gates have passed.
 
-The real **2.0.1** local owner bootstrap is complete. It is published on `latest`
-and intentionally has no GitHub provenance. Do not republish it, replace its
-bytes, or manufacture provenance after publication. The next route is the real
-unpublished **1.3.1** legacy release, using approved immutable 2.0.1 bytes only
-for T32 comparison. Main stays unchanged. Reusable future-version support is a
-separate milestone; this repair does not support 1.3.2, 2.0.2 or new majors.
+The package already exists. **2.1.2, 2.1.1, 2.1.0, 2.0.2, 2.0.1 and 1.3.1 are published and
+immutable.** First-package `sign-bootstrap` and `publish-bootstrap` actions have
+been removed from the active workflow. Historical code and receipts are retained
+for inspection, not reuse. Do not manufacture a version or rerun a publication
+to test this workflow. No action approves a stage, changes trust or repairs tags.
+
+Local anonymous registry/advisory reads and offline SDK tests are allowed.
+They do not establish hosted OIDC or authorize a registry write. Authentication,
+staging, owner publication, trust changes and channel changes require their own
+explicit approval. Do not change the caller's registry, credentials or live bridge.
 
 Run the [local publication regression gate](local-publication-gate.md) for both
-the final legacy source and the frozen current source before requesting a source push. Its isolated offline
+candidate checkouts before requesting a source push. Its isolated offline
 results are a prerequisite, not a substitute for the hosted evidence below.
+For a 1.x release, see [Legacy release peer](#legacy-release-peer-1x-candidate).
 
 ## Prerequisites
 
-1. Commit this workflow and its tools in the legacy candidate. The workflow already
-   exists on the default branch for manual dispatch; do not change main for this release. Create an approved
+1. Commit this workflow and its tools in each candidate. Put the workflow on the
+   default branch too, so GitHub permits manual dispatch. Create an approved
    annotated publication tag on the exact green source commit. For each supported
-   version, only `v<version>`, `npm/v<version>` and canonical
-   `npm-r<N>/v<version>` are accepted, where N is an integer from 2 through
-   9007199254740991. Leading zeros, signs, fractions and unsupported versions fail.
+   version, use `v<version>` normally. Existing `npm/v<version>` and repair
+   `npm-r<N>/v<version>` tags remain accepted. N must be a canonical positive
+   safe integer, at least 2, with no leading zeros (at most 16 digits).
 2. Required source CI is `.github/workflows/ci.yml`, an exact successful **push**
    run/attempt, including lockfiles, all Windows/Linux/macOS Node 20/22/24 test
    jobs, UI, and every additional job. Skipped or missing required jobs fail.
-   `ciAttempt` is a JSON number and a positive safe integer. An explicitly approved
-   successful rerun binds its actual run ID and attempt; attempt 1 is not a source-CI
-   requirement. Collection, preparation and stage dispatches still require attempt 1.
+   `ciAttempt` is a JSON number and a positive safe integer; it may exceed 1.
+   It must match the actual source run attempt. Collection, prepare and stage
+   dispatch attempts remain exactly 1; source-CI retries do not permit their reruns.
    This does not replace packed-consumer, native identity/execution or compatibility gates.
 3. Use Node **24.21.0** and npm **12.0.2** for preparation/staging. The workflow
    installs npm only into a temporary prefix with empty local user/global
    configuration; it does not alter global npm configuration or save credentials.
    Node 24.11.0 does **not** satisfy npm 12.0.2's engines. Node 20 is legacy
    application coverage, not a supported npm 12 publishing runtime.
-4. Read the existing package and complete tag state before staging. Real 2.0.1 is
-   already published; old `sign-bootstrap` / `publish-bootstrap` actions are
-   **obsolete for this package**, not a prerequisite or a fallback. This legacy
-   workflow remains preparation and OIDC-only staging.
+4. Before staging, verify the existing package owner and exact expected dist-tags.
+   The approved candidate version must be absent during preparation. An already
+   published version is never reused, overwritten or unpublished as a repair.
 5. Configure npm trust separately: repository `girishkvs/mcp-pacemaker`,
    workflow **filename** `npm-publish.yml`, environment `npm-publish`,
    `allow-stage-publish` enabled and direct publish disabled.
@@ -57,12 +65,9 @@ older code from a newer workflow.
 
 ### Separate publication tags
 
-Existing release, `npm/`, and `npm-r2/` through `npm-r5/` refs remain supported.
-Further repairs use a new canonical `npm-r<N>/v<version>` ref; the proposed
-legacy repair tag is `npm-r6/v1.3.1`, subject to separate owner approval.
-The same bounded parser handles collection, approval, hosted peers, consumers
-and proof validation. The parser does not grant environment deployment permission.
-Keep all existing
+New real versions normally use their actual `v<version>` tag. A repair of an
+unpublished candidate may use a fresh `npm-r<N>/v<version>` generation.
+Generations are parsed, not enumerated in source. Keep all existing
 tags and GitHub releases unchanged, even when preparation failed. Each new
 publication tag needs explicit approval and points to its own green commit
 containing the workflow and tools that actually run. Do not reuse an approval
@@ -71,7 +76,7 @@ for a different tag object.
 The complete ref, including its namespace, remains bound through source checkout, CI,
 consumer artifacts, peer transfer, protected-environment tag policy and staged
 provenance. A source bundle from `v<version>` cannot be relabeled as one from
-`npm/v<version>` or any `npm-r<N>/v<version>`. Bundles cannot
+`npm/v<version>`, `npm-r2/v<version>`, `npm-r3/v<version>`, `npm-r4/v<version>` or `npm-r5/v<version>`. Bundles cannot
 move between these namespaces. The protected environment must explicitly allow the exact
 new tags; approval for an older tag is not sufficient. Prepare fresh artifacts
 for the new source; package versions
@@ -93,114 +98,107 @@ There are two dispatch inputs: `action` (default **prepare**) and `approval`
 (JSON). Inputs are parsed from the actual event file, not interpolated into shell
 commands. Dispatch against the approved release **tag**, not `main`.
 
-Both operational actions require `approval.localRegression`: the unchanged
-compact schema-1 output of the private offline verifier. Old manifests and
-approvals without it fail. This binds the exact clean final commit/tree and
-path/blob/mode identity of both release lines; it is not release authorization.
+Every operational action now requires `approval.localRegression`: the unchanged
+compact schema-1 output of the private offline verifier. Old manifests/approvals
+without it fail. This is an integrity-checked local statement with
+`executionProof: "not-authenticated"` and `releaseReady: false`, not a release
+authorization. Both subjects must identify the exact clean final source commits
+and trees, including the opposite peer.
 
-For **prepare**, add `localRegressionReview`. For **stage**, add a fresh review
-at `ownerPreflight.privateContentReview.localRegression`, alongside the existing
+For **collect-secrets** and **prepare**, add a separate `localRegressionReview`
+object. For **stage**, put that fresh review at
+`ownerPreflight.privateContentReview.localRegression`, alongside the existing
 mandatory source/history/tarball review. Its exact fields are:
 
 | Field | Required meaning |
 | --- | --- |
-| `reviewer` | `girishkvs`, after actual private-evidence review |
+| `reviewer` | The existing owner, `girishkvs`, after actual private-evidence review |
 | `scope` | `private-local-regression-evidence` |
 | `disposition` | `accepted`, only after explicit owner acceptance |
 | `statementSha256` | SHA256 of the statement serialized by `localJson` in `local-regression.mjs` |
-| `reviewedAt` | Actual review time, no more than one hour old when authorizing the action |
+| `reviewedAt` | Actual owner review time; no more than one hour old when authorizing the action |
 
-No tool generates this review. The hosted reader checks actual owner/run IDs and
-the actual dispatch input; the trust claim is **human acceptance of private
-evidence**, not independently authenticated proof of local execution. A hash,
-`authenticated: true`, or a green local status cannot replace that review.
-The source/final manifests retain the same statement and original prepare review;
-fresh artifact-specific approvals bind their exact manifest bytes. Long-running
-preparation continuation uses its original approval time. Existing hosted gates
-remain mandatory, and cleanup is never conditional on the new prerequisite.
+No tool fills in this review. A digest or `authenticated: true` is not acceptance.
+The hosted reader checks the actual dispatch input and GitHub run/repository/owner
+IDs. Existing protected-environment, CI, source, consumer, signing and npm owner
+checks still apply. The claim is authenticated **human acceptance**, not an
+independently authenticated local execution. Preparation continuation uses its
+original approval time rather than spending another approval during a long run.
+Cleanup/session revocation does not depend on this new prerequisite.
 
-Full reports, local paths and TARs stay private. Reprepare old artifacts rather
-than inserting evidence into an existing ZIP. Old current-line bootstrap receipts
-remain historical evidence only; bootstrap actions are not used for this release.
+The source and final manifests carry the same compact statement and original
+prepare review. Later fresh artifact-specific approvals also bind their exact
+manifest bytes. Full private reports/paths/TARs are never uploaded. Reprepare
+old artifacts; do not retrofit a successful statement into an existing ZIP.
 
 ### Exact source secret review
 
-`collect-secrets` is a separate non-eligible action. Its approval has exactly
-`schemaVersion`, `name`, `version`, `ref`, `tagObject`, `commit`, `tree`, `ciRunId`,
-`ciAttempt`, `approver`, `approvedAt`, `scope` (`collect-secrets`),
-`localRegression` and `localRegressionReview`. Existing fresh owner dispatch,
-clean exact tag/source, successful push CI and reviewed local-regression checks
-remain mandatory. Collection does not accept artifact, stage, public-package or
-secret-review approval fields. It runs no npm restore, pack, stage or publication.
+`collect-secrets` is a separate non-eligible action, not preparation success.
+Its approval has exactly `schemaVersion`, `name`, `version`, `ref`, `tagObject`,
+`commit`, `tree`, `ciRunId`, `ciAttempt`, `approver`, `approvedAt`, `scope`
+(`collect-secrets`), `localRegression` and `localRegressionReview`.
+It retains the existing fresh owner dispatch, exact tag/source, clean checkout,
+successful push CI and separately reviewed local-regression prerequisites.
+It does not accept `secretReview`, public-package disclosure, artifact or stage
+approval fields. It runs no npm restore, pack, sign, stage or publish command.
 The only artifact is `npm-secret-collection-<runId>-1`, containing schema-2
-`report.json` and exactly four canonical redacted receipts:
+`report.json` and four original redacted execution receipts:
 `execution-working-tree-gitleaks.json`, `execution-working-tree-trufflehog.json`,
 `execution-history-gitleaks.json`, and `execution-history-trufflehog.json`.
-It remains `eligibility: "none"`; no prepared or final candidate bundle is produced.
+The report binds every canonical receipt byte sequence and remains explicitly
+`eligibility: "none"`; this cannot replace any prepared/source/candidate bundle.
 
-After inspecting that exact report and code, a **new real owner prepare dispatch**
-may add `secretReview` with exactly these fields:
+GitHub may retain the exact declared consumer matrix name when the job is skipped
+before expansion. Collection admission accepts that name, the unexpanded job key,
+or all six lane names only with the existing skipped/no-step checks. Original job
+names and timestamps are never rewritten. A whole-second GitHub step completion
+includes that second but not the next; a millisecond-precision completion remains
+an exact boundary.
+
+If review of that exact report identifies only the supported synthetic URI
+rejection inputs, a **new real owner prepare dispatch** may add `secretReview`.
+No tool creates this human review. Its exact fields are:
 
 | Field | Meaning |
 | --- | --- |
 | `schemaVersion` | `1` |
 | `scope` | `exact-source-secret-report` |
-| `classification` | `synthetic-uri-userinfo-rejection-input` after actual code review |
-| `reviewer` | Existing authenticated owner `girishkvs` |
-| `reviewedAt` | After collection; within one hour before `approval.approvedAt` |
-| `admissionRunNumber` | Exact intended next GitHub workflow run number, decimal string |
+| `classification` | `synthetic-uri-userinfo-rejection-input`, only after inspecting the exact code |
+| `reviewer` | Existing owner `girishkvs`, authenticated by the actual dispatch and API |
+| `reviewedAt` | After collection completed; no more than one hour before `approval.approvedAt` |
+| `admissionRunNumber` | The exact next intended GitHub workflow run number, as a decimal string |
 | `collection` | Exact `runId`, `jobId`, `artifactId`, `artifactDigest` (`sha256:...`) and raw report-file `reportSha256` |
-| `findingIds` | Every distinct working-tree/history finding ID, each exactly once |
+| `findingIds` | Every distinct TruffleHog working-tree/history finding ID from that report, each exactly once |
 
-Read the next intended workflow run number before dispatch. An intervening
-dispatch or recreated workflow fails closed; do not automatically retry or update
-consent. API collection/admission run IDs and attempt 1 are checked separately
-from the approved numeric source-CI attempt. Collection and admission
-must be different runs. The source job's continuation uses the original dispatch
-time, not a newly invented approval.
+Read the intended next workflow run number before dispatch. Concurrent or
+intervening dispatches fail closed; do not automatically update/retry consent.
+The API run number and workflow ID are checked, so the review cannot be reused
+in a later run or a recreated workflow. Reruns are rejected. Long-running source
+gate continuation uses the original dispatch time; another action needs fresh
+approval. Collection and admission may not share a run.
 
-The original owner-only, same-source collection run must have a successful
-`secret-collection` job and its complete pinned checkout/bootstrap/collection/upload
-step sequence; every other job must be skipped. When GitHub skips the consumer matrix
-before expansion, its API job name remains the exact declared
-`consumer (${{ matrix.platform }}, ${{ matrix.npm }})`. That name is accepted only
-for the skipped job with no steps; partial matrices, mixed job-name forms and
-executed consumer jobs remain rejected. Its original ZIP digest,
-metadata, repository/owner IDs and exact five canonical bounded members are checked through the existing authenticated artifact
-readers. No raw scanner output, private policy, local triage or owner-local
-evidence is uploaded. Only counts, exits, hashes and digest-only source/finding
-bindings leave the collector. The trusted evidence is the reviewed collector at
-the exact source plus authenticated original-artifact linkage, not independent
-re-execution of raw output at admission.
+The original completed collection run must be owner-only, same repository,
+workflow and exact source; its collection job and both collection/upload steps
+must succeed. All other jobs must be skipped. Original archive bytes are fetched
+through the existing authenticated GitHub artifact readers; only canonical,
+bounded schema-2 report and its exact four canonical redacted receipts are
+permitted. Original native argv digests, digest-only path roles, full stream
+byte counts/hashes, timings, completion/count facts and pinned bootstrap
+provenance are cross-checked before creating a capability. The complete original
+hosted step sequence is required, not just a success flag. Raw scanner output
+is never an artifact. The source job checks actual unchanged checkout/root/inventory and
+file/blob/line/attribute bindings before and after admission. It does not rescan
+and relabel a new report as reviewed.
 
-The versioned proof retains original native argv digests, literal flags with
-digest-only path slots, full stream byte counts/hashes, timings, completion/count
-facts and pinned bootstrap provenance. Native execution and collection-step
-times must follow the same exact successful source CI. Reachable history
-counts/types/bytes and bundle/corpus commitments remain required.
-
-GitHub job-step completion timestamps without a fractional part have second
-precision. Report and native-receipt completion may fall within that same second,
-but never into the next one. Fractional completion timestamps retain their exact
-millisecond boundary, and execution before the step start remains rejected.
-
-Qualified source and fresh private source-policy inputs must use the exact
-collected bytes, materialized by actual Git with `core.autocrlf=false`,
-`core.eol=lf` and verified committed attributes. Explicit CRLF and binary rules
-remain authoritative. Old Windows bytes or policy receipts cannot be relabeled
-merely because the tree matches. The public ordered inventory-with-mode hash
-and private canonical file commitment must each be reconstructed in their own
-format. No root/mode equivalence or raw-stream replay is inferred from hashes.
-
-Only the three source URI rejection inputs in
+Only the three source URI negative-test inputs documented in
 [`publication-scanners/USAGE.md`](../tools/publication-scanners/USAGE.md) are
-eligible; path membership alone never approves them. Exact file/blob/line/value,
-scope and source bindings and every raw finding must match. Errors, incomplete
-coverage, other detectors, Gitleaks findings and payload findings remain blocking.
-Matching hashes in another report are correlation only. Source/root/inventory
-and finding bytes are rechecked before and after admission. The admitted original
-report remains `findings`/183/count; reviewed false positives and remaining
-findings are separate policy evidence in source and final gate reports.
+eligible. Both tools and both source scopes remain required. Scanner failure,
+partial output, Gitleaks findings, other findings and payload findings cannot
+be waived. All raw findings must be individually reviewed; matching values or
+blobs in another report are correlations, not approval. A gate may pass policy
+with remaining findings zero while preserving raw TruffleHog findings/183/count.
+The final report retains the original collection and authenticated admission
+receipt; it must never describe the raw scanner as returning zero.
 
 The URI detector's pathless `Raw` and complete `RawV2` are treated as one
 representation only for the three pinned fixture blob/path/line pairs and
@@ -213,20 +211,44 @@ owner dispatch above remain required. A locally pinned scanner reporting
 `vcs.modified=true` is not proof of official-release binary equivalence and
 does not replace the hosted scanner provenance checks or full qualification.
 
-`secret-collection` is permitted only as skipped in preparation/peer transfers;
-it cannot satisfy source, consumer or finalizer jobs. Missing review preserves the
-existing scan-and-deny behavior. Payload tarball scanning, private-content review,
-local-regression acceptance and stage authorization are unchanged and separate.
-This legacy workflow still does not add bootstrap signing or direct publication.
+The added `secret-collection` job is permitted only as **skipped** in preparation
+transfer/peer and signing/publication readback. Unknown jobs and active collection
+in those flows still fail. Collection success cannot satisfy their required
+source, matrix or finalizer jobs. Missing `secretReview` leaves the existing
+scan-and-deny behavior unchanged; it is not needed for an actually clean scan.
 
-Preparation approval fields (without optional secret review):
+This adds no artifact secret exemption. Payload scanners still inspect the exact
+tarball/extraction through the existing artifact gates. Local-regression review,
+private source/history/content review, publication, signing and staging approvals
+remain independent. Local correlation is inspection only, not authentication or
+authorization. The trust boundary is the reviewed collector code at the exact
+approved source plus authenticated original GitHub artifact linkage: redacted
+digests are not independently re-executed raw scanner evidence.
+
+The private producer-backed verifier must retain that distinction: no reconstructed
+stdout/stderr, reused local scan, or raw-private-envelope relabeling is permitted.
+Fresh native execution and collection-step times must follow the same exact
+successful source CI. Reachable commit/object/type/byte counts and original
+bundle/corpus commitments remain mandatory.
+
+Qualified source inputs and private source-policy inputs must use the exact
+collected bytes, materialized through actual Git under `core.autocrlf=false`,
+`core.eol=lf` and verified committed attributes. Explicit CRLF and binary rules
+remain authoritative. A different raw checkout or old policy result is not
+equivalent merely because the tree matches. Recompute the public ordered
+inventory hash and private canonical file commitment in their own formats;
+neither a different root nor filesystem mode is normalized into another claim.
+
+Preparation template (intentionally invalid placeholders, not owner approval).
+Include the verifier's `localRegression` and the owner's `localRegressionReview`
+described above, as well as the selected peer below:
 
 ```json
 {
   "schemaVersion": 1,
   "name": "mcp-pacemaker",
-  "version": "1.3.1",
-  "ref": "refs/tags/npm-r6/v1.3.1",
+  "version": "<owner-selected supported stable version>",
+  "ref": "refs/tags/v<same selected version>",
   "tagObject": "<approved 40-character annotated tag object>",
   "commit": "<approved 40-character commit>",
   "tree": "<approved 40-character tree>",
@@ -235,7 +257,8 @@ Preparation approval fields (without optional secret review):
   "approver": "girishkvs",
   "approvedAt": "<current UTC ISO timestamp>",
   "scope": "prepare",
-  "publicPackages": ["<every explicitly approved public package name>"]
+  "publicPackages": ["<every explicitly approved public package name>"],
+  "expectedDistTags": { "latest": "<observed current version>", "legacy": "<observed legacy version>" }
 }
 ```
 
@@ -281,72 +304,118 @@ exact files, source/manifest hashes, and job/artifact/consumer receipts. Downloa
 action warnings or caller-supplied success JSON do not replace these checks.
 Source, locks and candidate bytes must remain unchanged.
 
-GitHub jobs/artifacts pagination requires a nonnegative safe-integer `total_count`
-on every page. The first total is pinned: changed totals, overshoot, empty
-continuations and more than 20 pages are rejected. This also applies to source-CI
-job reads; required-name and duplicate checks still run on the complete result.
-Modeled HTTP regression fixtures exercise these checks, not hosted authentication.
-
 Record each artifact ID, archive SHA256, run ID/attempt, manifest SHA256 and
 tarball SHA256/SHA512/SRI. A source bundle is not a final candidate. Stage transfer
 requires a completed successful prepare run with exactly one successful,
 completed `source`, `prepare` and each of the six exact consumer job names,
-all at the approved head SHA; any `stage` job must be skipped.
+all at the approved head SHA; `stage` must be skipped. Historical hosted bundles
+may include skipped bootstrap jobs; a signing/publication run cannot supply a candidate.
 
-### Published-registry T32 peer (legacy repair)
+### Published-registry T32 peer (normal existing-package route)
 
-Supply `peerArtifact` with exactly these seven fields, alongside the candidate's
-own local-regression statement/review and preparation approval:
+Use the immutable published **1.3.1** artifact for a future current-line release,
+not the mutable `legacy` or `latest` tag as a selector. Its published source is
+`688b1038f88f020312230a94ff355732c34ae185`, tree
+`ba4b2198174a115e4282fe5351d84a1bcc948bb8`. Do not substitute the merge commit
+even when its tree is equal. Retain the independently verified publication receipt.
+
+The peer has seven common fields and an optional, explicitly approved `sourceProof`.
+The following is a **future approval template**, not a rewrite of a historical approval
+or publication receipt. The owner must select every pin. Placeholder digests must be
+replaced from the verified byte pin, not from a synthetic test or unreviewed download:
 
 ```json
 {
   "peerArtifact": {
     "kind": "npm-registry-published",
-    "version": "2.0.1",
-    "commit": "<approved 2.0.1 source commit>",
-    "tree": "<approved 2.0.1 source tree>",
-    "sha256": "<approved tarball SHA256>",
-    "sha512": "<approved tarball SHA512 hex>",
-    "integrity": "sha512-<approved tarball SHA512 base64>"
+    "version": "1.3.1",
+    "commit": "688b1038f88f020312230a94ff355732c34ae185",
+    "tree": "ba4b2198174a115e4282fe5351d84a1bcc948bb8",
+    "sha256": "c9aed01346f3a5a86070c471bcdb7b9804316607ee92ecc84e7ae0195eb63556",
+    "sha512": "<verified immutable peer SHA512 hex>",
+    "integrity": "sha512-<same SHA512 in base64>",
+    "sourceProof": {
+      "kind": "registry-slsa-v1",
+      "ref": "refs/tags/npm-r7/v1.3.1",
+      "runId": "37060220247",
+      "runAttempt": 1
+    }
   }
 }
 ```
 
-This variant supports the 1.3.1 candidate with its opposite 2.0.1 peer only.
-The source commit/tree must equal the 2.0.1 subject in the same accepted local
-regression statement. Use the existing signed publication receipt for the exact
-byte pin, not mutable `latest` selection. The recorded public source is
-`e32f971ff55b0f09ef0b852cb1573df9954696cc`, tree
-`06b3367842e8198cdc78cb39aff8352c623414fe`; tarball SHA256 is
-`c55f25144e89d3e1256659946b7e45b7507779ffaace3743508a3d9046dcbec4`.
-Copy all three consistent digests from the receipt after owner review.
+`approval.expectedDistTags` is a separate, exact mutable package-state expectation.
+It is not how the peer is selected. A changed tag, published candidate, wrong owner,
+deprecation, noncanonical tarball URL, source mismatch or digest mismatch fails closed.
+The peer's exact version/commit/tree must also match its local-regression subject.
+Both selected subjects must be supported opposite majors; no fixed patch pair is assumed.
 
-`peer.mjs` reads the public registry metadata, exact GitHub commit and canonical
-registry tarball anonymously. It denies redirects and credentials, uses a
-30-second deadline per complete response, and limits each metadata response to
-2 MiB and the tarball to 32 MiB. There is no retry, registry override or cached
-global fetch. It checks package/owner/version/gitHead, SHA256/SHA512/SRI and SHA1
-shasum, commit/tree, canonical tarball URL, absence of deprecation, and actual
-archive metadata/files. This bounded release route expects exactly
-`{ "latest": "2.0.1" }` and unpublished 1.3.1. Changed state stops for review;
-it is not silently accepted or rewritten.
+The resolver anonymously reads bounded registry metadata, the exact GitHub commit/tree
+and exact tarball, denies redirects, and applies a 30-second deadline per response.
+It validates package metadata, integrity, SHA1/SHA256/SHA512 and inspected contents.
+Source binding is mandatory:
 
-The result records `origin: "npm-registry-published"`,
-`purpose: "service-comparison-only"` and `stageEligible: false`. It records
-provenance presence/absence but does **not** claim fresh signature/provenance
-verification. It supplies only version/digests/inspection to the comparator.
-It has no fabricated `prepared.json`, workflow/source-run receipt, six
-peer-consumer receipts, or stage provenance. It cannot authorize candidate
-transfer or staging.
+| Metadata / approval | Required source check |
+|---|---|
+| Registry `gitHead` present | Canonical SHA equal to the approved commit. Contradictory, null, empty or malformed values fail. Tarball `gitHead`, when present, must also match. |
+| Registry `gitHead` absent | An explicit `sourceProof` and newly cryptographically verified registry SLSA are required. Absence is not a source-binding waiver. |
+| `sourceProof` declared, with or without `gitHead` | Verification is mandatory. A proof failure never falls back to metadata or a local receipt. |
+| Matching `gitHead`, no `sourceProof` | Existing metadata-based comparison remains supported, including published 2.0.1. No retrospective provenance claim is made. |
 
-The source job checks a supplied peer approval before expensive source work.
-The finalizer checks it before source/consumer readback and resolves the actual
-peer bytes before artifact gates. The candidate still needs all six real hosted
-consumer jobs, all 12 install modes and all source/artifact gates. T32 uses the
-published peer; compatibility still uses the separate historical **1.3.0/2.0.0**
-fixtures. No main dispatch or intentionally failing seed is needed.
+`sourceProof` has exactly `kind`, `ref`, `runId` and numeric `runAttempt` (exactly 1).
+The ref must match the peer's version and supported tag grammar; run ID is a canonical
+positive decimal string of at most 20 digits. Repository, workflow and certificate issuer
+are fixed by policy. The expected ref/run are selected in the approval, **never inferred
+from the bundle being checked**. Other fields, custom roots and trust overrides fail.
 
-### Existing hosted-artifact T32 peer
+The resolver fetches the canonical registry attestations endpoint and requires exactly
+one SLSA v1 bundle. Existing `verifyProvenance` binds its exact subject/SHA512, source
+commit/ref, workflow, GitHub repository/owner IDs, hosted builder, dispatch event and
+approved run/attempt. The pinned npm 12.0.2 / Sigstore 5.0.0 verifier checks signature,
+chain, fixed GitHub issuer, exact workflow certificate identity, CT and transparency logs
+(both thresholds 1). The GitHub commit/tree and local-regression subject checks remain required.
+
+Cryptography runs in a fresh Node 24.21.0 child with the existing closed SDK environment
+and full npm loader inventory/resolution checks before library loading. Its only network
+reads are approved TUF JSON resources under `https://tuf-repo-cdn.sigstore.dev`, with
+redirect denial, 2 MiB per response, 30 seconds per read, at most 32 reads and a 60-second
+whole-child limit. SDK retries are disabled. Only TUF's expected root-version 404 handling
+can end a root-update search; malformed/untrusted/expired metadata still fails SDK verification.
+Its owned temporary trust cache is removed after success or failure. No ambient credentials,
+npm configuration, local result receipt or user cache supplies trust.
+
+The actual registry bundle is verified without adding or removing serialization defaults.
+Successful proof evidence records `verification: cryptographically-verified`, the approved
+`sourceProof` and actual attestation-document SHA256. Without a declared proof, provenance
+presence remains informational and verification is `not-performed`. Registry-signature status
+remains `not-verified-by-this-read`: provenance verification is not a new registry ECDSA-signature
+or installed-consumer audit claim. Historical verification receipts remain unchanged.
+
+Output is `origin: npm-registry-published`, `purpose: service-comparison-only`,
+`stageEligible: false`. It has no fabricated prepared manifest, hosted run or consumer
+receipts. Candidate transfer and stage approval reject these comparison-only markers.
+The candidate still needs its own six consumer jobs, all gates and exact-source approval.
+Compatibility keeps the explicitly reviewed historical 1.3.0/2.0.0 baselines; T32
+does not silently replace them with the published peer.
+
+### Legacy release peer (1.x candidate)
+
+A 1.x legacy release, such as **1.3.2**, uses the published 2.x release **2.1.2**
+(`latest`) as its T32 and local-regression peer. The rules above still apply: pin
+the exact immutable version, commit, tree and digests, not the mutable `latest` tag.
+The owner selects every pin, including any `sourceProof`. The tools need one 1.x and
+one 2.x version, so a 1.x peer is rejected for a 1.x candidate.
+
+Run the local gate and `publication:verify-local` from the 2.x checkout, with this
+1.x checkout as the peer (`--peer-root`, then `--legacy-root`). A 1.x checkout cannot
+be the local-gate controller; see
+[the local gate](local-publication-gate.md#legacy-1x-release).
+
+For Windows, hosted CI for a 1.x source must pass `test (windows-latest, <node>)` for
+Node 20, 22 and 24, not the 2.x `windows-ordinary (<node>)` jobs. The 2.x session
+lane, audit companions, process lifetime helper and task channel do not apply to 1.x.
+
+### Hosted-artifact T32 peer (retained alternative)
 
 The opposite patch is a **passive comparison input**, never this dispatch's
 provenance subject. Supply this additional prepare approval field:
@@ -359,7 +428,7 @@ provenance subject. Supply this additional prepare approval field:
     "runId": "<opposite completed prepare dispatch ID>",
     "runAttempt": 1,
     "manifestSha256": "<opposite prepared.json SHA256>",
-    "version": "<opposite patch: 1.3.1 or 2.0.1>",
+    "version": "<exact selected supported opposite-major version>",
     "ref": "<opposite exact approved publication tag ref>",
     "tagObject": "<opposite annotated tag object>",
     "commit": "<opposite source commit>",
@@ -388,45 +457,9 @@ provenance subject. Supply this additional prepare approval field:
    different dispatch SHA: a new prepare must use its actual approved
    tag/checkout/workflow identity.
 
-This older hosted-source route remains supported, but is not the recommended
-legacy repair sequence now that the exact opposite artifact is published.
+This breaks the first-finalizer dependency without dummy versions or staging.
 
-Current-line peer runs may include `sign-bootstrap` and `publish-bootstrap`
-jobs only when both are completed and skipped. Executed or active bootstrap
-jobs, and unknown job names, cannot supply a peer artifact.
-
-### Release sequence and owner boundaries
-
-1. Finish and independently review the local legacy repair; qualify the exact
-   final commit with the frozen current source. Every source edit invalidates
-   source-bound evidence. A merge that creates another SHA needs fresh qualification.
-2. After separate approvals for delivery and the annotated tag, require exact
-   successful push CI. Dispatch fresh `collect-secrets`, review its original
-   receipts, then dispatch `prepare` with the exact admission and published-peer
-   approval. Keep publishing runs serialized because admission binds a run number.
-3. Review the final candidate and freshly accept local evidence. Read actual npm
-   trust, pending stages and tags; request the exact environment tag policy if
-   needed. Missing trust is not inferred from an inaccessible Settings page.
-4. Separately approve/dispatch stage and approve its GitHub environment. Actual
-   GitHub OIDC, npm trust exchange and automatic provenance happen here. Local
-   tests do not prove those hosted operations. Preparation alone is not completion.
-5. Perform owner-authenticated stage list/view/download and verify the exact
-   bytes and actual generated provenance. Only then separately approve that stage
-   with npm 2FA, followed by registry/signature/provenance/tag readback and fresh
-   consumer checks. Unknown outcomes require reconciliation, never blind retry.
-
-Choose the owner-authenticated CLI read location before the final session: the
-owner's Mac or a separately approved temporary local session. GitHub OIDC stage
-credentials cannot run owner list/view/download/approve operations. Security-key
-reauthentication stays a human boundary. Do not create a new owner workflow,
-store owner tokens, or close/sign out the user's browser session.
-
-Anonymous bounded registry, artifact and advisory reads may run locally. They
-must also be refreshed when the hosted contract requires it; they are not
-inherently hosted-only. Real hosted receipts, environment approvals, signing,
-OIDC and publication remain separate acceptance gates.
-
-### Stage approval
+### Stage input, after existing-package checks and separate trust setup
 
 For a later separately authorized `stage` dispatch on the **same tag**, retain the
 source fields, update `scope`/`approvedAt`, and add:
@@ -481,11 +514,6 @@ or pending stages. Only record `none` after an owner-authenticated stage list an
 the owner release ledger establish no conflicting/pending submission. Approval
 and readback expire after one hour; slow runs may need a new approval.
 
-Use a fresh guarded `owner-stage-list.mjs` receipt and a successful guard exit,
-not a standalone flattened npm list array, before manually setting
-`ownerPreflight.pending.status` to `"none"`. The owner ledger and explicit
-approval steps remain required; the helper does not perform or authorize a mutation.
-
 Private-content review is a separate explicit owner attestation of source,
 reachable history/authors and tarball, bound to the same source commit and all
 three tarball hashes. Both review flags above must be literal `true`; a pattern
@@ -514,7 +542,7 @@ GitHub's artifact metadata/digest/run/source and the separately approved manifes
 and payload hashes, then repeats all identity/metadata/gate checks. The download
 action's digest warning alone is **not** the payload guard.
 
-The only npm mutation it implements is:
+The stage job's only npm mutation is:
 
 ```text
 npm stage publish <exact-candidate.tgz> --access=public --tag=<derived-channel>
@@ -528,7 +556,472 @@ environment. Supplied npm tokens/config, alternative ID tokens and Node injectio
 are rejected. The actual GitHub identity is forwarded unchanged. npm OIDC exchange
 failure therefore cannot fall back to an old user credential.
 
+## Historical first publication: obsolete for this package
+
+**Everything in this section through “Gate integration contract” is historical,
+not an active workflow.** The package's bootstrap is complete. These old action
+names, examples and receipts explain past evidence only. Do not dispatch or rerun them.
+
+`sign-bootstrap` is a separate manual action, **not an npm publish action**.
+It requires the real `npm-publish` protected environment and owner approval.
+Prepare still has no OIDC. Only protected signing and staging jobs have
+`id-token: write`, with one package-wide no-cancel concurrency group.
+Signing publishes metadata to public Sigstore services, so it needs its own
+explicit disclosure approval even though it makes **no npm write**.
+
+### Signing approval
+
+Use `action: sign-bootstrap` on the actual approved 2.0.1 publication tag.
+The approval has **exactly** these top-level fields:
+
+```text
+schemaVersion, name, version, ref, tagObject, commit, tree,
+ciRunId, ciAttempt, approver, approvedAt, scope, artifact, ownerPreflight, localRegression
+```
+
+Use the source fields above, `version: "2.0.1"`, `scope: "sign-bootstrap"`,
+and the exact eight-field final prepare `artifact` object shown in the stage
+example. Do **not** copy prepare-only `publicPackages` or `peerArtifact` into
+this strict approval. Their original source/matrix/peer evidence remains bound
+inside the approved final manifest and is revalidated, not replaced.
+
+The bootstrap `ownerPreflight` is different from stage preflight:
+
+```json
+{
+  "owner": "girishkvs",
+  "packageName": "mcp-pacemaker",
+  "registry": "https://registry.npmjs.org/",
+  "checkedAt": "<fresh UTC timestamp>",
+  "packageStatus": "absent",
+  "nameApproved": true,
+  "publicProvenanceApproved": true,
+  "unresolvedSubmission": false,
+  "unresolvedSigning": false,
+  "priorSigning": { "status": "none" },
+  "privateContentReview": {
+    "reviewer": "girishkvs",
+    "scope": "source-and-tarball",
+    "disposition": "approved",
+    "historyAndAuthorsReviewed": true,
+    "historicalEvidenceAccepted": true,
+    "commit": "<same approved commit>",
+    "artifact": {
+      "sha256": "<approved tarball SHA256>",
+      "sha512": "<approved tarball SHA512 hex>",
+      "integrity": "sha512-<approved tarball SHA512 base64>"
+    },
+    "reviewedAt": "<fresh UTC timestamp>"
+  }
+}
+```
+
+These placeholders fail validation. Approval, owner readback and content review
+expire after one hour, including while signing runs. Name approval is an owner
+decision; an anonymous registry 404 does **not** reserve a name or prove the
+owner can claim it. The job independently requires a definitive, fresh package
+404 from the fixed public registry. A present package/version, denied lookup,
+redirect, network error or unknown outcome blocks signing.
+Bootstrap deliberately does **not** require already-existing npm ownership or
+trusted-publisher configuration: those cannot establish first-package access.
+
+Browser access to the npm website, including a package-page 404, does not prove
+Node can reach the npm registry or Sigstore trust/signing services. TLS handshake
+failures remain blocking transport errors, not package-absence evidence.
+Use the approved GitHub-hosted runner and stop on any transport failure.
+Never disable TLS verification, substitute a dependency-feed
+registry, or redirect publication credentials to a feed proxy to force success.
+Existing dependency-feed policy is not changed by this workflow.
+
+Before a fresh signing dispatch after any prior attempt, the owner must settle
+its release ledger and use:
+`"priorSigning": {"status":"reconciled","runIds":["<actual prior run ID>"]}`.
+The current signing run cannot already be reconciled. A copied approval or a
+missing artifact does not settle a lost signing/publication outcome.
+
+### Signing execution and artifact contract
+
+1. Require actual hosted Linux/x64, Node **24.21.0**, original run attempt 1,
+   owner actor/triggering actor, repository IDs and actual dispatch inputs.
+   Validate annotated tag object, peeled commit/tree, clean checkout, package
+   metadata, lock hashes, event SHA/ref and exact workflow source.
+2. Read exact successful push CI and the real protected environment/tag policy
+   and current run's owner approval. Re-read the completed prepare run and its
+   final/source ZIPs, all six consumer ZIPs and jobs, **12 install receipts**,
+   Windows execution evidence, opposite-patch source ZIP/jobs and T32 binding.
+   Require all existing automated gates and the fresh separate owner review.
+   Nothing repacks, installs consumers again or substitutes a newer workflow
+   identity for the prepared source.
+3. Record `signing-outcome-unknown` before the single signing call. A fresh,
+   restricted child loads the already installed npm **12.0.2** library
+   `libnpmpublish@12.0.0`, its reviewed provenance source and bundled
+   `sigstore@5.0.0`. It signs the standard npm PURL subject with the exact
+   compressed tarball SHA512 using the **actual** GitHub identity. No alternate
+   ID token, npm auth/config, GitHub read token or Node injection reaches it.
+   Signing HTTP retries are disabled. Errors are not echoed with tokens.
+4. Verify the full bundle's signature chain, GitHub issuer, exact anchored
+   workflow certificate identity and transparency logs. Separately check SLSA
+   v1 subject/source/ref/workflow/run and repository/owner IDs. Re-read source,
+   protected approval, prepare evidence, registry absence and unchanged bytes
+   before accepting the result.
+5. Export `npm-bootstrap-signed-<signRunId>-1`, containing **exactly**:
+
+   ```text
+   candidate.tgz
+   gates.json
+   manifest.json
+   provenance.sigstore
+   bootstrap.json
+   ```
+
+   The first three files are byte-identical to the approved prepare artifact.
+   `bootstrap.json` records `phase: "bootstrap-signed-not-published"`, exact
+   source/workflow/run/repository IDs, prepare artifact approval, original
+   signing approval, tarball/report hashes, bundle SHA256 and actual readbacks.
+   Registry signatures remain `pending-publication`; owner publication approval
+   remains `not-performed`. The original prepare manifest is **not rewritten**
+   to claim it signed anything.
+
+The separate `npm-bootstrap-ledger-<signRunId>-1` retains unknown/success records
+when possible, even after job failure. A lost runner can lose that artifact.
+**Never rerun the job or blindly repeat signing.** Attempt >1 is rejected.
+Even a correctly signed bundle is unusable through this contract unless the
+original signing run, signing step and artifact export all completed
+successfully. A failed post-sign check or lost upload requires owner
+reconciliation and separately approved next steps.
+
+Stock npm provenance signs the package subject, source/workflow and run. It
+does **not** cryptographically sign owner approval, gate receipts, job ID or a
+stage ID. GitHub API artifact/ZIP checks authenticate those additional receipt
+bindings; SHA256/SHA512 alone do not authenticate provenance.
+
+### GitHub-hosted owner bootstrap approval
+
+Use `action: publish-bootstrap`, `scope: "publish-bootstrap"`, the same source
+and final prepare `artifact`, and a **fresh** owner preflight/content review.
+Reconcile the completed signing run: `priorSigning.status` must be `reconciled`
+and its `runIds` must include that run. Add these two exact top-level fields:
+
+```json
+{
+  "signedArtifact": {
+    "artifactId": "<immutable signing artifact ID>",
+    "artifactDigest": "sha256:<actual signing API ZIP SHA256>",
+    "runId": "<original successful signing run ID>",
+    "runAttempt": 1,
+    "receiptSha256": "<bootstrap.json SHA256>",
+    "bundleSha256": "<provenance.sigstore SHA256>"
+  },
+  "ownerAuth": {
+    "spki": "<canonical standard base64 DER RSA-4096 public SPKI>",
+    "sha256": "<lowercase SHA256 of those DER bytes>",
+    "transaction": "<fresh CSPRNG 16-byte nonce, lowercase 32-character hex>"
+  }
+}
+```
+
+RSA exponent must be 65537. Keep the corresponding private key in the owner's
+approved memory-only holder, never in GitHub, approval JSON, files or logs.
+The nonce is a transaction identifier, not an npm credential. It must be new
+for each separately approved dispatch. Generic approval does not fill in the
+separate content/history review fields.
+
+The complete strict top-level publish approval is:
+
+```text
+schemaVersion, name, version, ref, tagObject, commit, tree, ciRunId, ciAttempt,
+approver, approvedAt, scope, artifact, ownerPreflight, signedArtifact, ownerAuth, localRegression
+```
+
+### Owner execution and encrypted challenge handoff
+
+1. The job has **no OIDC permission**. Its first step rejects unsupported hosted
+   context; tools also require actual Linux/x64, Node24.21.0, owner actor,
+   original attempt1, event/ref/source/workflow identity and exact approval.
+   The real protected environment must still have ID `21922517673`, the
+   required owner review and the approved tag policy.
+2. Install the pinned SDK before authentication. Download the signing artifact
+   using the actual GitHub API and verify its ZIP/digest/five-file contract,
+   source, CI, gates, six consumer jobs/twelve installs, peer/T32 evidence,
+   signatures, claims and fresh owner review. Require registry package absence.
+   `verify-bootstrap.mjs` now refuses operational execution outside this hosted
+   publish job. Its GET/crypto verification is not a local or offline command.
+3. A job-bounded background supervisor retains only the GitHub read credential.
+   It launches a separate owner process with restricted environment, private
+   HOME and no npmrc, GitHub token, OIDC token, Node injection or proxy settings.
+   The runner tracking identifier remains for GitHub's end-of-job cleanup.
+   Owner stdout/stderr are not exported. A correlated IPC request obtains
+   fresh full verification before login and each publication authorization.
+4. The owner process calls pinned **npm-profile13.0.1 `loginWeb`**, never its
+   password fallback. Only the npm website challenge URL is encrypted using
+   `OwnerAuthEnvelope`; no token, done URL or OTP enters files, environment,
+   IPC, public logs or artifacts. The runner polls the official registry.
+   Foreground workflow wait/upload steps can run while this background process
+   waits for real owner browser approval.
+5. Verify/decrypt the challenge in the approved owner holder, then open only
+   that URL in the approved owner browser. **Encryption does not authenticate
+   origin:** first verify the actual GitHub run/job/source, artifact ID/API ZIP
+   digest, expected file and every AAD field. Require literal authenticated AAD,
+   fresh issue/expiry, expected key fingerprint/nonce and unused sequence.
+6. On login, actual npm `whoami` and profile must identify `girishkvs`; profile
+   must report `tfa.mode: "auth-and-writes"`. After fresh verification, use the
+   documented `libnpmpublish.publish(manifest, retainedTarBuffer, options)`.
+   `pacote.manifest(localTgz, {fullMetadata:true, fullReadJson:true, ...})` reads
+   the unchanged archive offline with scripts disabled. Metadata/options,
+   tarball and provenance hashes are rechecked. Options explicitly select
+   `defaultTag: "latest"`, public access, npm12.0.2, `provenanceFile`, public
+   registry and zero retries. No `stage` or generated `provenance` option is set.
+7. Fsync an immutable `submission-outcome-unknown` record **before each PUT**.
+   Only npm's confirmed `EOTP`/HTTP401 for this exact package PUT, with valid
+   npm auth/done URLs, permits a browser challenge and one continuation.
+   Recheck source, registry absence, artifact, gates and owner freshness after
+   real browser authorization. A second EOTP, transport error, lost response
+   or other error never permits another PUT. No TTY spoof or bypass token.
+8. Check acknowledged publication against actual registry metadata, exactly
+   2.0.1/latest, SRI and freshly downloaded tarball SHA256/SHA512. This is not
+   registry-signature or published-provenance acceptance. Those checks and
+   the fresh registry consumer remain pending until the anonymous acceptance
+   steps below pass.
+9. Finally, attempt npm12's logout session DELETE for **only the new session
+   token**. No other token inventory/browser session is revoked. A failed or
+   lost logout response is `revocation-failed-owner-action-required`; a lost
+   login response is `login-outcome-unknown`. Neither is disguised as cleanup.
+   Do not rerun a failed job or reuse an approval. Reconcile the release ledger,
+   npm state and any possible session/publication before new authorization.
+
+The transport adapter matters: npm-registry-fetch does not forward its caller's
+`redirect` option to make-fetch-happen. In the fresh owner child, only registry
+calls use a constrained transport with official HTTPS registry destinations,
+redirect rejection, normal TLS, no disk cache and zero retries. Owner auth is
+host-bound. Separate Sigstore trust reads carry no npm credentials.
+
+### Owner artifacts, receipts and process limits
+
+| Artifact | Exact challenge file / contents |
+|---|---|
+| `npm-owner-auth-<runId>-1-login` | `challenge-1.json`: encrypted login URL |
+| `npm-owner-auth-<runId>-1-publication-2fa` | `challenge-2.json`: encrypted publication-2FA URL; absent when no publication challenge was issued |
+| `npm-owner-bootstrap-ledger-<runId>-1` | Immutable safe verification, unknown-outcome, publication/readback, cleanup and process receipts |
+
+Challenge schema is exactly `{schemaVersion, algorithm, aad, wrappedKey, nonce,
+ciphertext, tag}`, with algorithm `RSA-OAEP-256+A256GCM`. Binary fields are
+canonical padded base64. RSA wraps a fresh 32-byte AES key with OAEP-SHA256
+(empty label); GCM uses a fresh 12-byte nonce and 16-byte tag. Plaintext is only
+`{"url":"<website challenge>"}`. Authenticate literal decoded AAD bytes. Its
+ordered fields are:
+
+```text
+repository, ref, commit, runId, runAttempt, owner, name, version,
+sha256, keySha256, transaction, sequence, kind, purpose, issuedAt, expiresAt
+```
+
+`runAttempt` is1, `purpose` is `mcp-pacemaker-npm-owner-auth`, expiry is exactly
+ten minutes after issue. Sequence/kind is either1/`login` or2/`publish-2fa`.
+These are the **publication run's** identity, not the earlier signing run.
+Signing receipts keep their original identity. Envelope tampering/replay fails;
+possessing the public key alone must never authorize a browser handoff.
+
+`owner-<three-digit-record-number>.json` ledger records contain `schemaVersion`, exact binding
+(the first eleven AAD fields above), `recordedAt` and a fixed `phase` with only
+safe phase-specific fields. `done.json` adds `outcome`, `attempts`, `cleanup`,
+`success`. This owner-process success requires `published-readback-matched`
+**and** `revoked`; it is not full workflow acceptance. Verification
+receipts retain the full original signing proof and add actual
+`checks.publicationRun` and `checks.publicationEnvironment`.
+
+Job timeout is40 minutes, supervisor deadline30 minutes, owner lifetime20
+minutes. Waits are bounded (login10, publication challenge15, completion10
+minutes); every registry request is bounded. An `always()` cleanup step requests
+shutdown, allows two minutes for cleanup, then identity-checks exact job-owned
+process IDs before forced termination if needed. Runner cleanup remains a final
+backstop. Lost runners/forced termination can prevent revocation or artifact
+upload: missing receipts are **unknown**, not proof nothing happened.
+
+Only after the hosted registry-signature/provenance/consumer acceptance below
+may stage-only trust and the separately gated 1.3.1/legacy path proceed. These
+additional owner operations are not silently bundled. Never upgrade a live
+service as part of publication validation.
+
+### Anonymous post-publication acceptance
+
+The same sole-active `publish-bootstrap` job now performs acceptance before it
+can succeed. There are no further owner credentials or npm writes:
+
+1. `post-publication.mjs prepare` runs **after** confirmed readback, session
+   revocation and exit of both owner processes. It uses a GitHub read token to
+   recheck actual source/CI, signed/prepared API ZIPs, all twelve prepublication
+   consumer installs, peer evidence and both protected-environment approvals.
+   It verifies the retained signing proof again. Historical registry absence
+   in that signing receipt stays historical; it is not fabricated as current
+   absence after publication. The GitHub-token-bearing process then exits.
+2. `post-publication.mjs verify` runs in a separate step with **no GitHub token,
+   npm token or OIDC**. It requires the verified owner state and source receipt.
+   Anonymous GETs use normal TLS, reject redirects and non-registry origins,
+   have 30-second timeouts and enforce response-size limits.
+3. Fetch the published version metadata and complete dist-tag map, exact
+   tarball, public registry signing keys and the **actual attestation URL
+   returned by version metadata**. No guessed attestation endpoint is used.
+   The bootstrap must still contain only2.0.1 with `latest: 2.0.1`.
+4. Create a new owned, empty consumer with private HOME/config/cache. Install
+   `mcp-pacemaker@2.0.1` from the public registry with scripts disabled, an exact
+   dependency spec and a newly generated consumer lock. Never use the retained
+   `.tgz` as the installation source or copy the producer lock. Every installed
+   target file must match the approved archive; runtime notices are checked.
+5. Run pinned npm12.0.2 `audit signatures --json --include-attestations`.
+   Require empty `invalid`/`missing` arrays and exactly one `verified` entry for
+   the intended name/version, root installation location, public registry and
+   actual attached bundles. An exit code or aggregate count is not coverage.
+   Independently verify the observed target's registry signatures against the
+   official registry keys and its publication time.
+6. Verify the actual attached SLSA bundle using Sigstore, exact subject/SHA512,
+   issuer, certificate identity, transparency evidence and **original signing
+   source/workflow/run**. It must match the approved signing bundle, not merely
+   an unrelated valid bundle. Never substitute the publisher/verifier run.
+7. Only after those checks, run the installed npm bin, an isolated real bridge
+   and its packaged UI assets. Recheck installed bytes, the consumer lock and
+   final registry metadata/channel state. Clean the owned consumer.
+
+Each npm command has a six-minute limit; the anonymous workflow step has a
+fourteen-minute limit within the existing forty-minute job bound.
+
+The upload step **`Export post-publication acceptance or failure receipt`**
+always attempts to retain `npm-post-publication-<publicationRunId>-1`, containing
+one `post-publication.json`, bounded to64KiB. A successful receipt has:
+
+```text
+schemaVersion: 1
+status: accepted
+binding, checkedAt, publication, checks, evidence, consumer
+registryMutation: not-performed
+```
+
+`evidence` includes registry signature/key and target audit coverage, metadata/
+attestation/audit hashes, verified attached provenance and the original signing
+identity. `consumer` includes the exact registry spec, fresh lock hash, toolchain,
+installed-bin/bridge/UI results and `producerLockCopied: false`.
+
+**Full acceptance requires this receipt with `status: accepted` and a successful
+actual job/run**, in addition to owner `done.json` and cleanup. On failure,
+`status: not-accepted` records the failing phase without raw SDK errors or URLs;
+the job fails. Publication is not rolled back. There is no republish, unpublish,
+tag mutation or automatic retry. Missing receipts after runner loss are unknown.
+
+The proof and consumer functions also accept1.3.1 plus explicit original stage
+expectations for reuse by a future actual GitHub-hosted read-only caller. This
+bootstrap entrypoint remains2.0.1-only; no standalone legacy verification action
+is added. Actual staged-bundle retrieval and verification **before** owner stage
+approval remain separate mandatory gates.
+
 ## Gate integration contract
+
+### Notice and advisory pin refresh
+
+Pins do not float with a new patch version. Before committing/qualifying a selected
+release, compare fresh consumer resolution with the producer locks and reviewed notice
+versions. Run npm audits and the existing OSV gates with the approved public coordinates.
+An advisory or notice mismatch is a stop. Fresh native producer audits must have
+zero findings; the historical release-specific review below no longer applies to
+new native or OSV scans. New release envelopes retain both native classifications
+and the complete OSV report, not just a generic passing gate.
+
+#### Temporary 2.0.2 producer risk acceptance
+
+**Historical record: retired from fresh scans. This was a risk exception, not a
+vulnerability patch or an advisory-free scan.**
+The release owner deferred all dependency changes from the **2.0.2 documentation
+release** on October 6, 2026. This replaces the earlier braces-only producer-UI
+record with exact, separate CLI-runtime and UI-build findings. Package manifests,
+producer locks, runtime code and built UI were unchanged in that release.
+The original expiry remains **2026-10-12T00:00:00Z**; it is not extended.
+Historical receipt verification uses `notBefore <= now < expiresAt`; equality
+with expiry is rejected.
+Its public effective start is **2026-10-06T15:33:00Z**, conservatively after the
+approval. The exact authorization timestamp and private approval evidence are
+not part of the public review record.
+
+| Field | Exact scope |
+|---|---|
+| Release / phase | **2.0.2**, source gates only |
+| Dependency scope | Exact **producer-root** and **producer-ui** graphs; no fresh-consumer or payload exemption |
+| Root lock SHA256 | `62f92175cd124818678166381c0acd0376cb9dedb2278d39eb4e4033368e2500` |
+| UI lock SHA256 | `b88a73a6212e26f4c4dde985d84eadf39870c8758e4698cdd5544b8a55eb8cca` |
+| Public reviewer | `girishkvs` |
+| Approved / expires | 2026-10-06 / **2026-10-12T00:00:00Z** |
+| Root native report | One moderate finding, `smol-toml`; canonical SHA256 `93a12f5109ca8488a8e80f8287a0961cb06f2b9c57122d81a93645c4a9e2159f` |
+| UI native report | Eight affected entries, six high and two moderate, representing three advisories; canonical SHA256 `8320a09dc8d1831eb7054034d5148137fb2af784b02716eecc0db860eea826cf` |
+
+| Exact dependency / advisory | Exposure and risk |
+|---|---|
+| `smol-toml@1.8.0` / [GHSA-r4xh-jqrq-34v2](https://github.com/advisories/GHSA-r4xh-jqrq-34v2) | **CLI runtime**, moderate/CVSS 5.3. Parsing crafted TOML can consume excessive CPU. This is not a build-only finding. |
+| `braces@3.0.3` / [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) | **UI build**, high/CVSS 7.5. Deep patterns can exhaust the stack. |
+| `postcss-selector-parser@6.1.4` / [GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf) | **UI build**, moderate/CVSS 5.9. Crafted selectors can consume excessive CPU. |
+| `source-map-js@1.2.1` / [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) | **UI build**, high/CVSS 7.5. Crafted indexed source-map offsets can cause denial of service. |
+
+The CLI parses local TOML configuration. During the deferral, treat those files
+as trusted inputs and avoid processing untrusted or unusually large TOML.
+UI builds use controlled source inputs. All three reviewed UI-build dependencies
+are excluded from the root runtime graph and bundled UI manifest, and that
+exclusion is checked again against the candidate. These limits reduce exposure;
+they do not make the dependencies safe or fix the vulnerabilities.
+
+Patched versions exist for `smol-toml` (1.9.0), `postcss-selector-parser` (7.1.6),
+and `source-map-js` (1.2.2). Their upgrades, including the Tailwind compatibility
+work, are explicitly deferred from this release. No patched braces release was
+available at review. Fresh consumer installs still resolve and audit their own
+graphs; a vulnerable consumer result is not covered by the producer exception.
+
+The historical record/receipt validator is in `tools/publication-scanners/advisories.mjs`.
+Retained native audit acceptance binds the **entire exact reviewed report** (all advisory
+IDs, ranges, paths, ancestor edges, fix metadata and counts), not a package-name
+ignore list. Root and UI reports cannot substitute for each other.
+Only the historical complete finding exit **1** was eligible; execution errors,
+signals, partial output and other exits fail. The original exit, raw stream hashes
+and counts remain in historical evidence. The original OSV record queried all approved coordinates and
+retains each original ID, modified timestamp, graph and raw-response digest.
+Only exact package/version/advisory matches in their reviewed producer scope
+became `reviewed-exemption`. Both producer locks must still match when verifying
+that retained record. Fresh scans do not generate this disposition.
+
+Reports and final gate evidence explicitly say **RISK-ACCEPTED** with the review
+record hash, exact locks, exposure, scope and expiry. They must not say advisory-free.
+For 2.0.2, the producer gate must retain both native audit classifications and
+the complete OSV report, including an explicit zero-findings result when clean.
+The shared continuation validator reconciles every acceptance, count, scope and
+disposition with the retained source checks; removing fields is not a clean result.
+`prepared.json` and the final manifest retain the same source-bound
+`producerAdvisories` evidence. Source, artifact, prepared and stage/owner readers
+recheck it at the current time, and compare continuation copies with the original
+source report where available. Historical 1.3.1 peer receipts are unchanged.
+Changed locks, another release, fresh-consumer findings, any additional advisory,
+report drift or expiry fail closed. Clean unrelated releases do not fail merely
+because this record is expired. Fresh hosted scans still run; local receipts are
+not reused as fresh scan results. No global `exemptionsPath` is installed.
+
+**Current source:** `smol-toml` has a `1.9.0` floor, the Tailwind 4 build no longer
+contains the reviewed `braces` or `postcss-selector-parser` paths, and
+`source-map-js` is pinned to `1.2.2`. The release-specific exception has been
+removed from fresh scan classification. The original record and historical
+fixtures remain only to verify old receipts without rewriting their meaning.
+Replacement source/version/license/integrity, UI/notices, exact-source
+qualification and fresh hosted audits still require validation. Published
+packages are not retroactively patched. There is no renewal, severity-threshold
+change, dev-dependency omission or extension of this review to another release.
+All other advisories, notices, source/consumer/native/platform gates and separate
+source/byte/stage/owner-publication approvals remain required.
+
+For a required dependency update, review the exact upstream version, source commit,
+license text, resolution/integrity and source hashes. Update the relevant root/UI locks,
+`tools/third-party-notices/reviewed-runtime.json`, `reviewed-licenses.json` and upstream
+license files only when that review justifies them. Use the existing UI build/notices
+generator, then `notices:check`, consumer notice checks and runtime-license closure.
+Commit the resulting reviewed notices/UI bytes with the real candidate and requalify
+its exact source. No pin is automatically accepted, no broad semver license waiver
+is added, and no check is skipped for previously published comparison bytes.
+
+Refresh advisory evidence again at the required hosted gates; an earlier clean local
+audit is not an evergreen waiver. Source, lock, pin or notice changes invalidate
+code-dependent preparation/qualification evidence. Owner byte approval is obtained
+only after final packing; do not repack after approval.
 
 These are implemented **Node entrypoints**, called directly by the workflow
 driver. All paths are absolute; report output must be outside the checkout:
@@ -556,8 +1049,9 @@ block reporting. These gate entrypoints never publish.
    `matrix.consumerLanes` has exactly 12 `{result: <raw consumer report>, ...}`
    entries plus artifact receipts. `peer` contains `tarball`,
    `comparison: {version, artifact: {sha256, sha512, integrity}}`,
-   `inspection.files` and comparison-only `evidence`. The hosted variant also
-   retains `prepared`; the published-registry variant must not contain it.
+   `inspection.files` and `evidence`. This common input is used for both peer kinds.
+   Only hosted-artifact peers additionally carry `prepared`; published-registry
+   peers must not have a prepared manifest.
    Validate/extract candidate bytes and verify packed notices. Reject missing,
    duplicate or wrong SHA/version/toolchain/mode/bin/bridge/UI consumer lanes
    **before finalizer restores or external checks**. Never rerun consumers here.
@@ -566,7 +1060,7 @@ block reporting. These gate entrypoints never publish.
    compatibility. Run the real T32 command with the two approved patches:
 
    ```text
-   node tools/service-replacement/check.mjs --legacy-tarball <absolute 1.3.1.tgz> --legacy-sha256 <hex> --current-tarball <absolute 2.0.1.tgz> --current-sha256 <hex>
+   node tools/service-replacement/check.mjs --legacy-tarball <absolute-peer.tgz> --legacy-sha256 <hex> --legacy-version <selected-1.x> --current-tarball <absolute-candidate.tgz> --current-sha256 <hex> --current-version <selected-2.x>
    ```
 
    Keep the own/peer file manifests and hashes attached to the correct major.
@@ -687,10 +1181,7 @@ source/job/command bindings and evidence. The lower-level
 not archive authenticity or license approval. Do not use it alone as a gate.
 
 `runtime-closure` separately checks extracted runtime paths and actual consumer
-installed-bin/bridge/UI evidence. Both patches require the shared pooling writer
-and execution module. Only 2.0.1 requires the separate pooling editor, files,
-errors, batches and batch scheduler modules; 1.3.1 keeps its editor/file logic
-inside `pooling-config.mjs`.
+installed-bin/bridge/UI evidence.
 
 ### Scanner installation
 
@@ -770,49 +1261,13 @@ channel-state check.
 
 OIDC supports stage submission, not stage list/view/download/approve/reject,
 dist-tag changes, deprecation, access changes or unpublish. Perform owner reads
-with owner authentication from the agreed location: the owner's Mac or a
-separately approved temporary local session. GitHub OIDC stage credentials
-cannot perform these owner operations:
+only from separately approved GitHub-hosted execution with appropriate owner authentication:
 
 ```text
-node tools/npm-publication/owner-stage-list.mjs "<absolute physical npm12 CLI>" "<new private observation directory>"
+npm stage list mcp-pacemaker --json
 npm stage view <exact-stage-id> --json
 npm stage download <exact-stage-id> --json
 ```
-
-Run the guarded list command with Node 24.21.0 and the same physical reviewed
-npm 12.0.2 CLI, in the already-approved owner session and with its existing npm
-authentication/configuration. Use a new private output directory; an old receipt
-is never reused. Bare `npm stage list` output such as `[]` is not admissible
-evidence that no pending stages exist.
-
-Require exit code `0` and the fresh `receipt.json`. Its hash is printed after
-successful child completion, complete envelope/output validation, checked
-persistence and private scratch cleanup. A printed path alone is not success.
-Confirm `total: 0` and `pendingAssessment: "none"` before manually recording
-pending-none alongside the existing owner release ledger and freshness and
-unresolved-outcome checks. A nonempty result is `requires-owner-review`, not a
-matching-stage decision; continue the existing exact stage-view/download review
-for those IDs. The receipt is read evidence only: it authenticates neither the
-owner nor mutation approval, and never edits `ownerPreflight` automatically.
-
-Receipts retain projected stage IDs/package names, bounded observation metadata,
-and hashes/byte counts of native output and decoded HTTP entity bodies. Other
-response fields and raw stdout/stderr are omitted; projections are not original
-wire bytes. The guard rejects redirects, retries/cache fallback, unexpected
-bodies/endpoints, incomplete or changing totals, and duplicate IDs. Limits are
-128 KiB per response, 512 KiB cumulative responses, 256 KiB stdout, 64 KiB stderr,
-1 MiB receipt and 30 seconds overall. Timeout, nonzero child exit, output mismatch,
-or persistence/cleanup failure means there is no accepted empty-list observation.
-
-Portable guard tests run through `test/npm-publication-proof.test.mjs`, which
-imports `test/helpers/owner-stage-list-checks.mjs` once. On Windows, the test-only
-`OWNER_LIST_TEST_CLI` setting enables the real npm CLI cases with Node 24.21.0
-and a physical npm 12.0.2 CLI. The owned-process fixture uses existing Python 3
-(`OWNER_LIST_TEST_PYTHON` if it is not on PATH). Node 20/22 run the portable checks
-with the native SDK cases explicitly skipped; native SDK fixture execution on
-other operating systems is not qualified. These settings are not needed for
-real owner reads.
 
 These commands are **not run by this workflow**. The view JSON's real fields
 include `id`, `packageName`, `version`, `tag`, `shasum`; SHA1 alone is insufficient.
@@ -833,9 +1288,7 @@ node tools/npm-publication/verify-staged.mjs stage-record.json stage-view.json
 
 The verifier first fetches the original run/jobs/artifact through GitHub, validates
 the actual archive digest, and requires the exact capture, bundle and original
-stage records from that archive. Both the run and matched stage job must report
-numeric `run_attempt: 1`; requesting the attempt-1 API URL is not a substitute.
-Local hashes or `authenticated: true` cannot
+stage records from that archive. Local hashes or `authenticated: true` cannot
 replace this read. A reconciled ledger points back to that original artifact;
 verify the original `stage-1.json`, not a newly relabelled record.
 
@@ -856,19 +1309,28 @@ Readback, reconciliation, rejection/removal and credential cleanup remain
 independent of this acceptance prerequisite. Staging can disclose source/package
 metadata through public Sigstore transparency before owner approval.
 
-Do not substitute a pre-signed export. In npm12.0.2, successful OIDC can enable
-automatic provenance even with `provenance-file`; libnpmpublish then generates a
-different attachment. Explicit `--provenance=false` plus `--provenance-file`
-is rejected too. The adapter preserves Trusted Publishing and captures its
-actual automatic attachment after SDK generation and registry serialization.
-Offline tests use explicit synthetic OIDC/signature/HTTP fixtures in fresh
-children with denied external I/O. They are not real captures or owner approval.
+Do not reuse the bootstrap export as staged proof. In npm **12.0.2**, the OIDC
+publish path can set `opts.provenance=true` even when `provenance-file` was
+supplied; libnpmpublish then generates another bundle instead of using that
+file. `--no-provenance` plus `--provenance-file` is also mutually exclusive.
+Therefore a pre-signed export is not staged proof. The reviewed adapter preserves
+automatic Trusted Publishing and captures its actual attachment after SDK
+generation and registry JSON serialization. Offline tests use explicit synthetic
+OIDC/signature/HTTP fixtures in fresh children with denied external I/O; they are
+not real captures, owner approvals or independently authenticated execution.
 
 The owner approves the exact stage separately with npm 2FA, after fresh tag
 readback and proof verification. Stage tags are immutable. A wrong tag requires
 separately authorized rejection/restaging, not a hidden tag write.
 
 ## After publication
+
+Run anonymous registry, signature and fresh-consumer verification after separately
+approved owner publication. Local read-only checks are allowed using the caller's
+approved registry configuration and isolated state; unavailable proxy metadata is
+a blocked check, not permission to override the registry. Hosted provenance must
+still be verified against the actual publication workflow and exact source.
+The old first-package automatic acceptance path above is historical.
 
 Registry signatures remain **pending publication** until the version exists.
 Read version metadata and the complete dist-tag map; download and compare the
@@ -883,24 +1345,20 @@ Use the supported pinned verifier and inspect coverage for the intended candidat
 including missing/invalid registry signatures and provenance. Exit zero alone is
 not acceptance. Check source/workflow/issuer/subject and real consumer smoke
 results; append this separate acceptance evidence to the release ledger.
-The already-published local 2.0.1 bootstrap has no GitHub provenance; this is
-recorded honestly for its comparison-only role, not retroactively repaired.
-It does not waive provenance or registry-signature requirements for the new
-OIDC-staged 1.3.1 release. Block that release's acceptance on missing or invalid
-evidence; containment, rollback or deprecation
-needs separate owner authorization.
+There is **no absent-provenance bootstrap exception**. Missing or invalid
+provenance and invalid registry signatures block acceptance;
+containment/rollback/deprecation needs separate owner authorization.
 Never overwrite an immutable name/version or roll a channel across majors.
 
 ## Local tests and official contracts
 
 ```text
-node --test test/npm-publication*.test.mjs test/publication-scanners-admission.test.mjs
+node --test --test-concurrency=2 test/npm-publication*.test.mjs
 ```
 
 These lightweight tests inject clients/executors/verifiers and use controlled
-file/receipt fixtures. Run the complete affected files with `CI=true` on pinned
-Node **20.20.2**, **22.23.2** and **24.21.0**, retaining red/green regression logs.
-No dependency installation is needed for these synthetic contracts. Passing them proves local guard decisions, not hosted
+file/receipt fixtures. Node 24.11.0 may run these pure tests; it is **not** the
+publishing toolchain. Passing them proves local guard decisions, not hosted
 matrix execution, actual scans, native execution, license coverage, T32,
 compatibility, npm trust, signature cryptography, protected environment
 enforcement or successful staging/publication. No hosted tests, scans, installs
@@ -914,6 +1372,12 @@ Implementation references (not re-fetched by local unit validation):
 - [npm 12 pack name-keyed JSON](https://github.com/npm/cli/blob/v12.0.2/lib/utils/tar.js)
 - [npm stage commands/auth/tag semantics](https://github.com/npm/cli/blob/v12.0.2/docs/lib/content/commands/npm-stage.md)
 - [npm provenance construction](https://github.com/npm/cli/blob/v12.0.2/workspaces/libnpmpublish/lib/provenance.js)
+- [npm12 documented direct SDK publication](https://github.com/npm/cli/blob/v12.0.2/workspaces/libnpmpublish/README.md)
+- [npm-profile13.0.1 browser-auth protocol](https://github.com/npm/npm-profile/blob/v13.0.1/lib/index.js)
+- [npm12 browser-OTP continuation](https://github.com/npm/cli/blob/v12.0.2/lib/utils/auth.js)
+- [npm12 logout endpoint](https://github.com/npm/cli/blob/v12.0.2/lib/commands/logout.js)
+- [npm12 signature audit and target-attestation output](https://github.com/npm/cli/blob/v12.0.2/lib/utils/verify-signatures.js)
+- [Bundled pacote22 signature and attached-provenance verification](https://github.com/npm/pacote/blob/v22.0.0/lib/registry.js)
 - [Sigstore 5 verifier options](https://github.com/sigstore/sigstore-js/blob/7d2900eca1c22b3f87c13987c8d4b7c9a29b733a/packages/client/src/config.ts)
 - Actions: checkout **6.1.0**, setup-node **6.5.0**, upload-artifact/download-artifact
   **6.0.0**. Full commit pins in the workflow were resolved from official action

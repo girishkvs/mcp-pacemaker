@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
-import {
-  assertCollectionJobSkipped, secretHash, secretId, secretKeys as exactKeys,
-  validateSecretCollection, validateSecretReview, sourceCiAttempt,
-} from './secret-report.mjs';
+import { isCanonicalUnsigned, releaseRole, validateLocalApproval, validateLocalRegression } from './local-regression.mjs';
+import { assertCollectionJobSkipped, secretHash, secretId, sourceCiAttempt, validateSecretCollection, validateSecretReview } from './secret-report.mjs';
+import { requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
 export const POLICY = Object.freeze({
   name: 'mcp-pacemaker',
@@ -27,6 +25,9 @@ export const REQUIRED_GATES = Object.freeze([
 ]);
 
 export function validateGateStatus(name, gate) {
+  if (name === 'producer-advisories') validateProducerAdvisories(gate);
+  else assert.ok(!gate || !['riskAcceptance', 'nativeAudits', 'osv'].some(key => Object.hasOwn(gate, key)),
+    'UI build risk review cannot waive another gate');
   if (gate?.admission !== undefined) {
     assert.equal(name, 'source-trufflehog');
     const value = gate.admission;
@@ -72,20 +73,29 @@ export function sameDigests(actual, expected) {
 }
 
 export function channelFor(version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Only approved 1.3.1/2.0.1 candidates are supported');
-  return version.startsWith('1.') ? 'legacy' : 'latest';
+  return releaseRole(version) === 'legacy' ? 'legacy' : 'latest';
 }
 
 export function publicationRef(ref) {
-  const match = typeof ref === 'string' &&
-    /^refs\/tags\/(?:npm(?:-r([1-9][0-9]{0,15}))?\/)?v(1\.3\.1|2\.0\.1)$/.exec(ref);
-  const generation = match?.[1] === undefined ? undefined : Number(match[1]);
-  assert.ok(match &&
-    match[0] === ref &&
-    (generation === undefined ||
-      Number.isSafeInteger(generation) &&
-      generation >= 2), 'Publication requires the exact approved release or npm tag');
-  return { tag: ref.slice('refs/tags/'.length), version: match[2] };
+  const message = 'Publication requires the exact approved release or npm tag';
+  assert.ok(typeof ref === 'string' &&
+    ref.startsWith('refs/tags/'), message);
+  const tag = ref.slice('refs/tags/'.length);
+  const parts = tag.split('/');
+  assert.ok(parts.length === 1 ||
+    parts.length === 2, message);
+  if (parts.length === 2 &&
+      parts[0] !== 'npm') {
+    assert.ok(parts[0].startsWith('npm-r'), message);
+    const generation = parts[0].slice('npm-r'.length);
+    assert.ok(isCanonicalUnsigned(generation) &&
+      Number(generation) >= 2, message);
+  }
+  assert.ok(parts.at(-1).startsWith('v') &&
+    parts.at(-1).length > 1, message);
+  const version = parts.at(-1).slice(1);
+  channelFor(version);
+  return { tag, version };
 }
 
 export function publicationTagName(ref, version) {
@@ -111,7 +121,8 @@ export function fresh(value, now = Date.now()) {
 
 export function validateApproval(approval, action, now = Date.now()) {
   assertCandidateEvidence(approval);
-  assert.ok(['collect-secrets', 'prepare', 'stage'].includes(action), 'Unsupported publication action');
+  assert.ok(['prepare', 'collect-secrets', 'stage', 'sign-bootstrap', 'verify-bootstrap', 'publish-bootstrap'].includes(action),
+    'Unsupported publication scope');
   assert.equal(approval.schemaVersion, 1);
   assert.equal(approval.name, POLICY.name);
   const channel = channelFor(approval.version);
@@ -138,7 +149,7 @@ export function validateApproval(approval, action, now = Date.now()) {
       assert.match(name, /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/);
     }
   }
-  if (action === 'stage') {
+  if (!['prepare', 'collect-secrets'].includes(action)) {
     const artifact = approval.artifact;
     assertCandidateEvidence(artifact);
     assert.match(artifact?.sha256 ?? '', /^[a-f0-9]{64}$/);
@@ -150,7 +161,8 @@ export function validateApproval(approval, action, now = Date.now()) {
       assert.match(String(artifact[key] ?? ''), /^[1-9][0-9]*$/);
     }
     assert.equal(artifact.runAttempt, 1, 'Prepare reruns need a fresh dispatch, not reused artifacts');
-    validateOwnerPreflight(approval, now);
+    if (action === 'stage') validateOwnerPreflight(approval, now);
+    else validateBootstrapApproval(approval, action, now);
   }
   return channel;
 }
@@ -160,27 +172,13 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
   assert.equal(owner?.owner, POLICY.owner, 'Owner-authenticated preflight is required; OIDC cannot list stages');
   fresh(owner.checkedAt, now);
   assert.equal(owner.packageName, POLICY.name);
-  const review = owner.privateContentReview;
-  assert.equal(review?.reviewer, POLICY.owner, 'Separate owner private-content review is required');
-  assert.equal(review.scope, 'source-and-tarball', 'A pattern scan is not owner content review');
-  assert.equal(review.disposition, 'approved');
-  assert.equal(review.historyAndAuthorsReviewed, true, 'Owner must review reachable history and identities');
-  assert.equal(review.historicalEvidenceAccepted, true, 'Fresh gates do not settle historical uncertainty');
-  assert.equal(review.commit, approval.commit, 'Owner content review covers different source');
-  sameDigests(review.artifact, approval.artifact);
-  fresh(review.reviewedAt, now);
+  validateOwnerContentReview(approval, now);
   assert.equal(owner.unresolvedSubmission, false, 'Unknown previous outcome: owner reconciliation required');
   assert.deepEqual(owner.trust, {
     repository: POLICY.repository, workflow: 'npm-publish.yml', environment: POLICY.environment,
     allowPublish: false, allowStagePublish: true,
   }, 'Missing or wrong stage-only trust; bootstrap/trust setup is a separate owner operation');
-  assert.ok(owner.expectedDistTags &&
-    typeof owner.expectedDistTags === 'object' &&
-    !Array.isArray(owner.expectedDistTags), 'Expected current dist-tags are required');
-  assert.match(owner.expectedDistTags.latest ?? '', /^2\.\d+\.\d+$/, 'Bootstrap real 2.x first');
-  if (owner.expectedDistTags.legacy !== undefined) {
-    assert.match(owner.expectedDistTags.legacy, /^1\.\d+\.\d+$/);
-  }
+  validateDistTags(owner.expectedDistTags);
   const pending = owner.pending;
   assert.ok(['none', 'matching'].includes(pending?.status),
     'Conflicting/unknown pending stage: owner disposition required, no retry');
@@ -195,6 +193,97 @@ export function validateOwnerPreflight(approval, now = Date.now()) {
     assert.equal(pending.workflow.commit, approval.commit);
     assert.match(String(pending.workflow.runId ?? ''), /^[1-9][0-9]*$/);
     assert.equal(pending.workflow.attempt, 1);
+  }
+
+}
+
+export function validateDistTags(tags) {
+  assert.ok(tags &&
+    typeof tags === 'object' &&
+    !Array.isArray(tags), 'Expected current dist-tags are required');
+  assert.equal(releaseRole(tags.latest), 'current', 'An existing current release is required');
+  if (tags.legacy !== undefined) assert.equal(releaseRole(tags.legacy), 'legacy');
+  for (const [tag, version] of Object.entries(tags)) {
+    assert.match(tag, /^[a-z][a-z0-9-]*$/);
+    releaseRole(version);
+  }
+}
+
+export function validateOwnerContentReview(approval, now = Date.now()) {
+  const review = approval.ownerPreflight?.privateContentReview;
+  assert.equal(review?.reviewer, POLICY.owner, 'Separate owner private-content review is required');
+  assert.equal(review.scope, 'source-and-tarball', 'A pattern scan is not owner content review');
+  assert.equal(review.disposition, 'approved');
+  assert.equal(review.historyAndAuthorsReviewed, true, 'Owner must review reachable history and identities');
+  assert.equal(review.historicalEvidenceAccepted, true, 'Fresh gates do not settle historical uncertainty');
+  assert.equal(review.commit, approval.commit, 'Owner content review covers different source');
+  sameDigests(review.artifact, approval.artifact);
+  fresh(review.reviewedAt, now);
+}
+
+export function exactKeys(value, keys, description) {
+  assert.ok(value &&
+    typeof value === 'object' &&
+    !Array.isArray(value), `Missing ${description}`);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `Unexpected ${description} fields`);
+}
+
+function validateBootstrapApproval(approval, action, now) {
+  assert.equal(approval.version, '2.0.1', 'Only the first 2.0.1 latest publication may bootstrap');
+  exactKeys(approval, ['schemaVersion', 'name', 'version', 'ref', 'tagObject', 'commit', 'tree',
+    'ciRunId', 'ciAttempt', 'approver', 'approvedAt', 'scope', 'artifact', 'ownerPreflight',
+    ...(['verify-bootstrap', 'publish-bootstrap'].includes(action) ? ['signedArtifact'] : []),
+    ...(action === 'publish-bootstrap' ? ['ownerAuth'] : []),
+    ...(Object.hasOwn(approval, 'localRegression') ? ['localRegression'] : [])], 'bootstrap approval');
+  if (action === 'publish-bootstrap') {
+    exactKeys(approval.ownerAuth, ['spki', 'sha256', 'transaction'], 'owner auth envelope');
+    assert.match(approval.ownerAuth.spki, /^[A-Za-z0-9+/]+={0,2}$/);
+    assert.ok(approval.ownerAuth.spki.length <= 1368);
+    assert.match(approval.ownerAuth.sha256, /^[a-f0-9]{64}$/);
+    assert.match(approval.ownerAuth.transaction, /^[a-f0-9]{32}$/);
+    assert.equal(approval.ownerAuth.sha256.length, 64);
+    assert.equal(approval.ownerAuth.transaction.length, 32);
+  }
+  exactKeys(approval.artifact, ['sha256', 'sha512', 'integrity', 'manifestSha256', 'artifactId',
+    'artifactDigest', 'runId', 'runAttempt'], 'prepare artifact approval');
+  const owner = approval.ownerPreflight;
+  exactKeys(owner, ['owner', 'checkedAt', 'packageName', 'privateContentReview', 'unresolvedSubmission',
+    'unresolvedSigning', 'registry', 'packageStatus', 'nameApproved', 'publicProvenanceApproved',
+    'priorSigning'], 'bootstrap owner preflight');
+  assert.equal(owner.owner, POLICY.owner);
+  assert.equal(owner.packageName, POLICY.name);
+  fresh(owner.checkedAt, now);
+  assert.equal(owner.registry, POLICY.registry);
+  assert.equal(owner.packageStatus, 'absent', 'Bootstrap requires an absent package, not just an absent version');
+  assert.equal(owner.nameApproved, true, 'Fresh owner name-availability approval is required');
+  assert.equal(owner.publicProvenanceApproved, true, 'Signing publicly discloses metadata');
+  assert.equal(owner.unresolvedSubmission, false, 'Unknown publication outcome requires owner reconciliation');
+  assert.equal(owner.unresolvedSigning, false, 'Unknown signing outcome requires owner reconciliation');
+  const prior = owner.priorSigning;
+  assert.ok(['none', 'reconciled'].includes(prior?.status), 'Owner signing ledger reconciliation is required');
+  exactKeys(prior, prior.status === 'none' ? ['status'] : ['status', 'runIds'], 'prior signing disposition');
+  if (prior.status === 'reconciled') {
+    assert.ok(Array.isArray(prior.runIds) &&
+      prior.runIds.length > 0);
+    assert.equal(new Set(prior.runIds.map(String)).size, prior.runIds.length);
+    for (const id of prior.runIds) assert.match(String(id), /^[1-9][0-9]*$/);
+  }
+  exactKeys(owner.privateContentReview, ['reviewer', 'scope', 'disposition', 'historyAndAuthorsReviewed',
+    'historicalEvidenceAccepted', 'commit', 'artifact', 'reviewedAt',
+    ...(Object.hasOwn(owner.privateContentReview, 'localRegression') ? ['localRegression'] : [])], 'owner content attestation');
+  exactKeys(owner.privateContentReview.artifact, ['sha256', 'sha512', 'integrity'], 'reviewed tarball');
+  validateOwnerContentReview(approval, now);
+  if (['verify-bootstrap', 'publish-bootstrap'].includes(action)) {
+    const signed = approval.signedArtifact;
+    exactKeys(signed, ['artifactId', 'artifactDigest', 'runId', 'runAttempt', 'receiptSha256', 'bundleSha256'],
+      'signed artifact approval');
+    for (const key of ['artifactId', 'runId']) assert.match(String(signed[key]), /^[1-9][0-9]*$/);
+    for (const key of ['receiptSha256', 'bundleSha256']) assert.match(signed[key], /^[a-f0-9]{64}$/);
+    assert.match(signed.artifactDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(signed.runAttempt, 1, 'Signing reruns are not accepted');
+    assert.notEqual(String(signed.runId), String(approval.artifact.runId));
+    assert.equal(prior.status, 'reconciled', 'Owner must reconcile the actual completed signing run');
+    assert.ok(prior.runIds.map(String).includes(String(signed.runId)));
   }
 }
 
@@ -250,8 +339,14 @@ export function validatePackage(pkg, approval) {
     assert.ok(Object.hasOwn(allowed, key), `Unreviewed publishConfig: ${key}`);
     assert.equal(value, allowed[key], `Conflicting publishConfig.${key}`);
   }
-  assert.equal(pkg.dependencies?.['smol-toml'], '^1.8.0', 'Reviewed safe direct TOML floor is required');
-  if (pkg.gitHead !== undefined) {
+  const tomlFloor = pkg.dependencies?.['smol-toml'];
+  // Historical published releases that shipped the older reviewed floor. Narrower than the
+  // advisory exception list in publication-scanners/advisories.mjs, which retired 2.0.2.
+  const isHistoricalPublishedVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(pkg.version);
+  assert.ok(tomlFloor === '^1.9.0' ||
+    isHistoricalPublishedVersion && tomlFloor === '^1.8.0', 'Reviewed direct TOML floor is required');
+  if (Object.hasOwn(pkg, 'gitHead')) {
+    assert.match(pkg.gitHead, /^[a-f0-9]{40}$/, 'Malformed packed gitHead');
     assert.equal(pkg.gitHead, approval.commit);
   }
 }
@@ -303,6 +398,10 @@ export function validateGates(report, approval, artifact) {
   if (approval.localRegression) assert.deepEqual(report.localRegression, approval.localRegression);
   assert.equal(report.commit, approval.commit);
   sameDigests(report.artifact, artifact);
+  validateProducerAdvisories(report.gates?.['producer-advisories'], {
+    version: subject.version, source: report.source, checks: report.sourceChecks, complete: true,
+  });
+  if (requiresProducerAdvisoryEvidence(subject.version)) assert.equal(report.source.commit, approval.commit);
   for (const name of REQUIRED_GATES) {
     const gate = report.gates?.[name];
     validateGateStatus(name, gate);
@@ -341,8 +440,17 @@ export function validateCi(run, jobs, approval) {
   assert.equal(run.status, 'completed');
   assert.equal(run.conclusion, 'success');
   const required = ['Lockfiles resolve to the public registry', 'ui'];
-  for (const os of ['ubuntu-latest', 'windows-latest', 'macos-latest']) {
+  // A stock hosted Windows runner signs in as the built-in Administrator, so its own context cannot
+  // host the ordinary user-runtime contract. That lane provisions a disposable standard account and
+  // runs every registered file except the four that bind a real interactive logon session, which
+  // remain required from the local ordinary-session gate.
+  for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) required.push(`test (${os}, ${node})`);
+  }
+  // The 1.x line predates that lane and still runs its suite on the hosted Windows runner.
+  const legacy = releaseRole(approval.version) === 'legacy';
+  for (const node of [20, 22, 24]) {
+    required.push(legacy ? `test (windows-latest, ${node})` : `windows-ordinary (${node})`);
   }
   for (const name of required) {
     const matches = jobs.filter(job => job.name === name);
@@ -396,7 +504,7 @@ export function validateTransfer(runInfo, jobs, metadata, approval) {
     assert.equal(matches[0].conclusion, 'success');
     assert.equal(matches[0].head_sha, approval.commit);
   }
-  assert.ok(!jobs.some(job => job.name === 'stage' &&
+  assert.ok(!jobs.some(job => ['stage', 'sign-bootstrap', 'publish-bootstrap'].includes(job.name) &&
     job.conclusion !== 'skipped'), 'Artifacts must come from a prepare-only run');
   assert.equal(String(metadata.id), String(artifact.artifactId));
   assert.equal(metadata.expired, false);
@@ -443,9 +551,7 @@ export async function submitOnce({ approval, bytes, readRegistry, execute, recon
   assert.equal(typeof result?.stdout, 'string', 'Actual captured stage child output required');
   const item = npm12Contents(result.stdout, approval, bytes, true);
   const capture = result.capture;
-  assert.ok(capture &&
-    typeof capture === 'object', 'Actual stage capture required');
-  assert.deepEqual(Object.keys(capture).sort(), ['bundleSha256', 'receiptSha256', 'stageId']);
+  exactKeys(capture, ['stageId', 'receiptSha256', 'bundleSha256'], 'actual stage capture');
   assert.equal(capture.stageId, item.stageId, 'CLI stage ID differs from the actual POST response');
   for (const key of ['receiptSha256', 'bundleSha256']) assert.match(capture[key], /^[a-f0-9]{64}$/);
   await record({ status: 'submitted-awaiting-owner-verification', stageId: item.stageId,

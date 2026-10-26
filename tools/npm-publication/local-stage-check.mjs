@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { localHash } from './local-regression.mjs';
+import { localHash, releaseRole } from './local-regression.mjs';
 import { STAGE_SCENARIOS, STAGE_CHILD_TIMEOUT, proofFiles, stageChildArgs, stageProofExit,
   validateStageProof } from './stage-proof-contract.mjs';
 import { validateStageLoader } from './stage-loader.mjs';
@@ -29,7 +29,7 @@ export function runStageProof({ cli, home, root = ROOT, node = process.execPath,
   mkdirSync(home, { mode: 0o700 });
   home = realpathSync.native(home);
   const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
-  assert.ok(['1.3.1', '2.0.1'].includes(version));
+  releaseRole(version);
   const npmRoot = resolve(dirname(cli), '..');
   const pins = JSON.parse(readFileSync(join(root, 'tools/npm-publication/stage-sdk-pins.json')));
   for (const [path, hash] of Object.entries(pins)) {

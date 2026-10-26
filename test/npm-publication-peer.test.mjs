@@ -10,15 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { POLICY, REQUIRED_GATES, digest, validateApproval, validateTransfer } from '../tools/npm-publication/policy.mjs';
+import { syntheticRegistrySourceProof } from './helpers/npm-publication-candidate-fixture.mjs';
+import { PeerTufTransport, PEER_PROOF_LIMITS, peerTufUrl, verifyRegistrySource } from '../tools/npm-publication/provenance.mjs';
+import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
 import { MATRIX } from '../tools/npm-publication/matrix.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
-import {
-  downloadPeer, validatePeerApproval, validatePeerRun, validatePeerBundle,
-  validatePublishedPeer, PUBLISHED_PEER_LIMITS,
-} from '../tools/npm-publication/peer.mjs';
-import { validatePreparedLocal, validateLocalManifest } from '../tools/npm-publication/local-regression.mjs';
-import { StageFixture } from './helpers/npm-publication-candidate-fixture.mjs';
+import { downloadPeer, validatePeerApproval, validatePeerRun, validatePeerBundle,
+  validatePublishedPeer, PUBLISHED_PEER_LIMITS } from '../tools/npm-publication/peer.mjs';
 
 // Fixtures only: even an accidentally uninjected reader cannot reach GitHub.
 beforeEach(t => t.mock.method(globalThis, 'fetch', async () => {
@@ -52,7 +50,7 @@ class Fixture {
     });
     this.peer = this.approval.peerArtifact = {
       artifactId: '400', runId: '200', runAttempt: 1,
-      version: version === '2.0.1' ? '1.3.1' : '2.0.1',
+      version: version.startsWith('2.') ? '1.3.1' : '2.0.1',
       tagObject: gitHash('d'), commit: gitHash('e'), tree: gitHash('f'),
     };
     this.peer.ref = `refs/tags/${namespaces.peer ?? ''}v${this.peer.version}`;
@@ -120,11 +118,11 @@ class Fixture {
       steps: steps.map(name => ({ name, status: 'completed', conclusion: 'success' })) };
   }
 
-  tarball(changePackage = () => {}) {
+  tarball(change = () => {}) {
     const pkg = { name: POLICY.name, version: this.peer.version,
       repository: { url: `git+https://github.com/${POLICY.repository}.git` },
       dependencies: { 'smol-toml': '^1.8.0' }, files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt'] };
-    changePackage(pkg);
+    change(pkg);
     const files = { 'package.json': JSON.stringify(pkg), LICENSE: 'MIT', 'README.md': 'fixture',
       'bin/cli.mjs': 'never executed', 'bin/mcp-bridge.mjs': 'never executed', 'ui/dist/index.html': 'fixture',
       'THIRD_PARTY_NOTICES.txt': 'fixture', 'ui/dist/THIRD_PARTY_NOTICES.txt': 'fixture',
@@ -200,366 +198,6 @@ class Fixture {
   }
 }
 
-class PublishedFixture extends Fixture {
-  constructor(t) {
-    super(t, '1.3.1');
-    this.peer = this.approval.peerArtifact = {
-      kind: 'npm-registry-published', version: this.peer.version,
-      commit: this.peer.commit, tree: this.peer.tree, ...digest(this.bytes),
-    };
-    this.registry = {
-      name: POLICY.name, maintainers: [{ name: POLICY.owner }], 'dist-tags': { latest: '2.0.1' },
-      versions: { '2.0.1': { name: POLICY.name, version: '2.0.1', gitHead: this.peer.commit,
-        dist: { tarball: `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-2.0.1.tgz`,
-          integrity: this.peer.integrity, shasum: createHash('sha1').update(this.bytes).digest('hex') } } },
-    };
-    this.responses = new Map([
-      [`${POLICY.registry}${POLICY.name}`, () => JSON.stringify(this.registry)],
-      [`https://api.github.com/repos/${POLICY.repository}/git/commits/${this.peer.commit}`,
-        () => JSON.stringify(this.commit)],
-      [this.registry.versions['2.0.1'].dist.tarball, () => this.bytes],
-    ]);
-    this.requests = [];
-    this.fetcher = async (url, options) => {
-      this.requests.push({ url, options });
-      assert.ok(this.responses.has(url), `Unexpected anonymous URL: ${url}`);
-      return new Response(this.responses.get(url)());
-    };
-  }
-
-  options() {
-    return { ...super.options(), fetcher: this.fetcher };
-  }
-
-  stageControl() {
-    const bytes = this.tarball(pkg => { pkg.version = this.approval.version; });
-    const gates = { schemaVersion: 1, commit: this.approval.commit, artifact: digest(bytes),
-      localRegression: this.approval.localRegression,
-      gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, { status: 'passed',
-        evidence: [{ description: 'SYNTHETIC independent gate response', sha256: hash('synthetic') }] }])) };
-    const manifest = syntheticPreparedLocal({
-      schemaVersion: 1, phase: 'prepared-not-staged', name: POLICY.name, version: this.approval.version, channel: 'legacy',
-      source: Object.fromEntries(['ref', 'tagObject', 'commit', 'tree'].map(key => [key, this.approval[key]])),
-      workflow: { ref: this.env.GITHUB_WORKFLOW_REF, commit: this.approval.commit,
-        runId: this.env.GITHUB_RUN_ID, attempt: 1 },
-      ci: { runId: this.approval.ciRunId, attempt: this.approval.ciAttempt },
-      artifact: { ...digest(bytes), files: inspectTarball(bytes, this.approval).files },
-      gateReportSha256: hash(`${JSON.stringify(gates, null, 2)}\n`),
-    }, this.approval);
-    const jobs = MATRIX.map(lane => ({ name: lane.jobName, status: 'completed',
-      conclusion: 'success', head_sha: this.approval.commit }));
-    return new StageFixture(this.approval, bytes, manifest, gates, files => this.zip(files), jobs);
-  }
-}
-
-test('Already-published 2.0.1 resolves directly as T32-only peer without a hosted seed', async t => {
-  const f = new PublishedFixture(t);
-  const result = await downloadPeer(f.options());
-  assert.deepEqual(readFileSync(result.tarball), f.bytes);
-  assert.equal(result.prepared, undefined);
-  assert.deepEqual(result.comparison, { version: f.peer.version, artifact: digest(f.bytes) });
-  assert.equal(result.evidence.origin, 'npm-registry-published');
-  assert.equal(result.evidence.purpose, 'service-comparison-only');
-  assert.equal(result.evidence.stageEligible, false);
-  assert.deepEqual(f.calls, [], 'Published bytes must not impersonate hosted artifact readers');
-  assert.equal(f.requests.length, 3);
-});
-
-test('Published peer uses late-bound anonymous bounded readers and reports absent provenance honestly', async t => {
-  const f = new PublishedFixture(t);
-  t.mock.method(globalThis, 'fetch', f.fetcher);
-  const result = await downloadPeer({ approval: f.approval, env: f.env, directory: f.directory });
-  for (const { options } of f.requests) {
-    assert.equal(options.method, 'GET');
-    assert.equal(options.credentials, 'omit');
-    assert.equal(options.redirect, 'error');
-    assert.equal(options.cache, 'no-store');
-    assert.ok(options.signal instanceof AbortSignal);
-    assert.deepEqual(Object.keys(options.headers), ['accept']);
-  }
-  assert.deepEqual(result.evidence.provenance, { status: 'absent', verification: 'not-performed' });
-  assert.equal(result.evidence.registrySignatures, 'not-verified-by-this-read');
-  for (const key of ['prepared', 'workflow', 'runId', 'artifactId', 'sourcePassed', 'matrixPassed',
-    'consumerJobs', 'finalizerNotRequired', 'stageId']) {
-    assert.equal(result[key], undefined);
-    assert.equal(result.evidence[key], undefined);
-  }
-  assert.deepEqual(readdirSync(f.directory), ['peer.tgz']);
-  assert.doesNotMatch(JSON.stringify(result), /fixture-token/);
-});
-
-test('Present registry provenance is recorded, not claimed as verified', t => {
-  const f = new PublishedFixture(t);
-  f.registry.versions['2.0.1'].dist.attestations = { provenance: { predicateType: 'https://slsa.dev/provenance/v1' } };
-  const result = validatePublishedPeer({ ...f.options(), packument: f.registry, commit: f.commit, bytes: f.bytes });
-  assert.deepEqual(result.evidence.provenance, { status: 'present', verification: 'not-performed' });
-});
-
-const publishedApprovalFailures = [
-  ['kind missing', f => { delete f.peer.kind; }],
-  ['unknown kind', f => { f.peer.kind = 'prepared'; }],
-  ['same line', f => { f.peer.version = '1.3.1'; }],
-  ['future version', f => { f.peer.version = '2.0.2'; }],
-  ['historical version', f => { f.peer.version = '2.0.0'; }],
-  ...['commit', 'tree', 'sha256', 'sha512', 'integrity'].map(key =>
-    [`missing ${key}`, f => { delete f.peer[key]; }]),
-  ['wrong qualified commit', f => { f.peer.commit = '1'.repeat(40); }],
-  ['wrong qualified tree', f => { f.peer.tree = '2'.repeat(40); }],
-  ['inconsistent SRI', f => { f.peer.sha512 = 'a'.repeat(128); }],
-  ['expired local review', f => { f.approval.localRegressionReview.reviewedAt = new Date(0).toISOString(); }],
-  ['unreviewed statement', f => { f.approval.localRegression.reportSha256 = 'f'.repeat(64); }],
-  ['wrong own source', f => { f.approval.commit = '0'.repeat(40); }],
-  ['stage scope', f => { f.approval.scope = 'stage'; }],
-  ['source CI string', f => { f.approval.ciAttempt = '2'; }],
-  ['collection rerun', f => { f.env = { ...f.env, GITHUB_RUN_ATTEMPT: '2' }; }],
-  ...['artifactId', 'runId', 'runAttempt', 'manifestSha256', 'artifactDigest', 'ref', 'tagObject',
-    'prepared', 'stageEligible', 'purpose', 'provenance', 'unexpected'].map(key =>
-    [`extra ${key}`, f => { f.peer[key] = 'unapproved'; }]),
-];
-for (const [name, corrupt] of publishedApprovalFailures) {
-  test(`published approval rejects before I/O: ${name}`, async t => {
-    const f = new PublishedFixture(t);
-    corrupt(f);
-    await assert.rejects(downloadPeer(f.options()));
-    assert.deepEqual(f.calls, []);
-    assert.deepEqual(f.requests, []);
-    assert.equal(existsSync(f.directory), false);
-  });
-}
-
-const publishedRegistryFailures = [
-  ['package name', f => { f.registry.name = 'other'; }],
-  ['missing owner', f => { f.registry.maintainers = []; }],
-  ['missing versions', f => { delete f.registry.versions; }],
-  ['missing peer version', f => { delete f.registry.versions['2.0.1']; }],
-  ['already published candidate', f => { f.registry.versions['1.3.1'] = {}; }],
-  ['changed latest', f => { f.registry['dist-tags'].latest = '2.0.2'; }],
-  ['extra tag', f => { f.registry['dist-tags'].legacy = '1.3.0'; }],
-  ['missing tag', f => { f.registry['dist-tags'] = {}; }],
-  ['deprecated package', f => { f.registry.deprecated = ''; }],
-  ['deprecated version', f => { f.registry.versions['2.0.1'].deprecated = 'no longer supported'; }],
-  ...['name', 'version', 'gitHead'].map(key => [key, f => { f.registry.versions['2.0.1'][key] = 'different'; }]),
-  ['integrity', f => { f.registry.versions['2.0.1'].dist.integrity = 'sha512-wrong'; }],
-  ...['http://registry.npmjs.org/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz',
-    'https://registry.npmjs.org.evil.invalid/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz',
-    'https://registry.npmjs.org/mcp-pacemaker/-/other.tgz',
-    'https://registry.npmjs.org:443/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz',
-    'https://registry.npmjs.org/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz?token=synthetic',
-    'https://registry.npmjs.org/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz#fragment',
-    'https://user@registry.npmjs.org/mcp-pacemaker/-/mcp-pacemaker-2.0.1.tgz',
-    'https://registry.npmjs.org/mcp-pacemaker/-/../-/mcp-pacemaker-2.0.1.tgz'].map((url, index) =>
-    [`noncanonical tarball ${index}`, f => { f.registry.versions['2.0.1'].dist.tarball = url; }]),
-];
-for (const [name, corrupt] of publishedRegistryFailures) {
-  test(`published registry rejects before tarball download: ${name}`, async t => {
-    const f = new PublishedFixture(t);
-    corrupt(f);
-    await assert.rejects(downloadPeer(f.options()));
-    assert.equal(f.requests.length, 1);
-    assert.equal(existsSync(f.directory), false);
-  });
-}
-
-for (const key of ['sha', 'tree']) {
-  test(`published GitHub ${key} mismatch rejects before tarball download`, async t => {
-    const f = new PublishedFixture(t);
-    f.commit[key] = key === 'sha' ? '1'.repeat(40) : { sha: '1'.repeat(40) };
-    await assert.rejects(downloadPeer(f.options()));
-    assert.equal(f.requests.length, 2);
-    assert.equal(existsSync(f.directory), false);
-  });
-}
-
-test('Actual published digest, shasum and archive inspection cannot be replaced by approval metadata', async t => {
-  for (const corrupt of [
-    f => { f.bytes = Buffer.from('tampered'); },
-    f => { f.registry.versions['2.0.1'].dist.shasum = 'f'.repeat(40); },
-    f => {
-      f.bytes = Buffer.from('digest-approved but not a tarball');
-      Object.assign(f.peer, digest(f.bytes));
-      Object.assign(f.registry.versions['2.0.1'].dist, {
-        integrity: f.peer.integrity, shasum: createHash('sha1').update(f.bytes).digest('hex'),
-      });
-    },
-  ]) {
-    const f = new PublishedFixture(t);
-    corrupt(f);
-    await assert.rejects(downloadPeer(f.options()));
-    assert.equal(existsSync(f.directory), false);
-  }
-});
-
-test('Published tarball package identity, source and lifecycle policy remain mandatory after digest matching', async t => {
-  for (const change of [
-    pkg => { pkg.name = 'other'; },
-    pkg => { pkg.version = '2.0.2'; },
-    pkg => { pkg.repository.url = 'git+https://github.com/other/other.git'; },
-    pkg => { pkg.gitHead = '0'.repeat(40); },
-    pkg => { pkg.scripts = { preinstall: 'unreviewed' }; },
-    pkg => { pkg.files = ['bin/']; },
-  ]) {
-    const f = new PublishedFixture(t);
-    f.bytes = f.tarball(change);
-    Object.assign(f.peer, digest(f.bytes));
-    Object.assign(f.registry.versions['2.0.1'].dist, {
-      integrity: f.peer.integrity, shasum: createHash('sha1').update(f.bytes).digest('hex'),
-    });
-    await assert.rejects(downloadPeer(f.options()));
-    assert.equal(existsSync(f.directory), false);
-  }
-});
-
-for (const status of [301, 302, 303, 307, 308, 404, 429, 500]) {
-  test(`published peer refuses HTTP ${status} without retry or redirect`, async t => {
-    const f = new PublishedFixture(t);
-    let calls = 0;
-    await assert.rejects(downloadPeer({ ...f.options(), fetcher: async () => {
-      calls++;
-      return new Response(null, { status, headers: { location: 'https://other.invalid/' } });
-    } }));
-    assert.equal(calls, 1);
-    assert.equal(existsSync(f.directory), false);
-  });
-}
-
-test('Every published read enforces declared and streamed size, JSON encoding and final URL', async t => {
-  for (const target of [0, 1, 2]) {
-    for (const failure of ['declared-size', 'streamed-size', 'redirected', 'url', 'body-error',
-      ...(target < 2 ? ['malformed-json', 'invalid-utf8'] : [])]) {
-      const f = new PublishedFixture(t);
-      let calls = 0;
-      const limit = target === 2 ? PUBLISHED_PEER_LIMITS.tarballBytes : PUBLISHED_PEER_LIMITS.metadataBytes;
-      const fetcher = async (url, options) => {
-        if (calls++ !== target) return f.fetcher(url, options);
-        if (failure === 'declared-size') return new Response('', { headers: { 'content-length': String(limit + 1) } });
-        if (failure === 'streamed-size') return new Response(new Uint8Array(limit + 1));
-        if (failure === 'malformed-json') return new Response('{');
-        if (failure === 'invalid-utf8') return new Response(new Uint8Array([255]));
-        if (failure === 'body-error') return new Response(new ReadableStream({
-          start(controller) { controller.error(new Error('Synthetic broken stream')); },
-        }));
-        const response = await f.fetcher(url, options);
-        Object.defineProperty(response, failure === 'redirected' ? 'redirected' : 'url',
-          { value: failure === 'redirected' ? true : 'https://other.invalid/' });
-        return response;
-      };
-      await assert.rejects(downloadPeer({ ...f.options(), fetcher }), `${target}/${failure}`);
-      assert.equal(calls, target + 1);
-      assert.equal(existsSync(f.directory), false);
-    }
-  }
-});
-
-test('Published response deadlines cover both pending headers and stalled body reads', async t => {
-  for (const body of [false, true]) {
-    const f = new PublishedFixture(t);
-    let signal;
-    const fetcher = async (_url, options) => {
-      signal = options.signal;
-      if (!body) return new Promise((_, reject) =>
-        signal.addEventListener('abort', () => reject(new Error('Synthetic aborted headers')), { once: true }));
-      return new Response(new ReadableStream({
-        start(controller) {
-          signal.addEventListener('abort', () => controller.error(new Error('Synthetic aborted stream')), { once: true });
-        },
-      }));
-    };
-    await assert.rejects(downloadPeer({ ...f.options(), fetcher, timeoutMs: 10 }), /deadline|aborted/);
-    assert.equal(signal.aborted, true);
-    assert.equal(existsSync(f.directory), false);
-  }
-});
-
-test('Published response deadline override can only tighten the production bound', async t => {
-  const f = new PublishedFixture(t);
-  for (const timeoutMs of [0, -1, '1', 1.5, Infinity, PUBLISHED_PEER_LIMITS.timeoutMs + 1]) {
-    await assert.rejects(downloadPeer({ ...f.options(), timeoutMs }), /deadline/);
-  }
-  assert.deepEqual(f.requests, []);
-  assert.equal(existsSync(f.directory), false);
-});
-
-test('Published reads snapshot approval and recheck exclusive destination before writing', async t => {
-  const f = new PublishedFixture(t);
-  const approvedDigest = f.peer.sha256;
-  const fetcher = async (url, options) => {
-    f.peer.sha256 = '0'.repeat(64);
-    return f.fetcher(url, options);
-  };
-  const result = await downloadPeer({ ...f.options(), fetcher });
-  assert.equal(result.evidence.sha256, approvedDigest);
-  await assert.rejects(downloadPeer(f.options()), /exist|digest|mismatch/i);
-  assert.deepEqual(readFileSync(result.tarball), f.bytes);
-  const contender = new PublishedFixture(t);
-  await assert.rejects(downloadPeer({ ...contender.options(), fetcher: async (url, options) => {
-    const response = await contender.fetcher(url, options);
-    if (url.endsWith('.tgz')) {
-      mkdirSync(contender.directory);
-      writeFileSync(join(contender.directory, 'peer.tgz'), 'contender');
-    }
-    return response;
-  } }), /exist/i);
-  assert.equal(readFileSync(join(contender.directory, 'peer.tgz'), 'utf8'), 'contender');
-});
-
-test('Candidate manifest positive control distinguishes valid stage approval from peer rejection', t => {
-  const f = new PublishedFixture(t);
-  const control = f.stageControl();
-  assert.doesNotThrow(() => control.validate());
-  const brokenApproval = structuredClone(control.approval);
-  delete brokenApproval.ownerPreflight.privateContentReview.localRegression;
-  assert.throws(() => validateLocalManifest(Buffer.from(control.files['manifest.json']), brokenApproval),
-    error => /Missing local regression object/.test(error.message) &&
-      error.stack.includes('validateLocalReview'));
-  const peerBytes = Buffer.from(JSON.stringify(f.peer));
-  assert.throws(() => validateLocalManifest(peerBytes, { ...brokenApproval,
-    artifact: { ...brokenApproval.artifact, manifestSha256: hash(peerBytes) } }),
-  error => /Missing local regression object/.test(error.message) &&
-    error.stack.includes('validateLocalReview'));
-});
-
-test('Published comparison cannot supply hosted peer, candidate transfer, manifest or stage authorization', async t => {
-  const f = new PublishedFixture(t);
-  const result = await downloadPeer(f.options());
-  const control = f.stageControl();
-  control.validate();
-  assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }), /no hosted run/);
-  assert.throws(() => validatePeerBundle(f.bundle()), /no prepared bundle/);
-  for (const value of [f.peer, result.evidence, result.comparison, result]) {
-    validatePreparedLocal(control.manifest, control.approval);
-    assert.throws(() => validatePreparedLocal(value, control.approval), /local regression/);
-    const bytes = Buffer.from(JSON.stringify(value));
-    const stage = { ...control.approval, artifact: { ...control.approval.artifact, manifestSha256: hash(bytes) } };
-    assert.throws(() => validateLocalManifest(bytes, stage),
-      error => /Missing local regression object/.test(error.message) &&
-        error.stack.includes('validatePreparedLocal') &&
-        !error.stack.includes('validateLocalReview'));
-  }
-  for (const marker of [f.peer, result.evidence]) {
-    const stage = { ...control.approval, artifact: { ...control.approval.artifact, ...marker } };
-    assert.throws(() => validateApproval(stage, 'stage'), /comparison-only/);
-    assert.throws(() => validateTransfer(control.run, control.jobs, control.metadata, stage), /comparison-only/);
-  }
-  control.validate();
-});
-
-test('Peer module imports with all external I/O denied and without reading global fetch at load', () => {
-  const script = `
-    import assert from 'node:assert/strict';
-    import { createRequire } from 'node:module';
-    const require = createRequire(import.meta.url);
-    const attempts = require('./tools/npm-publication/offline-stage/deny.cjs');
-    Object.defineProperty(globalThis, 'fetch', { configurable: true, get() {
-      throw new Error('Global fetch read at module load');
-    } });
-    await import('./tools/npm-publication/peer.mjs');
-    assert.deepEqual(attempts, []);
-  `;
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script],
-    { cwd: root, encoding: 'utf8', timeout: 30_000 });
-  assert.equal(result.status, 0, result.stderr);
-});
-
 for (const version of ['1.3.1', '2.0.1']) {
   test(`downloads only unchanged opposite PATCH bytes from a failed prior finalizer: ${version}`, async t => {
     const f = new Fixture(t, version);
@@ -592,8 +230,8 @@ for (const version of ['1.3.1', '2.0.1']) {
 }
 
 for (const version of ['1.3.1', '2.0.1']) {
-  for (const namespaces of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/'].flatMap(current =>
-    ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/'].map(peer => ({ current, peer })))) {
+  for (const namespaces of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].flatMap(current =>
+    ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(peer => ({ current, peer })))) {
     test(`peer transfer preserves exact refs: ${version} ${JSON.stringify(namespaces)}`, async t => {
       const f = new Fixture(t, version, tmpdir(), namespaces);
       assert.deepEqual(validatePeerApproval(f.approval, f.env), f.peer);
@@ -609,7 +247,7 @@ for (const version of ['1.3.1', '2.0.1']) {
 }
 
 test('peer approval cannot relabel an existing source artifact into another publication namespace', t => {
-  for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/']) {
+  for (const namespace of ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/']) {
     const f = new Fixture(t);
     f.peer.ref = `refs/tags/${namespace}v${f.peer.version}`;
     assert.throws(() => validatePeerBundle(f.bundle()));
@@ -651,33 +289,6 @@ for (const [name, corrupt] of approvalFailures) {
     assert.equal(existsSync(f.directory), false);
   });
 }
-
-test('peer preparation accepts only skipped current-line bootstrap jobs', t => {
-  const f = new Fixture(t);
-  f.jobs.push(
-    { ...f.job('sign-bootstrap', 510), conclusion: 'skipped' },
-    { ...f.job('publish-bootstrap', 511), conclusion: 'skipped' },
-  );
-  assert.equal(validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }).matrixPassed, true);
-});
-
-for (const name of ['sign-bootstrap', 'publish-bootstrap']) {
-  for (const outcome of ['success', 'failure', 'cancelled', 'running']) {
-    test(`peer preparation rejects ${name} ${outcome}`, t => {
-      const f = new Fixture(t);
-      f.jobs.push({ ...f.job(name, 510),
-        status: outcome === 'running' ? 'in_progress' : 'completed',
-        conclusion: outcome === 'running' ? 'skipped' : outcome });
-      assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }));
-    });
-  }
-}
-
-test('peer preparation still rejects an unknown skipped job', t => {
-  const f = new Fixture(t);
-  f.jobs.push({ ...f.job('unknown-bootstrap', 510), conclusion: 'skipped' });
-  assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }));
-});
 
 const bindingFailures = [
   ['run id', f => { f.run.id++; }],
@@ -917,4 +528,415 @@ test('default readers use authenticated GitHub reads but never forward auth to Z
   const result = await downloadPeer({ approval: f.approval, env: f.env, directory: f.directory });
   assert.equal(calls.length, 8);
   assert.doesNotMatch(JSON.stringify(result.evidence), /secret|signed.invalid|fixture-token/);
+});
+
+class PublishedFixture extends Fixture {
+  constructor(t, version = '2.0.2') {
+    super(t, version);
+    this.peer = this.approval.peerArtifact = {
+      kind: 'npm-registry-published', version: this.peer.version,
+      commit: this.peer.commit, tree: this.peer.tree, ...digest(this.bytes),
+    };
+    this.approval.expectedDistTags = { latest: '2.0.1', legacy: '1.3.1' };
+    this.published = { name: POLICY.name, version: this.peer.version, gitHead: this.peer.commit,
+      dist: { tarball: `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${this.peer.version}.tgz`,
+        integrity: this.peer.integrity, shasum: createHash('sha1').update(this.bytes).digest('hex') } };
+    this.registry = { name: POLICY.name, maintainers: [{ name: POLICY.owner }],
+      'dist-tags': { ...this.approval.expectedDistTags }, versions: { [this.peer.version]: this.published } };
+    this.responses = new Map([
+      [`${POLICY.registry}${POLICY.name}`, () => JSON.stringify(this.registry)],
+      [`https://api.github.com/repos/${POLICY.repository}/git/commits/${this.peer.commit}`, () => JSON.stringify(this.commit)],
+      [this.published.dist.tarball, () => this.bytes],
+    ]);
+    this.requests = [];
+    this.fetcher = async (url, options) => {
+      this.requests.push({ url, options });
+      assert.ok(this.responses.has(url), `Unexpected synthetic URL: ${url}`);
+      return new Response(this.responses.get(url)());
+    };
+  }
+  options() { return { ...super.options(), fetcher: this.fetcher }; }
+
+  declareSourceProof() {
+    this.peer.sourceProof = { kind: 'registry-slsa-v1',
+      ref: `refs/tags/npm-r27/v${this.peer.version}`, runId: '777', runAttempt: 1 };
+    this.published.dist.attestations = {
+      url: `${POLICY.registry}-/npm/v1/attestations/${POLICY.name}@${this.peer.version}`,
+      provenance: { predicateType: 'https://slsa.dev/provenance/v1' },
+    };
+    this.attestations = syntheticRegistrySourceProof(this.peer, this.env);
+    this.responses.set(this.published.dist.attestations.url, () => JSON.stringify(this.attestations));
+  }
+}
+
+test('Declared sourceProof admits absent registry gitHead only after exact cryptographic verification', async t => {
+  const f = new PublishedFixture(t);
+  f.declareSourceProof();
+  delete f.published.gitHead;
+  let verified = 0;
+  const result = await downloadPeer({ ...f.options(), verifyBundle: async (bundle, options) => {
+    verified++;
+    assert.deepEqual(bundle, f.attestations.attestations[0].bundle);
+    assert.equal(options.certificateIssuer, 'https://token.actions.githubusercontent.com');
+    assert.equal(options.ctLogThreshold, 1);
+    assert.equal(options.tlogThreshold, 1);
+    const identity = `https://github.com/${POLICY.repository}/${POLICY.workflow}@${f.peer.sourceProof.ref}`;
+    assert.ok(new RegExp(options.certificateIdentityURI).test(identity));
+    assert.ok(!new RegExp(options.certificateIdentityURI).test(`${identity}-other`));
+  } });
+  assert.equal(verified, 1);
+  assert.equal(result.evidence.provenance.verification, 'cryptographically-verified');
+  assert.equal(result.evidence.stageEligible, false);
+  assert.equal(result.evidence.registrySignatures, 'not-verified-by-this-read');
+});
+
+for (const version of ['2.0.2', '2.7.13', '1.3.2']) {
+  test(`SYNTHETIC published peer for ${version} is immutable comparison-only input`, async t => {
+    const f = new PublishedFixture(t, version);
+    const result = await downloadPeer(f.options());
+    assert.deepEqual(readFileSync(result.tarball), f.bytes);
+    assert.deepEqual(result.comparison, { version: f.peer.version, artifact: digest(f.bytes) });
+    assert.equal(result.evidence.origin, 'npm-registry-published');
+    assert.equal(result.evidence.stageEligible, false);
+    assert.equal(result.evidence.purpose, 'service-comparison-only');
+    assert.deepEqual(result.evidence.provenance, { status: 'absent', verification: 'not-performed' });
+    assert.equal(result.evidence.registrySignatures, 'not-verified-by-this-read');
+    for (const key of ['prepared', 'workflow', 'runId', 'artifactId', 'consumerJobs', 'stageId']) {
+      assert.equal(result[key], undefined);
+      assert.equal(result.evidence[key], undefined);
+    }
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.requests.length, 3);
+    for (const { options } of f.requests) {
+      assert.equal(options.credentials, 'omit');
+      assert.equal(options.redirect, 'error');
+      assert.equal(options.cache, 'no-store');
+      assert.deepEqual(Object.keys(options.headers), ['accept']);
+    }
+    assert.throws(() => validatePeerRun({ ...f.options(), run: f.run, jobs: f.jobs }), /no hosted run/);
+    assert.throws(() => validatePeerBundle(f.bundle()), /no prepared bundle/);
+    f.published.dist.attestations = { provenance: {} };
+    assert.deepEqual((await validatePublishedPeer({ ...f.options(), packument: f.registry, commit: f.commit,
+      bytes: f.bytes })).evidence.provenance, { status: 'present', verification: 'not-performed' });
+  });
+}
+
+test('Published peer rejects conflicting approvals before I/O', async t => {
+  for (const mutate of [
+    f => { f.peer.kind = 'unknown'; }, f => { f.peer.version = '2.0.3'; },
+    f => { f.peer.version = '3.0.1'; }, f => { f.peer.version = '1.3.2'; },
+    f => { f.peer.commit = '0'.repeat(40); }, f => { f.peer.tree = '0'.repeat(40); },
+    f => { f.peer.sha512 = '0'.repeat(128); }, f => { f.peer.sha256 = 'invalid'; },
+    f => { f.peer.runId = '123'; }, f => { delete f.approval.expectedDistTags; },
+    f => { f.approval.ciAttempt = '2'; }, f => { f.env = { ...f.env, GITHUB_RUN_ATTEMPT: '2' }; },
+    f => { f.approval.localRegressionReview.reviewedAt = new Date(0).toISOString(); },
+  ]) {
+    const f = new PublishedFixture(t);
+    mutate(f);
+    await assert.rejects(downloadPeer(f.options()));
+    assert.deepEqual(f.requests, []);
+    assert.equal(existsSync(f.directory), false);
+  }
+});
+
+test('Published peer fails exact registry, source, byte and payload conflicts without fallback', async t => {
+  for (const mutate of [
+    f => { f.registry.name = 'other'; }, f => { f.registry.maintainers = []; },
+    f => { f.registry.versions[f.approval.version] = {}; }, f => { f.registry['dist-tags'].latest = '2.0.3'; },
+    f => { f.registry.deprecated = ''; }, f => { f.published.deprecated = ''; },
+    ...['name', 'version', 'gitHead'].map(key => f => { f.published[key] = 'wrong'; }),
+    f => { f.published.dist.integrity = 'wrong'; }, f => { f.published.dist.shasum = '0'.repeat(40); },
+    f => { f.commit.sha = '0'.repeat(40); }, f => { f.commit.tree.sha = '0'.repeat(40); },
+    f => { f.bytes = Buffer.from('corrupted'); },
+    ...['http:', 'https://user@', 'https://registry.npmjs.org.evil.invalid/', '?query', '#fragment']
+      .map(suffix => f => { f.published.dist.tarball += suffix; }),
+    ...[pkg => { pkg.version = '1.3.9'; }, pkg => { pkg.scripts = { preinstall: 'forbidden' }; }]
+      .map(change => f => {
+        f.bytes = f.tarball(change);
+        Object.assign(f.peer, digest(f.bytes));
+        Object.assign(f.published.dist, { integrity: f.peer.integrity,
+          shasum: createHash('sha1').update(f.bytes).digest('hex') });
+      }),
+  ]) {
+    const f = new PublishedFixture(t);
+    mutate(f);
+    await assert.rejects(downloadPeer(f.options()));
+    assert.equal(existsSync(f.directory), false);
+  }
+});
+
+test('All published reads enforce status, size, encoding, redirect and deadlines', async t => {
+  for (const target of [0, 1, 2]) {
+    for (const mode of ['status', 'declared-size', 'streamed-size', 'redirected', 'url', 'deadline',
+      ...(target < 2 ? ['json', 'utf8'] : [])]) {
+      const f = new PublishedFixture(t);
+      let calls = 0;
+      const limit = target === 2 ? PUBLISHED_PEER_LIMITS.tarballBytes : PUBLISHED_PEER_LIMITS.metadataBytes;
+      const fetcher = async (url, options) => {
+        if (calls++ !== target) return f.fetcher(url, options);
+        if (mode === 'status') return new Response(null, { status: 302 });
+        if (mode === 'declared-size') return new Response('', { headers: { 'content-length': String(limit + 1) } });
+        if (mode === 'streamed-size') return new Response(new Uint8Array(limit + 1));
+        if (mode === 'json') return new Response('{');
+        if (mode === 'utf8') return new Response(new Uint8Array([255]));
+        if (mode === 'deadline') return new Response(new ReadableStream({
+          start(controller) { options.signal.addEventListener('abort', () => controller.error(new Error('Synthetic abort'))); },
+        }));
+        const response = await f.fetcher(url, options);
+        Object.defineProperty(response, mode, { value: mode === 'redirected' ? true : 'https://other.invalid/' });
+        return response;
+      };
+      await assert.rejects(downloadPeer({ ...f.options(), fetcher, timeoutMs: 50 }), `${target}/${mode}`);
+      assert.equal(calls, target + 1);
+      assert.equal(existsSync(f.directory), false);
+    }
+  }
+});
+
+test('Peer import has no external I/O or module-load fetch access', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { createRequire } from 'node:module';
+    const attempts = createRequire(import.meta.url)('./tools/npm-publication/offline-stage/deny.cjs');
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, get() { throw new Error('Module-load fetch'); } });
+    await import('./tools/npm-publication/peer.mjs');
+    assert.deepEqual(attempts, []);
+  `], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('Source proof is explicit and cannot select its own trust, source, workflow or run', async t => {
+  for (const change of [
+    proof => { proof.kind = 'verified'; }, proof => { proof.ref = 'refs/tags/v2.0.2'; },
+    proof => { proof.ref = 'refs/tags/npm-r01/v1.3.1'; },
+    proof => { proof.runId = 777; }, proof => { proof.runId = '0777'; },
+    proof => { proof.runId = '7'.repeat(21); }, proof => { proof.runAttempt = 2; },
+    proof => { proof.runAttempt = '1'; },
+    ...['issuer', 'repository', 'workflow', 'commit', 'verified', 'rootPath', 'keySelector', 'result']
+      .map(key => proof => { proof[key] = 'not-approval'; }),
+    proof => { delete proof.ref; },
+  ]) {
+    const f = new PublishedFixture(t);
+    f.declareSourceProof();
+    change(f.peer.sourceProof);
+    await assert.rejects(downloadPeer(f.options()));
+    assert.deepEqual(f.requests, []);
+  }
+  for (const proof of [undefined, null, false, 'verified', {}]) {
+    const f = new PublishedFixture(t);
+    f.peer.sourceProof = proof;
+    await assert.rejects(downloadPeer(f.options()));
+    assert.deepEqual(f.requests, []);
+  }
+});
+
+test('Registry and tarball gitHead contradictions never use the provenance fallback', async t => {
+  for (const target of ['registry', 'tarball']) {
+    for (const value of [null, '', false, 123, {}, '0'.repeat(40), 'A'.repeat(40), 'abc', 'e'.repeat(40) + '\n']) {
+      const f = new PublishedFixture(t);
+      f.declareSourceProof();
+      if (target === 'registry') f.published.gitHead = value;
+      else {
+        f.bytes = f.tarball(pkg => { pkg.gitHead = value; });
+        Object.assign(f.peer, digest(f.bytes));
+        Object.assign(f.published.dist, { integrity: f.peer.integrity,
+          shasum: createHash('sha1').update(f.bytes).digest('hex') });
+        f.attestations = syntheticRegistrySourceProof(f.peer, f.env);
+      }
+      let calls = 0;
+      await assert.rejects(downloadPeer({ ...f.options(), verifyBundle: async () => { calls++; } }));
+      assert.equal(calls, 0);
+      assert.equal(existsSync(f.directory), false);
+    }
+  }
+});
+
+test('Declared source proof is mandatory even with matching gitHead; missing head cannot use metadata alone', async t => {
+  const old = new PublishedFixture(t, '1.3.2');
+  const metadataOnly = await downloadPeer({ ...old.options(), verifyBundle: async () => { assert.fail('Not requested'); } });
+  assert.equal(metadataOnly.evidence.version, '2.0.1');
+  assert.equal(metadataOnly.evidence.provenance.verification, 'not-performed');
+  const missing = new PublishedFixture(t);
+  delete missing.published.gitHead;
+  await assert.rejects(downloadPeer(missing.options()), /sourceProof/);
+  assert.equal(missing.requests.length, 1);
+  for (const message of ['Invalid signature', 'Untrusted certificate', 'Wrong issuer', 'Wrong SAN', 'Missing CT log', 'Missing tlog']) {
+    const f = new PublishedFixture(t);
+    f.declareSourceProof();
+    let calls = 0;
+    await assert.rejects(downloadPeer({ ...f.options(), verifyBundle: async () => {
+      calls++;
+      throw new Error(message);
+    } }), new RegExp(message));
+    assert.equal(calls, 1);
+    assert.equal(existsSync(f.directory), false);
+  }
+});
+
+test('Registry SLSA must bind every approved subject/source/ref/run claim before cryptographic acceptance', async t => {
+  for (const change of [
+    value => { value.subject[0].name = 'pkg:npm/mcp-pacemaker@1.3.2'; },
+    value => { value.subject[0].digest.sha512 = '0'.repeat(128); },
+    value => { value.subject.push(value.subject[0]); },
+    value => { value.predicateType = 'other'; },
+    value => { value.predicate.buildDefinition.buildType = 'other'; },
+    value => { value.predicate.buildDefinition.externalParameters.workflow.ref = 'refs/tags/v1.3.1'; },
+    value => { value.predicate.buildDefinition.externalParameters.workflow.path = '.github/workflows/other.yml'; },
+    value => { value.predicate.buildDefinition.externalParameters.workflow.repository = 'https://github.com/other/repo'; },
+    value => { value.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit = '0'.repeat(40); },
+    value => { value.predicate.buildDefinition.resolvedDependencies[0].uri = 'other'; },
+    value => { value.predicate.buildDefinition.internalParameters.github.event_name = 'push'; },
+    value => { value.predicate.buildDefinition.internalParameters.github.repository_id = '1'; },
+    value => { value.predicate.buildDefinition.internalParameters.github.repository_owner_id = '1'; },
+    value => { value.predicate.runDetails.builder.id = 'self-hosted'; },
+    value => { value.predicate.runDetails.metadata.invocationId = 'https://github.com/girishkvs/mcp-pacemaker/actions/runs/778/attempts/1'; },
+  ]) {
+    const f = new PublishedFixture(t);
+    f.declareSourceProof();
+    const envelope = f.attestations.attestations[0].bundle.dsseEnvelope;
+    const value = JSON.parse(Buffer.from(envelope.payload, 'base64'));
+    change(value);
+    envelope.payload = Buffer.from(JSON.stringify(value)).toString('base64');
+    let calls = 0;
+    await assert.rejects(downloadPeer({ ...f.options(), verifyBundle: async () => { calls++; } }));
+    assert.equal(calls, 0);
+    assert.equal(existsSync(f.directory), false);
+  }
+});
+
+test('Missing, duplicate, malformed and substituted registry attestations are not source proof', async t => {
+  for (const change of [
+    f => { f.attestations = { attestations: [] }; },
+    f => { f.attestations.attestations.push(f.attestations.attestations[0]); },
+    f => { f.attestations = { verified: true, commit: f.peer.commit }; },
+    f => { f.attestations.attestations[0].bundle.dsseEnvelope.payload += '\n'; },
+    f => { f.attestations.attestations[0].bundle.dsseEnvelope.payloadType = 'other'; },
+    f => { f.published.dist.attestations.url += '?override=true'; },
+    f => { f.published.dist.attestations.provenance.predicateType = 'other'; },
+  ]) {
+    const f = new PublishedFixture(t);
+    f.declareSourceProof();
+    change(f);
+    await assert.rejects(downloadPeer({ ...f.options(), verifyBundle: async () => { assert.fail('Must reject first'); } }));
+    assert.equal(existsSync(f.directory), false);
+  }
+});
+
+test('Declared proof verifies the registry bundle as returned and snapshots caller-owned inputs', async t => {
+  const f = new PublishedFixture(t);
+  f.declareSourceProof();
+  const original = structuredClone(f.peer.sourceProof);
+  const result = await downloadPeer({ ...f.options(), verifyBundle: async () => {
+    f.peer.sourceProof.runId = '888';
+    f.registry['dist-tags'].latest = '2.9.9';
+  } });
+  assert.deepEqual(result.evidence.provenance.sourceProof, original);
+  assert.deepEqual(result.evidence.distTags, { latest: '2.0.1', legacy: '1.3.1' });
+  const changed = new PublishedFixture(t);
+  changed.declareSourceProof();
+  await assert.rejects(downloadPeer({ ...changed.options(), verifyBundle: async bundle => {
+    delete bundle.dsseEnvelope.signatures[0].keyid;
+  } }), /changed the registry bundle/);
+  assert.equal(existsSync(changed.directory), false);
+});
+
+test('Pinned peer verifier child has a closed environment, bounded lifetime, bound result and owned cleanup', () => {
+  if (process.versions.node !== POLICY.node) {
+    assert.throws(() => verifyRegistrySource({}), /pinned publisher Node/);
+    return;
+  }
+  const cli = resolve('synthetic-npm-cli.js');
+  let home;
+  const execute = (_node, args, options) => {
+    assert.equal(args[1], '--registry-peer');
+    assert.equal(args[2], cli);
+    assert.equal(options.timeout, PEER_PROOF_LIMITS.verificationMs);
+    assert.equal(options.shell, false);
+    assert.equal(options.maxBuffer, 1024 * 1024);
+    home = options.cwd;
+    assert.equal(options.env.HOME, home);
+    for (const key of ['GITHUB_TOKEN', 'NODE_OPTIONS', 'npm_config_registry', 'NPM_TOKEN']) {
+      assert.equal(options.env[key], undefined);
+    }
+    assert.deepEqual(readdirSync(home), []);
+    return { status: 0, signal: null, stdout: JSON.stringify({
+      status: 'cryptographically-verified', inputSha256: hash(options.input), node: POLICY.node, npm: POLICY.npm,
+      requests: ['https://tuf-repo-cdn.sigstore.dev/timestamp.json'],
+    }), stderr: '' };
+  };
+  const options = { record: { synthetic: true }, bundle: { synthetic: true }, cli,
+    env: { GITHUB_TOKEN: 'synthetic', NODE_OPTIONS: 'synthetic', npm_config_registry: 'https://invalid/' } };
+  verifyRegistrySource({ ...options, execute });
+  assert.equal(existsSync(home), false);
+  assert.equal(existsSync(`${home}.compat-owner`), false);
+  for (const mutate of [
+    result => { result.error = { code: 'ETIMEDOUT' }; },
+    result => { result.signal = 'SIGKILL'; },
+    result => { result.status = 1; },
+    result => { result.stdout = '{'; },
+    result => {
+      const value = JSON.parse(result.stdout);
+      value.inputSha256 = '0'.repeat(64);
+      result.stdout = JSON.stringify(value);
+    },
+  ]) {
+    assert.throws(() => verifyRegistrySource({ ...options, execute: (...args) => {
+      const result = execute(...args);
+      mutate(result);
+      return result;
+    } }));
+    assert.equal(existsSync(home), false);
+    assert.equal(existsSync(`${home}.compat-owner`), false);
+  }
+});
+
+test('TUF transport denies other endpoints, redirects, retries, oversized/stalled responses and request floods', async () => {
+  class HttpError extends Error {
+    constructor(message, statusCode) { super(message); this.statusCode = statusCode; }
+  }
+  const url = 'https://tuf-repo-cdn.sigstore.dev/timestamp.json';
+  for (const invalid of [
+    url.replace('https:', 'http:'), url.replace('sigstore.dev', 'sigstore.dev.evil.invalid'),
+    url.replace('https://', 'https://user@'), url.replace('.dev/', '.dev:443/'),
+    `${url}?query`, `${url}#fragment`, `${url}\n`,
+    'https://tuf-repo-cdn.sigstore.dev/targets/registry.npmjs.org/keys.json',
+    'https://tuf-repo-cdn.sigstore.dev/../timestamp.json',
+    'https://tuf-repo-cdn.sigstore.dev/01.root.json',
+  ]) {
+    const transport = new PeerTufTransport(HttpError, async () => { assert.fail('Unexpected network'); });
+    await assert.rejects(transport.fetch(invalid));
+    assert.equal(transport.requests.length, 0);
+  }
+  for (const status of [301, 302, 303, 307, 308, 403, 429, 500]) {
+    let calls = 0;
+    const transport = new PeerTufTransport(HttpError, async (_url, options) => {
+      calls++;
+      assert.equal(options.redirect, 'error');
+      assert.equal(options.credentials, 'omit');
+      assert.deepEqual(Object.keys(options.headers), ['accept']);
+      return new Response(null, { status });
+    });
+
+    await assert.rejects(transport.fetch(url));
+    assert.equal(calls, 1);
+  }
+  const absent = new PeerTufTransport(HttpError, async () => new Response(null, { status: 404 }));
+  await assert.rejects(absent.fetch('https://tuf-repo-cdn.sigstore.dev/15.root.json'),
+    error => error.statusCode === 404);
+  for (const mode of ['length', 'stream', 'deadline']) {
+    const transport = new PeerTufTransport(HttpError, async (_url, options) => {
+      if (mode === 'length') return new Response('', { headers: { 'content-length': String(PEER_PROOF_LIMITS.bytes + 1) } });
+      if (mode === 'stream') return new Response(new Uint8Array(PEER_PROOF_LIMITS.bytes + 1));
+      return new Response(new ReadableStream({
+        start(controller) { options.signal.addEventListener('abort', () => controller.error(new Error('Synthetic abort'))); },
+      }));
+    }, 50);
+    await assert.rejects(transport.fetch(url));
+  }
+  const bounded = new PeerTufTransport(HttpError, async () => new Response('{}'));
+  for (let index = 0; index < PEER_PROOF_LIMITS.requests; index++) await bounded.fetch(url);
+  await assert.rejects(bounded.fetch(url), /budget/);
+  assert.equal(bounded.requests.length, PEER_PROOF_LIMITS.requests);
+  assert.equal(peerTufUrl('https://tuf-repo-cdn.sigstore.dev/targets/' + 'a'.repeat(64) + '.trusted_root.json'),
+    'https://tuf-repo-cdn.sigstore.dev/targets/' + 'a'.repeat(64) + '.trusted_root.json');
 });

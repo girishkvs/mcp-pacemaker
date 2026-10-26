@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-26
+
+### Fixed
+
+- The bridge no longer crashes when a server exits while a request is being written to it, for
+  example when the server restarts mid-request. The write failed with `EPIPE` and nothing
+  handled the error, so the whole bridge restarted and calls in flight on every server failed.
+  A Streamable HTTP request now gets a "server exited before answering" error, and the bridge
+  keeps running.
+- A crash after startup now leaves its error and stack in `bridge.log`. They went only to
+  stderr, which nothing captures when the bridge runs as a Windows task.
+
+### Security
+
+- Web pages from other sites can no longer use the bridge. Host and Origin were checked only on
+  the admin and pooling routes, so a page open in the user's browser could call tools through
+  the bridge, including on HTTP servers the bridge adds credentials to. Every route now answers
+  403 when the Host is a DNS name other than `localhost` (DNS rebinding), when the Origin is
+  neither the bridge nor a `localhost` or loopback page, or when the browser marks the request
+  as cross-site, except opening the dashboard from a link. MCP clients, the CLI and the
+  dashboard work as before through `localhost` or an IP address; a client that reaches the
+  bridge by another host name, such as `host.docker.internal`, now gets 403 and should use an
+  IP address.
+- `smol-toml` now requires 1.9.0 or later (1.9.1 is locked). Earlier versions could take
+  quadratic time to parse crafted TOML (GHSA-r4xh-jqrq-34v2).
+- The dashboard is built with Tailwind CSS 4.3.3, Vite 7.3.7 and `source-map-js` 1.2.2, the same
+  as 2.x. This clears advisories in those build tools (GHSA-rj75-hqrm-r3gf, GHSA-68fv-2mgg-jv7q,
+  and the Vite development-server advisories GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22,
+  GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw and GHSA-587h-7wmj-h5pm). The published package ships
+  the prebuilt dashboard, rebuilt with these tools. Its layout is unchanged, and it now uses the
+  same Tailwind 4 base styles as the 2.x dashboard.
+
+### Changed
+
+- 1.x releases now use the same npm publishing workflow and tools as 2.x, so later 1.x patches
+  go through the same checks. A 1.x release is qualified from the 2.x checkout, with the
+  published 2.x release as its peer. The 1.3.1-only stage-list tools are removed.
+
+## [1.3.1] - 2026-10-02
+
 ### Fixed
 
 - Require a complete, bounded owner stage-list observation before recording no

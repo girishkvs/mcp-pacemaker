@@ -106,7 +106,8 @@ export class LocalSourceReader {
     });
     assert.equal(result.error, undefined, 'Local source Git operation failed');
     assert.equal(result.signal, null);
-    assert.equal(result.status, 0, 'Local source Git operation rejected');
+    assert.equal(result.status, 0, `Local source Git operation rejected: ${
+      String(result.stderr ?? '').slice(0, 300).trim()}`);
     return result.stdout;
   }
 

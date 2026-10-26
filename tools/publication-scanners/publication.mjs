@@ -6,7 +6,7 @@ import {
   LIMITS, guarded, isolatedEnvironment, readJson, requireCondition, runBounded,
   sha256, validateBinding, workspace,
 } from './core.mjs';
-import { scanAdvisories } from './advisories.mjs';
+import { requiresProducerAdvisoryEvidence, scanAdvisories } from './advisories.mjs';
 import { scanPrivateContent } from './private.mjs';
 import { TOOL_PINS, scanArtifact, scanSource, toolsFromEnvironment } from './secrets.mjs';
 import { consumeSecretAdmission } from '../npm-publication/secret-admission.mjs';
@@ -213,10 +213,19 @@ export async function scanPublicationRequest({
         } };
       const advisory = await scanAdvisories({
         ...input, publicPackages, publicPackagesPath, exemptionsPath, fetchImpl,
+        ...(request.phase === 'source' ? { producerContext: {
+          phase: request.phase, version: request.version, scope: 'producer-root-and-ui',
+        } } : {}),
       });
       scannerDetails.advisories = advisory;
+      const producerReport = request.phase === 'source' && requiresProducerAdvisoryEvidence(request.version);
+      const advisoryFree = advisory.status === 'passed' && advisory.rawFindingCount === 0;
       gates[advisoryName] = {
         status: advisory.status === 'passed' ? 'passed' : 'failed',
+        ...(producerReport ? { osv: advisory, rawFindingCount: advisory.rawFindingCount,
+          remainingFindings: advisory.remainingFindings, advisoryFree,
+          disposition: advisoryFree ? 'advisory-free'
+            : advisory.status === 'findings' ? 'findings' : 'not-verified' } : {}),
         evidence: [evidence(`${advisoryName}; OSV exact supplied graphs; public coordinates only; per-run responses`,
           advisory)],
       };
