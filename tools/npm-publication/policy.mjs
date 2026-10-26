@@ -447,7 +447,11 @@ export function validateCi(run, jobs, approval) {
   for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) required.push(`test (${os}, ${node})`);
   }
-  for (const node of [20, 22, 24]) required.push(`windows-ordinary (${node})`);
+  // The 1.x line predates that lane and still runs its suite on the hosted Windows runner.
+  const legacy = releaseRole(approval.version) === 'legacy';
+  for (const node of [20, 22, 24]) {
+    required.push(legacy ? `test (windows-latest, ${node})` : `windows-ordinary (${node})`);
+  }
   for (const name of required) {
     const matches = jobs.filter(job => job.name === name);
     assert.equal(matches.length, 1, `CI job missing or ambiguous: ${name}`);

@@ -219,7 +219,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ==============================================================================
-vite@7.3.6
+vite@7.3.7
 Declared license: MIT
 
 --- LICENSE.md: # Vite core license ---

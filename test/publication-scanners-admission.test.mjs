@@ -25,12 +25,13 @@ import { validateLocalApproval } from '../tools/npm-publication/local-regression
 import { MATRIX } from '../tools/npm-publication/matrix.mjs';
 import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
 import { CandidateFixture, syntheticRegistrySourceProof } from './helpers/npm-publication-candidate-fixture.mjs';
+import { lifetimeSkip } from './helpers/legacy-checkout.mjs';
 
 for (const [version, generation, proofRequired, corruption] of [['2.0.2', ''], ['2.7.13', 'npm-r27/'], ['1.3.2', 'npm-r12/']]
   .flatMap(pair => [[...pair, false], [...pair, true]])
   .flatMap(pair => ['none', 'missing-runtime', 'license-text', 'notices', 'native-source', 'native-report', 'replacement']
     .map(corruption => [...pair, corruption]))) {
-  test(`Connected SYNTHETIC reusable collection -> admission -> prepare -> matrix -> finalizer -> stage: ${version}, sourceProof=${proofRequired}, corruption=${corruption}`, async t => {
+  test(`Connected SYNTHETIC reusable collection -> admission -> prepare -> matrix -> finalizer -> stage: ${version}, sourceProof=${proofRequired}, corruption=${corruption}`, { skip: lifetimeSkip(version) }, async t => {
     t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
     const f = await new Fixture().init(t, { version, generation });
     f.approval.publicPackages.push(POLICY.name, 'smol-toml');

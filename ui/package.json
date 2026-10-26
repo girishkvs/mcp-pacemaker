@@ -1,7 +1,7 @@
 {
   "name": "mcp-pacemaker-ui",
   "private": true,
-  "version": "2.1.1",
+  "version": "2.1.2",
   "type": "module",
   "description": "React + Vite dashboard for mcp-pacemaker (built to ui/dist, served by the bridge at /ui).",
   "scripts": {
@@ -28,7 +28,7 @@
     "postcss": "8.5.28",
     "tailwindcss": "4.3.3",
     "typescript": "^5.6.3",
-    "vite": "^7.3.6"
+    "vite": "^7.3.7"
   },
   "overrides": {
     "source-map-js": "1.2.2"

@@ -4,10 +4,10 @@ The active workflow supports canonical stable **1.x legacy** (`legacy`) and
 **2.x current** (`latest`) versions. Unknown majors, prereleases, build metadata,
 leading zeros and unsafe integer components are rejected. Support is not release
 authorization: the owner selects each exact version, source and comparison artifact.
-This checkout targets the **2.1.1** current-line candidate. Selection and local
+This checkout targets the **2.1.2** current-line candidate. Selection and local
 preparation are not publication approval or evidence that its gates have passed.
 
-The package already exists. **2.1.0, 2.0.2, 2.0.1 and 1.3.1 are published and
+The package already exists. **2.1.1, 2.1.0, 2.0.2, 2.0.1 and 1.3.1 are published and
 immutable.** First-package `sign-bootstrap` and `publish-bootstrap` actions have
 been removed from the active workflow. Historical code and receipts are retained
 for inspection, not reuse. Do not manufacture a version or rerun a publication

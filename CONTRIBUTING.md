@@ -143,12 +143,12 @@ The same harness runs in both maintained branches:
 
 | Preparation | Selected legacy / current pair |
 |---|---|
-| Default in the selected 2.1.1 checkout | Immutable 1.3.0 / packed 2.1.1 |
-| Default in the 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
+| Default in the selected 2.1.2 checkout | Immutable 1.3.0 / packed 2.1.2 |
+| Default in the 1.3.2 checkout | Packed 1.3.2 / immutable 2.0.0 |
 | `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
-| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed explicit 1.x peer / packed 2.1.1 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed explicit 1.x peer / packed 2.1.2 |
 
-These selections are not qualification evidence. The 2.1.1 candidate requires fresh
+These selections are not qualification evidence. The 2.1.2 candidate requires fresh
 exact-byte gates; selecting it does not select an opposite-major patch pair.
 Earlier 1.3.1/2.0.2 and 1.3.1/2.0.1 results remain historical.
 

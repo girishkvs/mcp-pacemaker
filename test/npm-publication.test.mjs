@@ -473,7 +473,7 @@ test('Only four human gates accept owner-pending; native execution/identity and 
 });
 
 test('T42: exact CI attempt and complete successful required matrix are mandatory', () => {
-  const a = approval();
+  const a = approval('2.1.2');
   const run = { id: 42, run_attempt: 1, head_sha: a.commit, head_repository: { full_name: POLICY.repository },
     repository: { full_name: POLICY.repository }, path: '.github/workflows/ci.yml',
     event: 'push', status: 'completed', conclusion: 'success' };
@@ -481,8 +481,9 @@ test('T42: exact CI attempt and complete successful required matrix are mandator
   for (const os of ['ubuntu-latest', 'macos-latest']) {
     for (const node of [20, 22, 24]) names.push(`test (${os}, ${node})`);
   }
-  for (const node of [20, 22, 24]) names.push(`windows-ordinary (${node})`);
-  const jobs = names.map(name => ({ name, head_sha: a.commit, status: 'completed', conclusion: 'success' }));
+  const ciJobs = windowsJobs => [...names, ...windowsJobs]
+    .map(name => ({ name, head_sha: a.commit, status: 'completed', conclusion: 'success' }));
+  const jobs = ciJobs([20, 22, 24].map(node => `windows-ordinary (${node})`));
   validateCi(run, jobs, a);
   assert.throws(() => validateCi(run, jobs.filter(job => job.name !== 'windows-ordinary (22)'), a),
     /CI job missing or ambiguous: windows-ordinary \(22\)/);
@@ -492,6 +493,13 @@ test('T42: exact CI attempt and complete successful required matrix are mandator
   assert.throws(() => validateCi({ ...run, event: 'pull_request' }, jobs, a));
   assert.throws(() => validateCi(run, jobs.slice(1), a));
   assert.throws(() => validateCi(run, jobs.map(job => ({ ...job, conclusion: 'skipped' })), a));
+
+  // The 1.x line runs its Windows suite on the hosted runner, so each line needs its own jobs.
+  const legacy = approval('1.3.2');
+  const legacyJobs = ciJobs([20, 22, 24].map(node => `test (windows-latest, ${node})`));
+  validateCi(run, legacyJobs, legacy);
+  assert.throws(() => validateCi(run, jobs, legacy), /CI job missing or ambiguous: test \(windows-latest, 20\)/);
+  assert.throws(() => validateCi(run, legacyJobs, a), /CI job missing or ambiguous: windows-ordinary \(20\)/);
 });
 
 test('T05/T06: a named but unprotected environment or bypass without owner review is insufficient', () => {

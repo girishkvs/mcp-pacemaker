@@ -73,7 +73,7 @@ export class LocalCaseFixture {
     this.command('Parse local Git configuration', ['-C', empty, '-c', 'extensions.worktreeConfig=false',
       'config', '--no-includes', '--null', '--name-only', '--file', win32.join(cwd, '.git/config'), '--list'],
     empty, 'core.repositoryformatversion\0core.filemode\0core.bare\0', false, 'git');
-    this.command('Local Git', ['-c', `core.worktree=${cwd}`, '-c', 'extensions.worktreeConfig=false',
+    this.command('Local Git', ['-c', `safe.directory=${cwd}`, '-c', `core.worktree=${cwd}`, '-c', 'extensions.worktreeConfig=false',
       '-c', `core.hooksPath=${empty}`, '-c', `init.templateDir=${empty}`, '-c', 'credential.helper=',
       '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=', '-c', 'core.autocrlf=false',
       '-c', 'core.safecrlf=false', '-c', 'commit.gpgsign=false', '-c', 'protocol.allow=never',

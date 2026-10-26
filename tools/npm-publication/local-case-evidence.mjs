@@ -9,6 +9,7 @@ import { inspectRuntimeLicenses } from './runtime-licenses.mjs';
 import { containedSelection, retainedDependencies, selectedTestFiles, sourceSuiteLabel, testArguments, testTotals, uiTestArguments, nativeRestoreArguments, LOCAL_NATIVE_PATHS } from './local-gate.mjs';
 import { validatePackage } from './policy.mjs';
 import { safeName, physical } from './local-inputs.mjs';
+import { gitRootOptions } from './local-git.mjs';
 import { treeEntries } from './local-source.mjs';
 import { readLocalBytes, readLocalJson } from './local-evidence.mjs';
 import { exactLocalKeys, localHash, localSha, LOCAL_NODES, releaseRole } from './local-regression.mjs';
@@ -140,7 +141,7 @@ export class LocalCaseReplay {
         assert.notEqual(normalized, 'core.eol', 'Unrecorded checkout EOL configuration is forbidden');
       }
     }
-    const prefix = ['-c', `core.worktree=${cwd}`, '-c', 'extensions.worktreeConfig=false',
+    const prefix = [...gitRootOptions(cwd),
       '-c', `core.hooksPath=${EMPTY_GIT}`, '-c', `init.templateDir=${EMPTY_GIT}`,
       '-c', 'credential.helper=', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=',
       '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', 'commit.gpgsign=false',

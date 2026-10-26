@@ -25,6 +25,7 @@ import { SESSION_REQUIRED_TESTS } from '../tools/ci/test-contracts.mjs';
 import { CheckoutProofFixture } from './helpers/npm-publication-checkout-proof.mjs';
 import { LocalRunState, localRunPlan } from '../tools/npm-publication/local-run-state.mjs';
 import { ResumeFixture } from './helpers/local-resume-fixture.mjs';
+import { CONTROLLER_SKIP, lifetimeSkip } from './helpers/legacy-checkout.mjs';
 import {
   PUBLISHED_LEGACY_STAGE_CONTRACT, STAGE_PROOF_FILES, sourceStageContract, validateStageProof,
 } from '../tools/npm-publication/stage-proof-contract.mjs';
@@ -451,7 +452,7 @@ test('the run plan covers every registered case once, in the order the launcher 
   assert.throws(() => localRunPlan('unknown-scope', versions), /Unknown local run scope/);
 });
 
-test('verify-local accepts a resumed history and rejects malformed or inconsistent history', t => {
+test('verify-local accepts a resumed history and rejects malformed or inconsistent history', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   f.failRun('v2.1.0-node22.23.2');
   const report = f.gate(true).run();
@@ -709,7 +710,7 @@ test('missing root and failed/changed raw command receipts reject without execut
 });
 
 for (const version of ['1.3.2', '2.0.2', '2.7.13']) {
-  test(`SYNTHETIC selected-version local replay: ${version}`, async t => {
+  test(`SYNTHETIC selected-version local replay: ${version}`, { skip: lifetimeSkip(version) }, async t => {
     const f = await new LocalCaseFixture(t, version).create();
     await verifyRawSteps(f.directory, f.gate, f.root, version, { checkout: f.checkoutBinding });
   });

@@ -159,6 +159,7 @@ function Wait-ReadyFile($Case, $Role, $Directory = $Case.Directory) {
         if (Test-Path -LiteralPath $path) {
             try { return ([IO.File]::ReadAllText($path) | ConvertFrom-Json) }
             catch [ArgumentException] { }
+            catch [IO.IOException] { } # the writer may still have the file open
         }
         if (-not (Get-Liveness $Case.Records[0]).alive) { throw 'Bridge exited during fixture readiness' }
         Start-Sleep -Milliseconds 100

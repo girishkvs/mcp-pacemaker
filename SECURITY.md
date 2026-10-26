@@ -36,6 +36,13 @@ so a few properties matter more than usual:
 - **There is no user authentication on the proxy path.** Any local process that can open the
   port can use the bridged servers. Treat access to the port as equivalent to access to every
   credential the bridge holds.
+- **Web pages from other sites are refused.** A page open in the browser can reach a loopback
+  port too, so every route refuses with 403 a `Host` that is a DNS name other than `localhost`
+  (DNS rebinding), an `Origin` that is neither the bridge itself nor a `localhost` or loopback
+  page, and a browser request marked `Sec-Fetch-Site: cross-site`, except opening the dashboard
+  from a link. This does not identify callers: with `--host 0.0.0.0`, a client that sends an IP
+  `Host` and no `Origin` is still served. MCP clients and the CLI send no `Origin`; have them
+  connect through `localhost` or an IP address.
 - **Administrative endpoints require a nonce.** `/admin/*` is guarded by a random nonce written
   to `~/.mcp-pacemaker/admin.nonce` on startup, readable only by the user running the bridge.
   This covers `/admin/reload`, which re-reads `servers.json` — see the note below on why that

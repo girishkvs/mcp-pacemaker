@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { syntheticLocalApproval, syntheticPreparedLocal, syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
 import { lifetimeFixtureFiles, lifetimeFixtureNames } from './helpers/lifetime-package-fixture.mjs';
+import { lifetimeSkip } from './helpers/legacy-checkout.mjs';
 import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../tools/windows-process-lifetime/inventory.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -413,7 +414,7 @@ class Fixture {
 }
 
 for (const version of ['1.3.1', '2.0.1', '1.3.2', '2.0.2', '2.7.13']) {
-  test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, async t => {
+  test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, { skip: lifetimeSkip(version) }, async t => {
     const native = Object.fromEntries(Object.entries(packageFixture(version).files)
       .filter(([path]) => path.startsWith('bin/windows/')));
     const removed = 'bin/windows/src/PoolingSecurityReader.cs';
@@ -431,7 +432,7 @@ for (const version of ['1.3.1', '2.0.1', '1.3.2', '2.0.2', '2.7.13']) {
     assert.equal(f.calls.filter(call => call.args.includes('--test')).length, 0);
   });
 
-  test(`Native inventory roundtrip carries exact ${version} paths through Windows producer and both finalizers`, async t => {
+  test(`Native inventory roundtrip carries exact ${version} paths through Windows producer and both finalizers`, { skip: lifetimeSkip(version) }, async t => {
     const f = new Fixture(t, version);
     const expected = Object.entries(f.package.files).filter(([path]) => path.startsWith('bin/windows/'))
       .map(([path, bytes]) => ({ path, sha256: hash(bytes) })).sort((a, b) => a.path.localeCompare(b.path));

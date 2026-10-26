@@ -371,12 +371,12 @@ export function verifyWindowsExecution(request, nativeIdentity) {
 export function verifyRuntimeClosure(request, consumers) {
   const required = [
     'bin/cli.mjs', 'bin/mcp-bridge.mjs', 'bin/service-control.mjs', 'bin/pooling-writer.mjs',
-    'bin/pooling-config.mjs', 'bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
-    'bin/windows', 'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs',
-    'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist',
+    'bin/pooling-config.mjs', 'bin/pooling-execution.mjs', 'bin/windows', 'supervisor/supervise.mjs',
+    'supervisor/bridge-child.mjs', 'supervisor/supervise.sh', 'supervisor/supervise.ps1', 'ui/dist',
   ];
-  if (releaseRole(request.version) === 'current') required.push('bin/pooling-execution.mjs', 'bin/pooling-batches.mjs',
-    'bin/pooling-batch-scheduler.mjs');
+  // The pooling editor, file and batch modules arrived in 2.x; a 1.x package does not have them.
+  if (releaseRole(request.version) === 'current') required.push('bin/pooling-editor.mjs', 'bin/pooling-files.mjs',
+    'bin/pooling-batches.mjs', 'bin/pooling-batch-scheduler.mjs');
   const files = required.flatMap(path => filesUnder(request.extractedRoot, path));
   const legacyBroker = verifyLegacyFeature(request.extractedRoot);
   if (legacyBroker) files.push(...legacyBroker.files);

@@ -98,10 +98,12 @@ export class CandidateFixture {
     this.ciRun = { id: approval.ciRunId, run_attempt: approval.ciAttempt, head_sha: approval.commit,
       repository: { full_name: POLICY.repository }, head_repository: { full_name: POLICY.repository },
       path: '.github/workflows/ci.yml', event: 'push', status: 'completed', conclusion: 'success' };
+    const windowsJob = node => (releaseRole(approval.version) === 'legacy'
+      ? `test (windows-latest, ${node})` : `windows-ordinary (${node})`);
     this.ciJobs = ['Lockfiles resolve to the public registry', 'ui',
       ...['ubuntu-latest', 'macos-latest'].flatMap(os =>
         [20, 22, 24].map(node => `test (${os}, ${node})`)),
-      ...[20, 22, 24].map(node => `windows-ordinary (${node})`)]
+      ...[20, 22, 24].map(windowsJob)]
       .map(name => ({ name, head_sha: approval.commit, status: 'completed', conclusion: 'success' }));
     this.sourceResponse = { tagType: 'tag', tagObject: approval.tagObject, tagCommit: approval.commit,
       tagTree: approval.tree, head: approval.commit, tree: approval.tree, status: '', workflowMatches: true };
@@ -129,8 +131,9 @@ export class CandidateFixture {
       'bin/windows/PoolingSecurityHelper.exe': `SYNTHETIC ${releaseRole(version)} helper; never executed`,
       'bin/windows/PoolingSecurityHelper.build.json': '{}',
       'tools/windows-security-helper/build.ps1': '# SYNTHETIC build script; never executed\r\n',
-      ...Object.fromEntries(['service-control', 'pooling-writer', 'pooling-config', 'pooling-editor', 'pooling-files',
-        ...(releaseRole(version) === 'current' ? ['pooling-execution', 'pooling-batches', 'pooling-batch-scheduler'] : [])]
+      ...Object.fromEntries(['service-control', 'pooling-writer', 'pooling-config', 'pooling-execution',
+        ...(releaseRole(version) === 'current'
+          ? ['pooling-editor', 'pooling-files', 'pooling-batches', 'pooling-batch-scheduler'] : [])]
         .map(name => [`bin/${name}.mjs`, `SYNTHETIC ${releaseRole(version)} runtime; never executed`])),
       ...Object.fromEntries(['supervise.mjs', 'bridge-child.mjs', 'supervise.sh', 'supervise.ps1']
         .map(name => [`supervisor/${name}`, 'SYNTHETIC supervisor; never executed'])),

@@ -673,6 +673,17 @@ test('runtime closure needs the actual lazy writer, not only a version result', 
   assert.throws(() => verifyRuntimeClosure(request, consumers));
 });
 
+test('a 1.x runtime closure does not require the 2.x pooling editor and file modules', t => {
+  const f = fixture(t);
+  const current = artifactRequest(f);
+  const consumers = normalizeMatrix(current);
+  for (const path of ['bin/pooling-editor.mjs', 'bin/pooling-files.mjs']) rmSync(join(f.extractedRoot, path));
+  assert.throws(() => verifyRuntimeClosure(current, consumers), /ENOENT.*pooling-editor\.mjs/);
+  const legacy = verifyRuntimeClosure({ ...current, version: '1.3.2' }, consumers);
+  assert.ok(legacy.files.some(file => file.path === 'bin/pooling-writer.mjs'));
+  assert.ok(legacy.files.some(file => file.path === 'bin/pooling-execution.mjs'));
+});
+
 test('missing replacement cannot pass artifact aggregation; OSV finding blocks licenses', async t => {
   const f = fixture(t);
   const request = artifactRequest(f);
