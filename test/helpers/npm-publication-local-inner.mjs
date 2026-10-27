@@ -62,7 +62,7 @@ class SdkFixture {
     this.runs = 0;
     this.version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
     for (const directory of ['npm-publication', 'compatibility', 'publication-scanners',
-      'npm-consumer', 'third-party-notices']) {
+      'npm-consumer', 'third-party-notices', 'windows-legacy', 'windows-process-lifetime', 'windows-task-channel']) {
       cpSync(join(ROOT, 'tools', directory), join(this.gate.root, 'tools', directory), { recursive: true });
     }
     for (const path of ['package.json', 'tools/npm-publication/local-sdk-check.mjs',
@@ -131,7 +131,7 @@ test('actual lane UI manifest selects existing tests or the legitimate legacy ab
     assert.deepEqual(selected, testArguments(ui.scripts.test));
     assert.ok(selected.length > 2);
   } else {
-    assert.equal(pkg.version, '1.3.1');
+    assert.equal(releaseRole(pkg.version), 'legacy');
     assert.equal(existsSync(join(ROOT, 'ui/test')), false);
     assert.equal(selected, null);
   }
@@ -195,19 +195,20 @@ test('TAP line parser preserves numeric, duplicate, separator and accounting sem
 
 test('fresh-child actual lane dispatch uses minimal stubs, never retained npm or absent legacy owner modules', t => {
   const sdk = new SdkFixture(t);
-  if (sdk.version === '1.3.1') {
-    for (const file of ['owner-sdk.mjs', 'provenance.mjs']) {
-      assert.equal(existsSync(join(sdk.gate.root, 'tools/npm-publication', file)), false);
-    }
+  const legacy = releaseRole(sdk.version) === 'legacy';
+  if (legacy) {
+    // The 1.x line now carries the shared owner SDK. Remove it to prove the legacy lane never
+    // needs it. Its `verify-staged.mjs` still uses `provenance.mjs`, so that file stays.
+    rmSync(join(sdk.gate.root, 'tools/npm-publication/owner-sdk.mjs'));
   }
   const result = sdk.run();
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
   const record = JSON.parse(result.stdout);
-  assert.equal(record.contract, sdk.version === '1.3.1'
+  assert.equal(record.contract, legacy
     ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
-  if (sdk.version === '1.3.1') assert.equal(record.module, 'verify-staged.mjs');
+  if (legacy) assert.equal(record.module, 'verify-staged.mjs');
   if (process.version === `v${POLICY.node}`) {
     assert.equal(record.version, sdk.version);
     for (const key of ['authenticated', 'published', 'provenanceVerified', 'signatureVerified', 'releaseReady']) {
@@ -222,13 +223,14 @@ test('SDK lane dispatch fails closed on unsupported lanes, absent modules, and i
   const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
   const changes = [
     sdk => write(sdk.gate.root, 'package.json', JSON.stringify({ name: POLICY.name, version: '9.0.0' })),
-    ...(version === '1.3.1' ? [
+    ...(releaseRole(version) === 'legacy' ? [
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'package.json', '{"name":"npm","version":"11.0.0"}'),
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'node_modules/sigstore/package.json',
         '{"name":"sigstore","version":"4.0.0","main":"index.js"}'),
       sdk => write(dirname(dirname(sdk.gate.npmCli)), 'node_modules/sigstore/index.js', 'exports.verify = {};'),
       sdk => write(sdk.gate.root, 'tools/npm-publication/verify-staged.mjs', 'export const verifyStaged = {};'),
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/verify-staged.mjs')),
+      sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/provenance.mjs')),
     ] : [
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/owner-sdk.mjs')),
       sdk => rmSync(join(sdk.gate.root, 'tools/npm-publication/provenance.mjs')),

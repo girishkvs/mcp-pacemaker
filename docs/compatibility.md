@@ -4,13 +4,13 @@ How the 1.3.x and 2.x lines work together. For npm channels and exact-version in
 [install details](install.md). To replace a running installation, see
 [upgrades and rollback](upgrades.md).
 
-This documentation describes **2.1.1**. For 1.3.x immediate-save behavior, see the
+This documentation describes **2.1.2**. For 1.3.x immediate-save behavior, see the
 [legacy documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v1.3.1/README.md)
 and [support policy](../SECURITY.md#supported-versions). Those documents do not establish
 that a legacy version is available on npm.
 
 The historical baselines remain **1.3.0 / 2.0.0**. The earlier **1.3.1 / 2.0.1** and
-**1.3.1 / 2.0.2** patch-pair evidence is not transferable to a new release. The **2.1.1**
+**1.3.1 / 2.0.2** patch-pair evidence is not transferable to a new release. The **2.1.2**
 candidate requires fresh exact-byte compatibility and service-replacement gates.
 A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
 2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending

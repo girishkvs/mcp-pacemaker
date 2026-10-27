@@ -21,8 +21,8 @@ Its repository link should point to
 Use an exact version for a repeatable installation:
 
 ```bash
-npm view mcp-pacemaker@2.1.1 version
-npm install -g mcp-pacemaker@2.1.1
+npm view mcp-pacemaker@2.1.2 version
+npm install -g mcp-pacemaker@2.1.2
 mcp-pacemaker --version
 ```
 

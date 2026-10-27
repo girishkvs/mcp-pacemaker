@@ -34,8 +34,11 @@ import { killBridge } from './helpers/kill-bridge.mjs';
 //   8875                        pooling-deadlines
 //   8878                        pooling-batch-api
 //   8880                        pooling-batch-startup
+//   8882-8883                   pooling-trace-checks (helper)
+//   8885                        request-origin
+//   8886-8888                   child-write-race
 //
-// Free at the time of writing: 8828, 8854-8859, 8861, 8868-8869, 8876, 8879, 8881+.
+// Free at the time of writing: 8828, 8854-8859, 8861, 8868-8869, 8876, 8879, 8881, 8884, 8889+.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, '..', 'bin', 'mcp-bridge.mjs');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

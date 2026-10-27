@@ -14,7 +14,7 @@ mcp-pacemaker init             # imports your servers, asks before rewiring any 
 [Release notes](https://github.com/girishkvs/mcp-pacemaker/releases) ·
 [Demo and design write-up](https://girishkonda.com/projects/mcp-pacemaker/)
 
-> This README describes **2.1.1**.
+> This README describes **2.1.2**.
 > See the [release changes](CHANGELOG.md).
 
 ## What it does
@@ -41,17 +41,17 @@ exits (every one-shot CLI run), **those servers die**.
 
 ## Quick start
 
-Install **mcp-pacemaker 2.1.1** from npm. Use a maintained **Node.js 22 or 24**
+Install **mcp-pacemaker 2.1.2** from npm. Use a maintained **Node.js 22 or 24**
 release; Windows also needs PowerShell 7 and Windows Script Host.
 See [installation requirements](docs/install.md) before setup.
 
 ```bash
-npm view mcp-pacemaker@2.1.1 version
-npm install -g mcp-pacemaker@2.1.1
+npm view mcp-pacemaker@2.1.2 version
+npm install -g mcp-pacemaker@2.1.2
 mcp-pacemaker --version
 ```
 
-The version check prints `2.1.1` without running setup.
+The version check prints `2.1.2` without running setup.
 
 > **Run it as an ordinary user.** From 2.1.0 the bridge, supervisor and default upgrades
 > refuse a privileged caller *at startup* — a non-administrator terminal on Windows and a
@@ -120,6 +120,32 @@ them in.
 
 </details>
 
+## How it compares
+
+Checked against each project's latest release on October 16, 2026. Every cell is sourced in
+[docs/comparison.md](docs/comparison.md). These projects overlap; `mcp-pacemaker` focuses on
+keeping MCP servers running on a developer workstation.
+
+| | [Supergateway](https://github.com/supercorp-ai/supergateway) | [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | [MCP Hub](https://github.com/ravitemer/mcp-hub) | [ToolHive](https://github.com/stacklok/toolhive) | **mcp-pacemaker** |
+|---|---|---|---|---|---|
+| Serves stdio servers over Streamable HTTP | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Serves stdio servers over SSE (legacy) | ✅ | ✅ | ✅ | ✅ (deprecated) | ✅ |
+| What you install | npm, binary or Docker | PyPI or Docker | npm or Nix | Go binary + Docker or Podman | npm; the bridge has **zero** dependencies |
+| Restarts crashed processes automatically | new child per connection | ❌ | manual restart (API) | ✅ | ✅ bridge and warm pools |
+| Starts at OS logon | ❌ | ❌ | ❌ | desktop app only | ✅ Windows, macOS, Linux |
+| Starts again after unlock or wake | ❌ | ❌ | ❌ | ❌ | ✅ Windows |
+| Auth header from your own command, auto-refreshed | ❌ | ❌ | at connect only | ❌ | ✅ |
+| Sessions survive a bridge restart without re-initializing | ❌ | ❌ | ❌ | Kubernetes with Redis only | ✅ |
+| Timed restart to refresh an interactive login | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Reuses existing client MCP config files | ✅ | stdio entries only | ✅ | ❌ | ✅ |
+| Wires editors and CLIs for you | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Web dashboard | ❌ | ❌ | ❌ | desktop app instead | ✅ |
+| Terminal dashboard | ❌ | ❌ | ❌ | ✅ (experimental) | ✅ |
+| HTTP control API | health checks only | `/status` only | ✅ | ✅ | ✅ |
+
+A surviving session re-establishes the client's handshake against a fresh server; it does not
+restore arbitrary tool state. A transport bridge is not a sandbox for untrusted tools.
+
 ## Everyday commands
 
 | Command | What it does |
@@ -166,19 +192,6 @@ loopback.
 
 **Topologies:** wire every host to one shared bridge (default), or give each host its own bridge
 (`install --client X --port N`) — or any mix. `status`/`doctor` report all bridges + wired hosts.
-
-## Choosing a transport tool
-
-Documentation checked September 27, 2026; this is a use-case guide, not a feature benchmark.
-
-| Tool | Consider it when |
-|---|---|
-| [Supergateway](https://github.com/supercorp-ai/supergateway) | You want command-line conversion between stdio and HTTP/SSE/WebSocket transports |
-| [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | You want a Python-based adapter between local stdio clients/servers and remote MCP transports |
-| **mcp-pacemaker** | You want workstation process supervision, host wiring, auto-start, lifecycle diagnostics and explicit isolation/pooling/sharing policies |
-
-These projects have overlapping capabilities. Reconnecting to a fresh server is not recovery
-of arbitrary application state, and a transport bridge is not a sandbox for untrusted tools.
 
 ## Upgrades
 
@@ -241,6 +254,7 @@ See [SECURITY.md](SECURITY.md) for the threat model and how to report a vulnerab
 - [HTTP API](docs/http-api.md) — endpoints, pooling batches and the admin nonce
 - [Upgrades and rollback](docs/upgrades.md) — managed upgrades, `--sxs`, recovery and the Windows 1.3 migration
 - [Version compatibility](docs/compatibility.md) — 1.3.x and 2.x pairs, and upgrading from 1.3.0
+- [How it compares](docs/comparison.md) — sourced comparison with Supergateway, mcp-proxy, MCP Hub and ToolHive
 - [User-runtime contract](docs/execution-context.md) — what the ordinary-user check verifies
 - [Shared sessions](docs/shared-sessions.md) — the full shared-mode contract
 - [Account upgrades](docs/account-upgrades.md) — explicit original-account upgrades on Windows

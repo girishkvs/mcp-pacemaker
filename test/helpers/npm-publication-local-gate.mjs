@@ -24,6 +24,7 @@ import { LocalRunLock, LocalRunState, localRunPlan } from '../../tools/npm-publi
 import { evidenceInventory } from '../../tools/npm-publication/local-evidence.mjs';
 import { verifyLocalHeader } from '../../tools/npm-publication/verify-local.mjs';
 import { LEFTOVER_CONTAINER, ResumeFixture } from './local-resume-fixture.mjs';
+import { CONTROLLER_SKIP } from './legacy-checkout.mjs';
 
 function totals(overrides = {}) {
   return Object.entries({ tests: 3, pass: 2, fail: 0, cancelled: 0, skipped: 1, todo: 0, ...overrides })
@@ -558,7 +559,7 @@ const FULL_SCOPE = 'both-release-lines-local-only';
 const PLAN = localRunPlan(FULL_SCOPE, ['1.3.1', '2.1.0']);
 const notInput = step => !step.startsWith('inputs-');
 
-test('a normal local run records one complete invocation and still verifies', t => {
+test('a normal local run records one complete invocation and still verifies', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   const report = f.gate().run();
   assert.equal(report.status, 'passed');
@@ -577,7 +578,7 @@ test('a normal local run records one complete invocation and still verifies', t 
   assert.equal(existsSync(f.attempts), false, 'A normal run sets nothing aside');
 });
 
-test('a resumed run reruns only the failed case onwards and preserves the failed attempt aside', t => {
+test('a resumed run reruns only the failed case onwards and preserves the failed attempt aside', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   const failed = PLAN.indexOf('v2.1.0-node20.20.2');
   f.failRun(PLAN[failed]);
@@ -609,7 +610,7 @@ test('a resumed run reruns only the failed case onwards and preserves the failed
   runState.verify(report, f.inputs());
 });
 
-test('a killed run resumes from its last checkpoint and removes the container it left running', t => {
+test('a killed run resumes from its last checkpoint and removes the container it left running', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   const first = f.gate();
   first.createState(FULL_SCOPE);
@@ -636,7 +637,7 @@ test('a killed run resumes from its last checkpoint and removes the container it
   new LocalRunState(f.output).verify(report, f.inputs());
 });
 
-test('a leftover container that keeps a process after kill is not removed and fails the resume', t => {
+test('a leftover container that keeps a process after kill is not removed and fails the resume', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   const first = f.gate();
   first.createState(FULL_SCOPE);
@@ -647,7 +648,7 @@ test('a leftover container that keeps a process after kill is not removed and fa
   assert.equal(f.containers.has(LEFTOVER_CONTAINER), true, 'A container that still has a process is left in place');
 });
 
-test('resume refuses a changed controller, platform, source, tool, runtime or image and leaves the run untouched', t => {
+test('resume refuses a changed controller, platform, source, tool, runtime or image and leaves the run untouched', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   f.failRun('v1.3.1-node20.20.2');
   const statePath = join(f.output, 'run-state.json');
@@ -696,7 +697,7 @@ test('resume refuses a changed controller, platform, source, tool, runtime or im
   assert.equal(f.gate(true).run().status, 'passed', 'The unchanged run still resumes');
 });
 
-test('resume refuses tampered reused evidence or an unexplained run member and leaves the run untouched', t => {
+test('resume refuses tampered reused evidence or an unexplained run member and leaves the run untouched', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   f.failRun('v1.3.1-node20.20.2');
   const tampering = [
@@ -739,7 +740,7 @@ test('resume refuses tampered reused evidence or an unexplained run member and l
   assert.equal(f.gate(true).run().status, 'passed', 'The restored run still resumes');
 });
 
-test('resume refuses a passed run, a controls-only run, a run without durable state and a stepped-back clock', t => {
+test('resume refuses a passed run, a controls-only run, a run without durable state and a stepped-back clock', { skip: CONTROLLER_SKIP }, t => {
   const passed = new ResumeFixture(t);
   passed.gate().run();
   assert.throws(() => passed.gate(true), /This run already passed; there is nothing to resume/);
@@ -761,7 +762,7 @@ test('resume refuses a passed run, a controls-only run, a run without durable st
   assert.deepEqual(clock.tree(), before, 'A clock that stepped back is refused before anything is recorded');
 });
 
-test('a run proves its inventory before it passes, and a pass cut off before its inventory resumes', t => {
+test('a run proves its inventory before it passes, and a pass cut off before its inventory resumes', { skip: CONTROLLER_SKIP }, t => {
   const stray = new ResumeFixture(t);
   stray.hooks.set(PLAN.at(-1), gate => writeFileSync(join(gate.output, 'notes.txt'), 'SYNTHETIC stray member'));
   assert.throws(() => stray.gate().run(), /Missing or unexpected local run members/);
@@ -788,7 +789,7 @@ test('a run proves its inventory before it passes, and a pass cut off before its
   new LocalRunState(cut.output).verify(report, cut.inputs());
 });
 
-test('only an absent or partly written inventory reopens a passed run; anything else refuses', t => {
+test('only an absent or partly written inventory reopens a passed run; anything else refuses', { skip: CONTROLLER_SKIP }, t => {
   for (const partial of [bytes => bytes.subarray(0, bytes.length >> 1), () => Buffer.alloc(0)]) {
     const f = new ResumeFixture(t);
     f.gate().run();
@@ -828,7 +829,7 @@ test('only an absent or partly written inventory reopens a passed run; anything 
   assert.throws(() => f.gate(true), /This run already passed; there is nothing to resume/);
 });
 
-test('a run state that cannot be recorded still writes the report and never hides the original error', t => {
+test('a run state that cannot be recorded still writes the report and never hides the original error', { skip: CONTROLLER_SKIP }, t => {
   for (const [failed, message] of [[false, 'SYNTHETIC state write failure'], [true, 'SYNTHETIC failure: failure-control']]) {
     const f = new ResumeFixture(t);
     if (failed) f.failures.add('failure-control');
@@ -849,7 +850,7 @@ test('a run state that cannot be recorded still writes the report and never hide
   }
 });
 
-test('a resume killed while setting evidence aside leaves a contiguous journal and resumes again', t => {
+test('a resume killed while setting evidence aside leaves a contiguous journal and resumes again', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   f.hooks.set('timeout-control', gate => {
     for (let index = 0; index < 3; index++) gate.docker(['logs', 'SYNTHETIC']);
@@ -884,7 +885,7 @@ test('a resume killed while setting evidence aside leaves a contiguous journal a
   new LocalRunState(f.output).verify(report, f.inputs());
 });
 
-test('a resume recovers from a failed input step, a failed or unverified session lane and a failed final check', t => {
+test('a resume recovers from a failed input step, a failed or unverified session lane and a failed final check', { skip: CONTROLLER_SKIP }, t => {
   const inputs = new ResumeFixture(t);
   inputs.failRun('inputs-1.3.1');
   const fromInputs = inputs.gate(true).run();
@@ -946,7 +947,7 @@ test('the launcher resolves one run path and keeps strict argument positions', t
   assert.match(launched.stderr, /Only a full qualification run can be resumed/);
 });
 
-test('a trailing separator on --resume names the same run and keeps the attempts directory beside it', t => {
+test('a trailing separator on --resume names the same run and keeps the attempts directory beside it', { skip: CONTROLLER_SKIP }, t => {
   const f = new ResumeFixture(t);
   f.failRun('timeout-control');
   const { options } = launcherArguments(['--npm-cli', join(f.tools.npm, 'npm-cli.js'), '--peer-root', f.roots[1],

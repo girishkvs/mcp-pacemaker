@@ -25,6 +25,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
+import { isIP } from 'node:net';
 import { spawn, exec, execFile, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, statSync, renameSync, watch } from 'node:fs';
@@ -187,6 +188,16 @@ const log = (m) => {
   logBuffer.push(line); if (logBuffer.length > 500) logBuffer.shift();
   for (const c of logClients) { try { c.write(`data: ${JSON.stringify(line)}\n\n`); } catch { /* gone */ } }
 };
+
+// A crash left no trace: its stack went only to stderr, which nothing captures on Windows (see
+// LOG_FILE). The monitor only records the error. The process still exits as before, and the
+// supervisor restarts it.
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  try {
+    const detail = error instanceof Error ? error.stack : String(error);
+    appendLog(`[mcp-bridge] ${new Date().toISOString()} fatal ${origin}: ${detail}`);
+  } catch { /* recording must never replace the original error */ }
+});
 
 // Token expiry (seconds) for an http server's cached command/az token, if any — for the dashboard.
 //
@@ -651,6 +662,10 @@ function spawnServer(name, def) {
   child.once('error', () => {
     if (!spawned) serverMetrics.failedSpawn(name);
   });
+  // A child can exit between a write to it and the bridge handling that exit, for example when
+  // a server restarts mid-request. The write then fails with EPIPE, and a pipe 'error' with no
+  // listener crashes the whole bridge. The exit handler still fails the request that was waiting.
+  child.stdin.on('error', (error) => log(`[${name}] stdin write failed: ${error.message}`));
   child.__spawnedAt = Date.now(); // start of the cold-start clock; stopped when initialize lands
   return child;
 }
@@ -2092,7 +2107,69 @@ function proxyHttp(name, def, req, res) {
 }
 
 /* --------------------------------- server ---------------------------------- */
+// Browsers can reach a loopback server too. Without these checks any web page could use the
+// bridge, and the credentials it adds, through the user's browser: a cross-site POST runs a tool
+// without a CORS preflight, and DNS rebinding lets the page read the replies. The MCP spec
+// requires servers to check Origin for this reason.
+//
+// - Host: rebinding only works through a DNS name, so only `localhost` and IP addresses pass.
+// - Origin, when sent: the bridge itself (the dashboard) or another page on this machine.
+// - No Origin: clients that are not browsers send none. A browser also leaves it out of a
+//   cross-site GET, such as an image, a frame or a link, which Sec-Fetch-Site still marks. Only
+//   opening the dashboard itself from a link on another site is let through.
+function hostnameOf(urlText) {
+  try {
+    const { hostname } = new URL(urlText);
+    return hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
+  } catch { return ''; }
+}
+
+function isLoopback(hostname) {
+  const loopbackV4 = isIP(hostname) === 4 &&
+    hostname.startsWith('127.');
+  return hostname === 'localhost' ||
+    hostname === '::1' ||
+    loopbackV4;
+}
+
+function isLocalRequest(req) {
+  if (!req.headers.host) return false;
+  const host = hostnameOf(`http://${req.headers.host}`);
+  const hostIsSafe = host === 'localhost' ||
+    isIP(host) !== 0;
+  if (!hostIsSafe) return false;
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    const sameOrigin = origin === `http://${req.headers.host}`;
+    const loopbackPage = isLoopback(hostnameOf(origin));
+    return sameOrigin ||
+      loopbackPage;
+  }
+  const path = req.url.split('?')[0];
+  const dashboardPath = path === '/ui' ||
+    path.startsWith('/ui/');
+  const opensDashboard = dashboardPath &&
+    req.headers['sec-fetch-mode'] === 'navigate' &&
+    req.headers['sec-fetch-dest'] === 'document';
+  const crossSiteFetch = req.headers['sec-fetch-site'] === 'cross-site' &&
+    !opensDashboard;
+  return !crossSiteFetch;
+}
+
+// One line a minute explains a refusal; a page retrying in a loop must not flood the log.
+let lastRefusalLog = 0;
+function noteRefusal(req) {
+  if (Date.now() - lastRefusalLog < 60000) return;
+  lastRefusalLog = Date.now();
+  log(`refused ${req.method} ${req.url} from Host ${req.headers.host ?? 'none'}, Origin ${req.headers.origin ?? 'none'}: not a local request`);
+}
+
 const server = http.createServer((req, res) => {
+  if (!isLocalRequest(req)) {
+    noteRefusal(req);
+    res.writeHead(403).end('forbidden: not a local request');
+    return;
+  }
   const url = new URL(req.url, `http://${req.headers.host}`);
   const [name, kind] = url.pathname.split('/').filter(Boolean);
   const readOnlyStatus = (name === 'status' && !kind) ||

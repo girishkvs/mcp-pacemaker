@@ -32,12 +32,12 @@
     },
     {
       "name": "vite",
-      "version": "7.3.6"
+      "version": "7.3.7"
     }
   ],
-  "producerLockSha256": "c2162e5015b4d015058c6ba539d42dfd9afdc8c8c2ecd23a44acbebfbb6f0088",
+  "producerLockSha256": "f9176a69ff877b2596b7b00190ba5a9f88ae99f579aa06f947a6ba78f17ac6fa",
   "projectLicenseSha256": "590ad9c29ee5580f83b9c05e403ca259d89e8366d1ed4c7207aa5e0a07afbf79",
-  "noticesSha256": "2843c26d27582cd029efa8d82408817ac82af0d5b9c4e7cd7962103b70244dfe",
+  "noticesSha256": "f114a23088813c16f46ac1b7d2749938b1c846afaa0a2a03349fddb9d51cdf90",
   "chunks": [
     {
       "file": "assets/index-CcwMo2sI.js",
@@ -116,7 +116,7 @@
         },
         {
           "id": "commonjsHelpers.js",
-          "package": "vite@7.3.6",
+          "package": "vite@7.3.7",
           "generated": true,
           "renderedLength": 140
         },
@@ -282,7 +282,7 @@
         },
         {
           "id": "vite/modulepreload-polyfill.js",
-          "package": "vite@7.3.6",
+          "package": "vite@7.3.7",
           "generated": true,
           "renderedLength": 1168
         }
@@ -533,7 +533,7 @@
     },
     {
       "name": "vite",
-      "version": "7.3.6",
+      "version": "7.3.7",
       "license": "MIT",
       "lockPath": "node_modules/vite",
       "licenses": [

@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-26
+
+### Fixed
+
+- The bridge no longer crashes when a server exits while a request is being written to it, for
+  example when the server restarts mid-request. The write failed with `EPIPE` and nothing
+  handled the error, so the whole bridge restarted and calls in flight on every server failed.
+  A Streamable HTTP request now gets a "server exited before answering" error, and the bridge
+  keeps running.
+- A crash after startup now leaves its error and stack in `bridge.log`. They went only to
+  stderr, which nothing captures when the bridge runs as a Windows task.
+- The offline release verifier (`npm run publication:verify-local`) rejected every 2.1.x local
+  gate run with "Supporting command vector changed". The gate binds each Git command to its
+  checkout with `safe.directory`, and the verifier rebuilt the commands without it. Both now
+  build it with the same function.
+
+### Security
+
+- Web pages from other sites can no longer use the bridge. Host and Origin were checked only on
+  the admin and pooling routes, so a page open in the user's browser could call tools through
+  the bridge, including on HTTP servers the bridge adds credentials to. Every route now answers
+  403 when the Host is a DNS name other than `localhost` (DNS rebinding), when the Origin is
+  neither the bridge nor a `localhost` or loopback page, or when the browser marks the request
+  as cross-site, except opening the dashboard from a link. MCP clients, the CLI and the
+  dashboard work as before through `localhost` or an IP address; a client that reaches the
+  bridge by another host name, such as `host.docker.internal`, now gets 403 and should use an
+  IP address.
+- The dashboard is built with Vite 7.3.7. Vite's development server has advisories up to 7.3.6
+  (GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22, GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw,
+  GHSA-587h-7wmj-h5pm). The published package ships the prebuilt dashboard and never runs that
+  server; the built dashboard is unchanged.
+
+### Changed
+
+- The README again compares mcp-pacemaker with Supergateway, mcp-proxy, MCP Hub and ToolHive.
+  Each cell was checked against the projects' October 2026 releases and is sourced in
+  `docs/comparison.md`, which now ships in the package.
+- The npm publishing tools accept 1.x release candidates. CI validation expects the 1.x Windows
+  job names, and the runtime file check asks only for the pooling modules a 1.x package has. The
+  1.x maintenance line now carries these same tools.
+
 ## [2.1.1] - 2026-10-15
+
+Published to npm on 2026-10-17.
 
 ### Added
 
@@ -640,7 +683,8 @@ one is a trap for anyone building something similar.
 - Do not report a teardown the bridge initiated as a crash. `taskkill /F` exits non-zero, so
   every recycle, idle reap and session close was recorded as a failure, burying real ones.
 
-[Unreleased]: https://github.com/girishkvs/mcp-pacemaker/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/girishkvs/mcp-pacemaker/compare/v2.1.2...HEAD
+[2.1.2]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.2
 [2.1.1]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.1
 [2.1.0]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.1.0
 [2.0.2]: https://github.com/girishkvs/mcp-pacemaker/releases/tag/v2.0.2
