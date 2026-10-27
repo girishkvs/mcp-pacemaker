@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `npm run publication:verify-local` in 1.3.2 and 2.1.2 rejected every run paired with the
+  published 1.3.1 peer with "Supporting command vector changed". The 1.3.1 peer runs its
+  original gate code, which does not add `safe.directory` to its Git commands, and the
+  verifier expected it on every command. The verifier now expects that original form for the
+  pinned 1.3.1 source only. The release tools stay the same on both release lines.
+- `npm run publication:local-gate` failed within seconds with Git for Windows 2.56, which ships
+  the UCRT64 layout instead of MINGW64 ("no such file or directory ... mingw64\bin"). The gate
+  and `npm run publication:verify-local` now use whichever of the two layouts the retained Git
+  holds, and refuse a Git folder that holds both or neither.
+- `npm run publication:verify-local` also rejected a run whose 1.x source carries the current
+  tools, such as 1.3.2 itself ("Recorded local command timeoutMs differs from the reviewed
+  harness budget"). It expected every 1.x suite to record the 25-minute budget of the published
+  1.3.1. The verifier now expects that budget for the pinned 1.3.1 source only.
+
 ## [1.3.2] - 2026-10-26
 
 ### Fixed
