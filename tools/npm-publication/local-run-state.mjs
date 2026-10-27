@@ -11,7 +11,8 @@ import {
 } from './local-regression.mjs';
 
 export const LOCAL_RUN_STATE = 'run-state.json';
-export const LOCAL_GIT_SELECTION = Object.freeze(['cmd', 'mingw64/bin', 'mingw64/libexec/git-core', 'usr/bin', 'usr/share']);
+// Git for Windows 2.56 replaced the MINGW64 layout with UCRT64. A run freezes the one the retained root holds.
+const LOCAL_GIT_LAYOUTS = Object.freeze(['mingw64', 'ucrt64']);
 export const LOCAL_FROZEN_CONTROLLER = Object.freeze(['local-windows-entry.mjs', 'local-inputs.mjs', 'local-environment.mjs']
   .map(name => `tools/npm-publication/${name}`));
 const FULL_SCOPE = 'both-release-lines-local-only';
@@ -77,6 +78,12 @@ export class LocalRunState {
     if (selections) for (const name of selections) snapshot.add(name);
     else snapshot.addAll();
     return { snapshot, fingerprint: this.commitment(snapshot.files, snapshot.directories) };
+  }
+
+  gitSelection(root) {
+    const layouts = LOCAL_GIT_LAYOUTS.filter(layout => existsSync(join(root, layout, 'libexec', 'git-core')));
+    assert.equal(layouts.length, 1, 'The retained Git for Windows must hold exactly one MINGW64 or UCRT64 layout');
+    return ['cmd', `${layouts[0]}/bin`, `${layouts[0]}/libexec/git-core`, 'usr/bin', 'usr/share'];
   }
 
   manifestDigest(manifest, prefix) {

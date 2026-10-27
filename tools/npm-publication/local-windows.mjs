@@ -13,7 +13,7 @@ import {
   LOCAL_CONTRACT, LOCAL_NATIVE_PACKAGES, LOCAL_NODES, localCaseUser, releaseRole, releaseVersions,
 } from './local-regression.mjs';
 import { controllerBinding, evidenceInventory, readLocalJson, writeEvidenceInventory } from './local-evidence.mjs';
-import { LOCAL_FROZEN_CONTROLLER, LOCAL_GIT_SELECTION, LocalRunLock, LocalRunState } from './local-run-state.mjs';
+import { LOCAL_FROZEN_CONTROLLER, LocalRunLock, LocalRunState } from './local-run-state.mjs';
 import { SOURCE_SUITE_TIMEOUT_MS, testTotals } from './local-gate.mjs';
 import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
@@ -275,7 +275,7 @@ export class WindowsLocalGate {
       tools: {}, sources: [] };
     if (scope === 'containment-controls-only') return { binding, live };
     for (const [name, root, selections] of [['npm', this.npmRoot, null], ['pwsh', this.pwshRoot, null],
-      ['git', this.gitRoot, LOCAL_GIT_SELECTION], ['native', this.nativeRoot, null]]) {
+      ['git', this.gitRoot, this.state.gitSelection(this.gitRoot)], ['native', this.nativeRoot, null]]) {
       const { snapshot, fingerprint } = this.state.digest(root, selections);
       live.snapshots.push(snapshot);
       binding.tools[name] = fingerprint;
@@ -374,7 +374,7 @@ export class WindowsLocalGate {
     assert.equal(this.git(root, ['rev-parse', 'HEAD']).trim(), head, 'Source HEAD changed');
     for (const [name, toolRoot, entries] of [
       ['npm', this.npmRoot, null],
-      ['git', this.gitRoot, LOCAL_GIT_SELECTION],
+      ['git', this.gitRoot, this.state.gitSelection(this.gitRoot)],
       ['pwsh', this.pwshRoot, null],
       ...(this.nativeRoot ? [['native', this.nativeRoot, null]] : []),
     ]) {

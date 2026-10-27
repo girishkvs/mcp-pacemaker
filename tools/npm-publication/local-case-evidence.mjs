@@ -13,7 +13,7 @@ import { gitRootOptions } from './local-git.mjs';
 import { treeEntries } from './local-source.mjs';
 import { readLocalBytes, readLocalJson } from './local-evidence.mjs';
 import { exactLocalKeys, localHash, localSha, LOCAL_NODES, releaseRole } from './local-regression.mjs';
-import { validateStageProof } from './stage-proof-contract.mjs';
+import { validateStageProof, PUBLISHED_LEGACY_STAGE_CONTRACT } from './stage-proof-contract.mjs';
 import { auditArguments, auditEvidence } from './local-audit-report.mjs';
 import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../windows-process-lifetime/inventory.mjs';
 import { verifyLegacyFeature } from './legacy-broker-gate.mjs';
@@ -141,13 +141,22 @@ export class LocalCaseReplay {
         assert.notEqual(normalized, 'core.eol', 'Unrecorded checkout EOL configuration is forbidden');
       }
     }
-    const prefix = [...gitRootOptions(cwd),
+    const prefix = [...this.gitRootPrefix(cwd),
       '-c', `core.hooksPath=${EMPTY_GIT}`, '-c', `init.templateDir=${EMPTY_GIT}`,
       '-c', 'credential.helper=', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=',
       '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '-c', 'commit.gpgsign=false',
       '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always'];
     const bytes = this.take('Local Git', 'git', [...prefix, ...args], cwd, binary ? 'base64' : 'utf8');
     return binary ? bytes : bytes.toString('utf8').trimEnd();
+  }
+
+  // The immutable published 1.3.1 peer runs its original producer, which bound each Git command to its
+  // checkout without safe.directory. Every other source records the shared gitRootOptions() vector.
+  gitRootPrefix(cwd) {
+    if (this.gate.source.head === PUBLISHED_LEGACY_STAGE_CONTRACT.head) {
+      return ['-c', `core.worktree=${cwd}`, '-c', 'extensions.worktreeConfig=false'];
+    }
+    return gitRootOptions(cwd);
   }
 
   snapshot(cwd) {

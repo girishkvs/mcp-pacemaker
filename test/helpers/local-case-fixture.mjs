@@ -61,7 +61,7 @@ export class LocalCaseFixture {
   }
 
   command(label, args, cwd, stdout = '', binary = false, executable = 'C:\\publisher-node.exe') {
-    const budgets = { 'Contained source suite': SOURCE_SUITE_TIMEOUT_MS, 'Complete source suite': 1500000 };
+    const budgets = { 'Contained source suite': SOURCE_SUITE_TIMEOUT_MS, 'Complete source suite': SOURCE_SUITE_TIMEOUT_MS };
     this.commands.push({ label, executable, args, cwd, elapsedMs: 1,
       timeoutMs: budgets[label] ?? 900000,
       exitCode: 0, signal: null, error: null, encoding: binary ? 'base64' : 'utf8',

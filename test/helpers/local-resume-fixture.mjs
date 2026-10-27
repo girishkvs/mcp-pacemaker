@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { WindowsLocalGate } from '../../tools/npm-publication/local-windows.mjs';
 import { InputSnapshot } from '../../tools/npm-publication/local-inputs.mjs';
 import { LOCAL_NODES } from '../../tools/npm-publication/local-regression.mjs';
-import { LOCAL_GIT_SELECTION } from '../../tools/npm-publication/local-run-state.mjs';
 import { SESSION_REQUIRED_TESTS } from '../../tools/ci/test-contracts.mjs';
 
 export const RESUME_IMAGE = 'sha256:e7fb7bcc43051b57c111aab28761e35ec2880c523075b06db81c63160d02f7e9';
@@ -16,7 +15,7 @@ export const LEFTOVER_CONTAINER = 'e'.repeat(64);
 // miniature inputs. Docker, Git, the registry and every guest case are replaced; nothing here is
 // qualification evidence.
 export class ResumeFixture {
-  constructor(t) {
+  constructor(t, { gitLayout = 'mingw64' } = {}) {
     this.home = realpathSync.native(mkdtempSync(join(tmpdir(), 'local-resume-')));
     t.after(() => rmSync(this.home, { recursive: true, force: true }));
     this.output = join(this.home, 'run');
@@ -30,9 +29,11 @@ export class ResumeFixture {
       writeFileSync(join(this.tools[name], 'tool.bin'), `SYNTHETIC ${name}`);
     }
     this.tools.git = join(this.home, 'git');
-    for (const path of LOCAL_GIT_SELECTION) mkdirSync(join(this.tools.git, path), { recursive: true });
+    for (const path of ['cmd', `${gitLayout}/bin`, `${gitLayout}/libexec/git-core`, 'usr/bin', 'usr/share']) {
+      mkdirSync(join(this.tools.git, path), { recursive: true });
+    }
     writeFileSync(join(this.tools.git, 'cmd', 'git.exe'), 'SYNTHETIC git');
-    this.execPath = join(this.tools.git, 'mingw64', 'libexec', 'git-core');
+    this.execPath = join(this.tools.git, gitLayout, 'libexec', 'git-core');
     this.tools.node = join(this.home, 'node');
     for (const version of LOCAL_NODES) {
       mkdirSync(join(this.tools.node, `node-v${version}-win-x64`), { recursive: true });
