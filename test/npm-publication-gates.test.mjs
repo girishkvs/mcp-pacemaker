@@ -15,10 +15,14 @@ import {
 import { main as sourceMain, runSourceChecks, validateAudit } from '../tools/npm-publication/source-gates.mjs';
 import { main as artifactMain, runArtifactChecks } from '../tools/npm-publication/artifact-gates.mjs';
 import { POLICY, digest } from '../tools/npm-publication/policy.mjs';
+import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
 import { fixturePlan, ownedDirectory, removeOwnedDirectory } from '../tools/compatibility/fixtures.mjs';
 import { cleanNpmEnvironment } from '../tools/npm-publication/run.mjs';
 import { temporaryEnvironment } from '../tools/npm-publication/gate-environment.mjs';
 import { LICENSE_FAILURE_HINTS } from '../tools/npm-publication/runtime-licenses.mjs';
+import './helpers/npm-ui-advisory-exception.mjs';
+import { PRODUCER_RISK_REVIEW, scanAdvisories } from '../tools/publication-scanners/advisories.mjs';
+import { scanPublicationRequest } from '../tools/publication-scanners/publication.mjs';
 
 // Only the adapter is under test. The child executor remains injected; no hosted reader is called.
 class ExternalRunnerAdapterFixture {
@@ -176,7 +180,7 @@ function cleanAudit() {
 }
 
 class ControlledRunner {
-  constructor(artifact = binding) {
+  constructor(artifact = binding, approvedAt) {
     this.calls = [];
     this.uiPackage = { scripts: { typecheck: 'fixture', test: 'fixture', build: 'fixture' } };
     this.failure = undefined;
@@ -185,15 +189,15 @@ class ControlledRunner {
       ['test', 'compat:prepare', 'compat:clean', 'test:compat', 'test:compat:browser']
         .map(name => [name, 'controlled fixture'])) };
     this.context = {
-      approval: syntheticLocalApproval({ ...artifact.source, version: artifact.version, scope: 'prepare',
+      approval: syntheticLocalApproval({ ...artifact.source, version: artifact.version, scope: 'prepare', approvedAt,
         ref: `refs/tags/v${artifact.version}`, tagObject: 'c'.repeat(40), approver: POLICY.owner }),
       publicPackages: [POLICY.name, 'smol-toml'],
       matrix: { consumerLanes: lanes(artifact).map(result => ({ result })), artifactEvidence: [evidence] },
       peer: {
         tarball: join(tmpdir(), 'not-a-real-peer.tgz'),
-        prepared: { version: artifact.version === '1.3.1' ? '2.0.1' : '1.3.1',
+        prepared: { version: artifact.version.startsWith('1.') ? '2.0.1' : '1.3.1',
           artifact: digest(Buffer.from('controlled opposite candidate fixture')) },
-        comparison: { version: artifact.version === '1.3.1' ? '2.0.1' : '1.3.1',
+        comparison: { version: artifact.version.startsWith('1.') ? '2.0.1' : '1.3.1',
           artifact: digest(Buffer.from('controlled opposite candidate fixture')) },
         inspection: { files: [] }, evidence: {
           ...digest(Buffer.from('controlled opposite candidate fixture')),
@@ -201,6 +205,10 @@ class ControlledRunner {
         },
       },
     };
+    const peerVersion = this.context.peer.comparison.version;
+    const peerSource = this.context.approval.localRegression.subjects.find(item => item.version === peerVersion);
+    this.context.approval.peerArtifact = { version: peerVersion, commit: peerSource.commit,
+      tree: peerSource.tree, ...this.context.peer.comparison.artifact };
     this.nativeIdentity = { fixtureOnly: true, reproducibilityBuild: 'not-executed-in-this-run' };
     this.authorIdentity = { fixtureOnly: true, review: 'pending-owner-review' };
     this.serviceStdout = `${JSON.stringify({ fixtureOnly: true, gate: 'T32-service-replacement' })}\n`;
@@ -270,6 +278,95 @@ function sourceReport(artifact = binding) {
   return runSourceChecks(new ControlledRunner(artifact));
 }
 
+test('Controlled source approval uses the explicit fixture clock and still rejects future approvals', t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  for (const approvedAt of ['2000-01-01T00:00:00.000Z', '2035-01-01T00:00:00.000Z']) {
+    now = Date.parse(approvedAt);
+    const approval = new ControlledRunner(binding, approvedAt).context.approval;
+    assert.equal(approval.approvedAt, approvedAt);
+    assert.equal(approval.localRegression.completedAt, new Date(now - 60_000).toISOString());
+    assert.equal(approval.localRegressionReview.reviewedAt, approvedAt);
+    validateLocalApproval(approval, { continuing: true });
+    const future = syntheticLocalApproval({ ...approval, approvedAt: new Date(now + 1).toISOString() });
+    assert.throws(() => validateLocalApproval(future, { continuing: true }));
+  }
+});
+
+test('Actual source orchestration rejects findings previously covered by the retired producer review', async t => {
+  const at = Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000;
+  t.mock.method(Date, 'now', () => at);
+  const owned = ownedDirectory();
+  t.after(() => removeOwnedDirectory(owned));
+  const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
+  mkdirSync(join(owned.dir, 'ui'));
+  writeFileSync(join(owned.dir, 'ui/package-lock.json'), lockBytes);
+  const rootLockBytes = readFileSync(new URL('./fixtures/producer-root-risk-2.0.2-lock.json', import.meta.url));
+  writeFileSync(join(owned.dir, 'package-lock.json'), rootLockBytes);
+  const names = [...new Set([rootLockBytes, lockBytes].flatMap(bytes =>
+    Object.entries(JSON.parse(bytes).packages).filter(([path]) => path).map(([path, entry]) =>
+      entry.name ?? path.split('node_modules/').at(-1))))];
+  const scanned = await scanPublicationRequest({
+    request: { schemaVersion: 1, phase: 'source', sourceRoot: owned.dir, root: owned.dir,
+      name: POLICY.name, version: '2.0.2', commit: source.commit, requiredGates: ['producer-advisories'] },
+    bindingReader: async () => ({ syntheticIdentityOnly: true }), publicPackages: names,
+    fetchImpl: async (_url, options) => new Response(JSON.stringify({ results: JSON.parse(options.body).queries
+      .map(query => ({ vulns: PRODUCER_RISK_REVIEW.advisories
+        .filter(item => item.package === query.package.name && item.version === query.version)
+        .map(item => ({ id: item.id, modified: '2026-10-06T00:00:08Z' })) })) }),
+    { headers: { 'Content-Type': 'application/json' } }),
+  });
+  assert.equal(scanned.gates['producer-advisories'].status, 'failed');
+  assert.equal(scanned.gates['producer-advisories'].advisoryFree, false);
+  assert.equal(scanned.gates['producer-advisories'].riskAcceptance, undefined);
+  const selected = { ...binding, version: '2.0.2',
+    source: { ...source, version: '2.0.2', uiLockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'],
+      rootLockSha256: scanned.gates['producer-advisories'].osv.scope[0].lockSha256 } };
+  const runner = new ControlledRunner(selected, new Date(at).toISOString());
+  runner.root = owned.dir;
+  mkdirSync(join(owned.dir, 'ui/dist'));
+  writeFileSync(join(owned.dir, 'ui/dist/third-party-manifest.json'),
+    JSON.stringify({ schemaVersion: 1, packages: [], runtimeNotices: [], sources: [] }));
+  const original = runner.npm.bind(runner);
+  runner.npm = (args, label) => {
+    if (!args.includes('audit')) return original(args, label);
+    const ui = args[1] === 'ui';
+    const scope = ui ? 'producer-ui' : 'producer-root';
+    const raw = readFileSync(new URL(`./fixtures/npm-${ui ? 'ui' : 'root'}-202-risk-audit.json`, import.meta.url), 'utf8');
+    return { rawStdout: raw, stdout: raw,
+      evidence: { ...evidence, exitCode: 1, stdoutSha256: digest(Buffer.from(raw)).sha256 },
+      auditContext: { phase: 'source', scope, version: '2.0.2',
+        lockSha256: PRODUCER_RISK_REVIEW.locks[scope], lockBytes: ui ? lockBytes : rootLockBytes } };
+  };
+  const external = runner.external.bind(runner);
+  runner.external = (...args) => {
+    const report = external(...args);
+    report.gates['producer-advisories'] = scanned.gates['producer-advisories'];
+    report.scannerDetails = scanned.scannerDetails;
+    return report;
+  };
+  assert.throws(() => runSourceChecks(runner), /Producer advisory findings remain unresolved/);
+});
+
+test('Actual GateRunner preserves and rejects both finding exit1 and execution exit2', t => {
+  t.mock.method(Date, 'now', () => Date.parse(PRODUCER_RISK_REVIEW.notBefore) + 60_000);
+  const owned = ownedDirectory();
+  t.after(() => removeOwnedDirectory(owned));
+  const file = new URL('./fixtures/npm-ui-202-risk-audit.json', import.meta.url);
+  const raw = readFileSync(file, 'utf8');
+  const lockBytes = readFileSync(new URL('./fixtures/producer-ui-risk-2.0.2-lock.json', import.meta.url));
+  const runner = { owned, logs: [], root: owned.dir, env: process.env };
+  const context = { phase: 'source', version: '2.0.2', scope: 'producer-ui',
+    lockSha256: PRODUCER_RISK_REVIEW.locks['producer-ui'], lockBytes };
+  const args = code => ['-e', `process.stdout.write(${JSON.stringify(raw)});process.exitCode=${code}`];
+  assert.throws(() => GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(1),
+    owned.dir, process.env, context), /remain unresolved/);
+  assert.equal(JSON.parse(readFileSync(runner.logs[0])).exitCode, 1);
+  assert.throws(() => GateRunner.prototype.run.call(runner, 'Owned native audit fixture', process.execPath, args(2),
+    owned.dir, process.env, context));
+  assert.equal(JSON.parse(readFileSync(runner.logs[1])).exitCode, 2);
+});
+
 test('Controlled source orchestration checks disclosure before restores/audits and defers compatibility', () => {
   const runner = new ControlledRunner();
   const result = runSourceChecks(runner);
@@ -324,11 +421,11 @@ test('Missing hooks and failed executable checks cannot produce a source success
   }
 });
 
-test('Disclosure rejection stops source and artifact checks before any producer npm call', () => {
+test('Disclosure rejection stops source and artifact checks before any producer npm call', async () => {
   for (const phase of ['source', 'artifact']) {
     const runner = new ControlledRunner();
     runner.failure = 'publicCoordinates';
-    assert.throws(() => phase === 'source' ? runSourceChecks(runner) :
+    await assert.rejects(async () => phase === 'source' ? runSourceChecks(runner) :
       runArtifactChecks(runner, binding, sourceReport(), evidence), /disclosure/);
     assert.ok(!runner.calls.some(call => ['npm', 'node', 'script', 'external'].includes(call.type)));
   }
@@ -372,12 +469,12 @@ test('Source mutation after executable checks invalidates the source report', ()
   assert.throws(() => runSourceChecks(runner), /changed/);
 });
 
-test('Controlled finalizer consumes all 12 receipts and binds compatibility/T32 to exact own and peer artifacts', () => {
+test('Controlled finalizer consumes all 12 receipts and binds compatibility/T32 to exact own and peer artifacts', async () => {
   for (const version of ['1.3.1', '2.0.1']) {
     const artifact = { ...binding, version, source: { ...source, version } };
     const runner = new ControlledRunner(artifact);
     const report = sourceReport(artifact);
-    const result = runArtifactChecks(runner, artifact, report, evidence);
+    const result = await runArtifactChecks(runner, artifact, report, evidence);
     const peer = runner.context.peer;
     const own = { tarball: artifact.tarball, version, ...artifact.artifact, files: artifact.files };
     const opposite = { tarball: peer.tarball, version: peer.prepared.version,
@@ -388,7 +485,9 @@ test('Controlled finalizer consumes all 12 receipts and binds compatibility/T32 
     assert.equal(calls.find(call => call.type === 'compatibility').artifact, artifact);
     assert.deepEqual(calls.find(call => call.file === 'tools/service-replacement/check.mjs').args, [
       '--legacy-tarball', pair.legacy.tarball, '--legacy-sha256', pair.legacy.sha256,
+      '--legacy-version', pair.legacy.version,
       '--current-tarball', pair.current.tarball, '--current-sha256', pair.current.sha256,
+      '--current-version', pair.current.version,
     ]);
     assert.deepEqual(calls.filter(call => call.type === 'verifyArtifact'), [
       { type: 'verifyArtifact', tarball: peer.tarball, artifact: peer.prepared.artifact },
@@ -429,59 +528,32 @@ test('Controlled finalizer consumes all 12 receipts and binds compatibility/T32 
   }
 });
 
-test('Published T32 peer feeds the finalizer without prepared evidence or replacing historical compatibility', () => {
-  const artifact = { ...binding, version: '1.3.1', source: { ...source, version: '1.3.1' } };
-  const runner = new ControlledRunner(artifact);
-  const peer = runner.context.peer;
-  delete peer.prepared;
-  peer.evidence.origin = 'npm-registry-published';
-  peer.evidence.provenance = { status: 'absent', verification: 'not-performed' };
-  const result = runArtifactChecks(runner, artifact, sourceReport(artifact), evidence);
-  assert.equal(result.peerArtifact, peer.evidence);
-  assert.equal(result.coverage.consumerLanes.length, 12);
-  assert.equal(result.coverage.provenance, 'pending-stage');
-  assert.equal(result.coverage.registrySignatures, 'pending-publication');
-  const compatibility = runner.calls.find(call => call.type === 'compatibility');
-  assert.equal(compatibility.artifact, artifact, 'The published peer must not replace historical compatibility fixtures');
-  const external = runner.calls.find(call => call.type === 'external');
-  assert.equal(external.additional.replacement.approvedArtifacts.current.version, '2.0.1');
-  assert.equal(external.additional.replacement.approvedArtifacts.current.sha256, peer.comparison.artifact.sha256);
-  assert.deepEqual(runner.calls.find(call => call.type === 'verifyArtifact').artifact, peer.comparison.artifact);
-  for (const name of ['licenses-notices', 'runtime-closure', 'native-windows-execution', 'service-replacement',
-    'payload-gitleaks', 'payload-trufflehog']) assert.equal(result.gates[name].status, 'passed');
-  peer.prepared = {};
-  const bad = new ControlledRunner(artifact);
-  bad.context.peer = peer;
-  assert.throws(() => runArtifactChecks(bad, artifact, sourceReport(artifact), evidence), /impersonate/);
-  assert.ok(!bad.calls.some(call => ['npm', 'node', 'compatibility', 'external'].includes(call.type)));
-});
-
-test('Final report binds raw source report bytes, not a reserialized JSON hash', () => {
+test('Final report binds raw source report bytes, not a reserialized JSON hash', async () => {
   const report = sourceReport();
   const raw = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
   const exact = { ...binding, sourceReportSha256: digest(raw).sha256 };
-  const result = runArtifactChecks(new ControlledRunner(), exact, report, evidence);
+  const result = await runArtifactChecks(new ControlledRunner(), exact, report, evidence);
   assert.equal(result.sourceReportSha256, digest(raw).sha256);
   assert.notEqual(result.sourceReportSha256, digest(Buffer.from(JSON.stringify(report))).sha256);
-  assert.throws(() => runArtifactChecks(new ControlledRunner(),
+  await assert.rejects(() => runArtifactChecks(new ControlledRunner(),
     { ...binding, sourceReportSha256: undefined }, report, evidence), /file digest/);
 });
 
-test('Wrong matrix consumer identity/toolchain/bin/UI fails before external checks or finalizer restores', () => {
+test('Wrong matrix consumer identity/toolchain/bin/UI fails before external checks or finalizer restores', async () => {
   for (const field of ['name', 'sha256', 'version', 'npm', 'node', 'platform', 'installScripts',
     'producerLockCopied', 'installedBin', 'bridgeAndUi', 'registrySignature', 'provenance', 'dependencies']) {
     const runner = new ControlledRunner();
     runner.context.matrix.consumerLanes[11].result[field] = 'wrong';
-    assert.throws(() => runArtifactChecks(runner, binding, sourceReport(), evidence));
+    await assert.rejects(() => runArtifactChecks(runner, binding, sourceReport(), evidence));
     assert.ok(!runner.calls.some(call => ['npm', 'node', 'compatibility', 'external', 'publicCoordinates'].includes(call.type)));
   }
   const runner = new ControlledRunner();
   const report = sourceReport();
   report.source.commit = 'e'.repeat(40);
-  assert.throws(() => runArtifactChecks(runner, binding, report, evidence), /bound/);
+  await assert.rejects(() => runArtifactChecks(runner, binding, report, evidence), /bound/);
 });
 
-test('Missing matrix, raw lanes without result wrappers, missing modes and duplicate modes fail before restores', () => {
+test('Missing matrix, raw lanes without result wrappers, missing modes and duplicate modes fail before restores', async () => {
   const variants = [
     undefined, {}, { consumerLanes: lanes() },
     ...lanes().map((_, index) => ({ consumerLanes: lanes().filter((item, at) => at !== index)
@@ -495,17 +567,16 @@ test('Missing matrix, raw lanes without result wrappers, missing modes and dupli
   for (const matrix of variants) {
     const runner = new ControlledRunner();
     runner.context.matrix = matrix;
-    assert.throws(() => runArtifactChecks(runner, binding, sourceReport(), evidence));
+    await assert.rejects(() => runArtifactChecks(runner, binding, sourceReport(), evidence));
     assert.ok(!runner.calls.some(call => ['npm', 'node', 'compatibility', 'external'].includes(call.type)));
   }
 });
 
-test('Missing peer, failed exact compatibility/T32, malformed output and changed peer bytes cannot finalize', () => {
+test('Missing peer, failed exact compatibility/T32, malformed output and changed peer bytes cannot finalize', async () => {
   for (const peer of [undefined, {}, { tarball: '' }]) {
     const runner = new ControlledRunner();
     runner.context.peer = peer;
-    assert.throws(() => runArtifactChecks(runner, binding, sourceReport(), evidence), /peer source artifact/);
-    assert.ok(!runner.calls.some(call => ['npm', 'node', 'compatibility', 'external'].includes(call.type)));
+    await assert.rejects(() => runArtifactChecks(runner, binding, sourceReport(), evidence), /peer source artifact/);
     assert.ok(!runner.calls.some(call => call.type === 'external' ||
       call.file === 'tools/service-replacement/check.mjs'));
   }
@@ -513,12 +584,12 @@ test('Missing peer, failed exact compatibility/T32, malformed output and changed
     'ui/node_modules/playwright/cli.js', 'compatibility', 'tools/service-replacement/check.mjs', 'verifyArtifact']) {
     const runner = new ControlledRunner();
     runner.failure = failure;
-    assert.throws(() => runArtifactChecks(runner, binding, sourceReport(), evidence), /Controlled/);
+    await assert.rejects(() => runArtifactChecks(runner, binding, sourceReport(), evidence), /Controlled/);
     assert.ok(!runner.calls.some(call => call.type === 'external'));
   }
   const malformed = new ControlledRunner();
   malformed.serviceStdout = 'not JSON';
-  assert.throws(() => runArtifactChecks(malformed, binding, sourceReport(), evidence), SyntaxError);
+  await assert.rejects(() => runArtifactChecks(malformed, binding, sourceReport(), evidence), SyntaxError);
   assert.ok(!malformed.calls.some(call => call.type === 'external'));
 });
 

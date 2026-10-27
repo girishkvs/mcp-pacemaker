@@ -12,8 +12,10 @@ import { readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { POLICY } from './policy.mjs';
+import { releaseRole } from './local-regression.mjs';
 
-export function validateSdkContract(libraries, provenance) {
+export function validateSdkContract(libraries, provenance, version) {
+  releaseRole(version);
   for (const name of ['registry', 'publish']) assert.equal(typeof libraries[name], 'function', name);
   assert.equal(typeof libraries.registry.json, 'function');
   assert.equal(typeof libraries.registry.json.stream, 'function');
@@ -25,14 +27,14 @@ export function validateSdkContract(libraries, provenance) {
     assert.equal(typeof provenance[name], 'function', `provenance.${name}`);
   }
   const sha512 = 'a'.repeat(128);
-  assert.deepEqual(provenance.subject(POLICY.name, '2.0.1', sha512),
-    { name: `pkg:npm/${POLICY.name}@2.0.1`, digest: { sha512 } });
+  assert.deepEqual(provenance.subject(POLICY.name, version, sha512),
+    { name: `pkg:npm/${POLICY.name}@${version}`, digest: { sha512 } });
 }
 
 export async function loadLaneSdk(cli, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Unsupported SDK lane');
+  releaseRole(version);
   assert.ok(isAbsolute(cli), 'An absolute pinned npm CLI path is required');
-  if (version === '1.3.1') {
+  if (releaseRole(version) === 'legacy') {
     // Match verify-staged.mjs's npm/sigstore loader, without running its CLI or verifying a bundle.
     const entry = realpathSync.native(cli);
     const pkg = JSON.parse(readFileSync(resolve(dirname(entry), '../package.json'), 'utf8'));
@@ -51,7 +53,7 @@ export async function loadLaneSdk(cli, version) {
   const { npmProvenance, PROVENANCE_SOURCE_SHA256 } = await import('./provenance.mjs');
   const libraries = loadOwnerLibraries(cli);
   const provenance = npmProvenance(cli);
-  validateSdkContract(libraries, provenance);
+  validateSdkContract(libraries, provenance, version);
   assert.match(PROFILE_SOURCE_SHA256, /^[a-f0-9]{64}$/, 'Missing reviewed profile source hash');
   assert.match(PROVENANCE_SOURCE_SHA256, /^[a-f0-9]{64}$/, 'Missing reviewed provenance source hash');
   return { contract: 'owner-sdk-and-provenance',

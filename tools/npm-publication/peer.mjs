@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { exactLocalKeys, validateLocalApproval, validatePreparedLocal, validateLocalRegression } from './local-regression.mjs';
+import { exactLocalKeys, releaseVersions, validateLocalApproval, validatePreparedLocal, validateLocalRegression } from './local-regression.mjs';
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { POLICY, digest, publicationTagName, sameDigests } from './policy.mjs';
+import { POLICY, digest, publicationTagName, sameDigests, validateDistTags } from './policy.mjs';
 import { MATRIX, githubReaders, zipFiles } from './matrix.mjs';
 import { inspectTarball } from './tarball.mjs';
+import { attachedProvenance } from './published-proof.mjs';
+import { boundedAnonymousBytes, verifyProvenance, verifyRegistrySource } from './provenance.mjs';
 import { SECRET_COLLECTION_JOB, assertCollectionJobSkipped, sourceCiAttempt } from './secret-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -33,7 +35,6 @@ function id(value) {
 }
 
 function gitSource(value) {
-  assert.ok(['1.3.1', '2.0.1'].includes(value.version), 'Only opposite PATCH candidates are supported');
   publicationTagName(value.ref, value.version);
   for (const key of ['tagObject', 'commit', 'tree']) {
     assert.match(value[key] ?? '', /^[a-f0-9]{40}$/, `Invalid ${key}`);
@@ -62,10 +63,30 @@ export function validatePeerApproval(approval, env) {
   })) assert.equal(env[key], expected, `Wrong current prepare ${key}`);
   for (const key of ['GITHUB_RUN_ID', 'GITHUB_REPOSITORY_ID', 'GITHUB_REPOSITORY_OWNER_ID']) id(env[key]);
   const peer = approval.peerArtifact;
-  if (peer.kind === PUBLISHED) return validatePublishedApproval(peer, approval);
+  releaseVersions([approval.version, peer.version]);
+  validateLocalRegression(approval.localRegression, peer, Date.parse(approval.approvedAt));
+  if (peer.kind === PUBLISHED) {
+    const hasProof = Object.hasOwn(peer, 'sourceProof');
+    exactLocalKeys(peer, ['kind', 'version', 'commit', 'tree', 'sha256', 'sha512', 'integrity',
+      ...(hasProof ? ['sourceProof'] : [])]);
+    if (hasProof) {
+      const proof = peer.sourceProof;
+      exactLocalKeys(proof, ['kind', 'ref', 'runId', 'runAttempt']);
+      assert.equal(proof.kind, 'registry-slsa-v1');
+      publicationTagName(proof.ref, peer.version);
+      assert.equal(typeof proof.runId, 'string');
+      assert.match(proof.runId, /^[1-9][0-9]{0,19}$/);
+      assert.equal(proof.runAttempt, 1, 'Only the approved original provenance run is accepted');
+    }
+    validateDistTags(approval.expectedDistTags);
+    assert.match(peer.sha256 ?? '', /^[a-f0-9]{64}$/);
+    assert.match(peer.sha512 ?? '', /^[a-f0-9]{128}$/);
+    assert.equal(peer.integrity, `sha512-${Buffer.from(peer.sha512, 'hex').toString('base64')}`);
+    return { ...peer };
+  }
   assert.equal(peer.kind, undefined, 'Unknown peer kind');
+  assert.equal(Object.hasOwn(peer, 'sourceProof'), false, 'sourceProof is only supported for published registry peers');
   gitSource(peer);
-  assert.equal(peer.version, approval.version === '1.3.1' ? '2.0.1' : '1.3.1', 'Peer must be the opposite PATCH');
   for (const key of ['artifactId', 'runId']) id(peer[key]);
   assert.notEqual(id(peer.runId), id(env.GITHUB_RUN_ID), 'Peer must come from a different completed run');
   assert.equal(peer.runAttempt, 1, 'Peer reruns are not accepted');
@@ -73,17 +94,6 @@ export function validatePeerApproval(approval, env) {
   assert.match(peer.sha512 ?? '', /^[a-f0-9]{128}$/, 'Invalid SHA512');
   assert.equal(peer.integrity, `sha512-${Buffer.from(peer.sha512, 'hex').toString('base64')}`);
   assert.match(peer.artifactDigest ?? '', /^sha256:[a-f0-9]{64}$/, 'Invalid approved artifact digest');
-  return { ...peer };
-}
-
-function validatePublishedApproval(peer, approval) {
-  exactLocalKeys(peer, ['kind', 'version', 'commit', 'tree', 'sha256', 'sha512', 'integrity']);
-  assert.equal(approval.version, '1.3.1', 'Published peer currently supports the legacy release only');
-  assert.equal(peer.version, '2.0.1', 'Published peer must be the approved opposite patch');
-  validateLocalRegression(approval.localRegression, peer, Date.parse(approval.approvedAt));
-  assert.match(peer.sha256 ?? '', /^[a-f0-9]{64}$/);
-  assert.match(peer.sha512 ?? '', /^[a-f0-9]{128}$/);
-  assert.equal(peer.integrity, `sha512-${Buffer.from(peer.sha512, 'hex').toString('base64')}`);
   return { ...peer };
 }
 
@@ -132,6 +142,10 @@ export function validatePeerRun({ approval, env, run, jobs }) {
   repositoryBinding(run.head_repository, env);
   ownerBinding(run.actor, env);
   ownerBinding(run.triggering_actor, env);
+  return validatePeerJobs({ peer, jobs });
+}
+
+export function validatePeerJobs({ peer, jobs }) {
   assert.ok(Array.isArray(jobs), 'Actual peer jobs required');
   assertCollectionJobSkipped(jobs);
   const names = new Set(['source', 'prepare', 'stage', 'sign-bootstrap', 'publish-bootstrap',
@@ -257,7 +271,7 @@ export function validatePeerBundle({ approval, env, metadata, archive, tagRef, t
   assert.equal(archive.readUInt16LE(end + 10), 3, 'Unexpected peer ZIP directory/member');
   assert.equal(hash(files.get('prepared.json')), peer.manifestSha256, 'Peer manifest hash mismatch');
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
-  validatePreparedLocal(prepared, approval, peer);
+  validatePreparedLocal(prepared, approval, peer, JSON.parse(files.get('source-gates.json').toString('utf8')));
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);
@@ -335,7 +349,7 @@ function gitReaders(env) {
 
 export async function downloadPeer({
   approval, env, directory, readRun, readJobs, readArtifactMetadata, readArtifactArchive, readTag, readCommit,
-  fetcher, timeoutMs,
+  fetcher, timeoutMs, verifyBundle,
 }) {
   // Snapshot current inputs without changing SHA/ref or impersonating the peer's source job.
   approval = structuredClone(approval);
@@ -343,7 +357,7 @@ export async function downloadPeer({
   const peer = validatePeerApproval(approval, env);
   const target = destination(directory, env);
   if (peer.kind === PUBLISHED) {
-    return downloadPublishedPeer({ approval, env, target, fetcher, timeoutMs });
+    return downloadPublishedPeer({ approval, env, target, fetcher, timeoutMs, verifyBundle });
   }
   const readers = { ...githubReaders(env), ...gitReaders(env),
     ...Object.fromEntries(Object.entries({
@@ -375,7 +389,7 @@ function publishedRegistryBinding(packument, approval) {
   const peer = approval.peerArtifact;
   assert.equal(packument?.name, POLICY.name, 'Published peer package missing');
   assert.ok(packument.maintainers?.some(item => item.name === POLICY.owner), 'Published peer owner mismatch');
-  assert.deepEqual(packument['dist-tags'], { latest: '2.0.1' }, 'Published peer channel state changed');
+  assert.deepEqual(packument['dist-tags'], approval.expectedDistTags, 'Published peer channel state changed');
   assert.ok(packument.versions &&
     typeof packument.versions === 'object' &&
     !Array.isArray(packument.versions), 'Published peer versions missing');
@@ -383,17 +397,31 @@ function publishedRegistryBinding(packument, approval) {
   const version = packument.versions[peer.version];
   assert.equal(version?.name, POLICY.name);
   assert.equal(version.version, peer.version);
-  assert.equal(version.gitHead, peer.commit, 'Published peer registry source mismatch');
+  if (Object.hasOwn(version, 'gitHead')) {
+    assert.match(version.gitHead, /^[a-f0-9]{40}$/, 'Malformed published peer registry gitHead');
+    assert.equal(version.gitHead, peer.commit, 'Published peer registry source mismatch');
+  } else {
+    assert.ok(peer.sourceProof, 'Missing registry gitHead requires an explicitly approved sourceProof');
+  }
   assert.ok(!Object.hasOwn(packument, 'deprecated') &&
     !Object.hasOwn(version, 'deprecated'), 'Deprecated published peer');
   assert.equal(version.dist?.integrity, peer.integrity, 'Published peer registry integrity mismatch');
   assert.match(version.dist.shasum ?? '', /^[a-f0-9]{40}$/);
   assert.equal(version.dist.tarball, `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`,
     'Published peer requires canonical registry tarball URL');
+  if (peer.sourceProof) {
+    assert.equal(version.dist.attestations?.url,
+      `${POLICY.registry}-/npm/v1/attestations/${POLICY.name}@${peer.version}`,
+    'Peer sourceProof requires the canonical registry attestations URL');
+    assert.equal(version.dist.attestations.provenance?.predicateType, 'https://slsa.dev/provenance/v1');
+  }
   return version;
 }
 
-export function validatePublishedPeer({ approval, env, packument, commit, bytes }) {
+export async function validatePublishedPeer({ approval, env, packument, commit, bytes, attestations, verifyBundle }) {
+  approval = structuredClone(approval);
+  packument = structuredClone(packument);
+  commit = structuredClone(commit);
   const peer = validatePeerApproval(approval, env);
   assert.equal(peer.kind, PUBLISHED);
   const version = publishedRegistryBinding(packument, approval);
@@ -402,85 +430,66 @@ export function validatePublishedPeer({ approval, env, packument, commit, bytes 
   assert.ok(Buffer.isBuffer(bytes) &&
     bytes.length > 0 &&
     bytes.length <= PUBLISHED_PEER_LIMITS.tarballBytes, 'Actual bounded published tarball bytes required');
+  bytes = Buffer.from(bytes);
   const artifact = digest(bytes);
   sameDigests(artifact, peer);
   assert.equal(createHash('sha1').update(bytes).digest('hex'), version.dist.shasum,
     'Published peer registry shasum mismatch');
   const inspection = inspectTarball(bytes, peer);
+  let provenance = { status: version.dist.attestations?.provenance ? 'present' : 'absent',
+    verification: 'not-performed' };
+  if (peer.sourceProof) {
+    assert.ok(Buffer.isBuffer(attestations) &&
+      attestations.length > 0 &&
+      attestations.length <= PUBLISHED_PEER_LIMITS.metadataBytes, 'Actual bounded registry attestations required');
+    attestations = Buffer.from(attestations);
+    const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(attestations));
+    const bundle = attachedProvenance(document);
+    const bundleJson = JSON.stringify(bundle);
+    const record = { name: POLICY.name, version: peer.version, artifact,
+      source: { commit: peer.commit, tree: peer.tree, ref: peer.sourceProof.ref },
+      workflow: { runId: peer.sourceProof.runId, attempt: peer.sourceProof.runAttempt,
+        repositoryId: env.GITHUB_REPOSITORY_ID, ownerId: env.GITHUB_REPOSITORY_OWNER_ID } };
+    assert.ok(verifyBundle === undefined ||
+      typeof verifyBundle === 'function', 'Invalid cryptographic verifier');
+    await verifyProvenance({ record, bundle, verifyBundle: verifyBundle ??
+      (value => verifyRegistrySource({ record, bundle: value, cli: env.NPM_PUBLICATION_CLI, env })) });
+    assert.equal(JSON.stringify(bundle), bundleJson, 'Verifier changed the registry bundle');
+    provenance = { status: 'present', verification: 'cryptographically-verified',
+      sourceProof: peer.sourceProof, documentSha256: hash(attestations) };
+  }
   return { bytes, inspection, comparison: { version: peer.version, artifact }, evidence: {
     schemaVersion: 1, origin: PUBLISHED, purpose: 'service-comparison-only', stageEligible: false,
     name: POLICY.name, version: peer.version, source: { commit: peer.commit, tree: peer.tree },
     ...artifact, registry: POLICY.registry, distTags: { ...packument['dist-tags'] },
-    provenance: { status: version.dist.attestations?.provenance ? 'present' : 'absent', verification: 'not-performed' },
+    provenance,
     registrySignatures: 'not-verified-by-this-read',
   } };
 }
 
-async function anonymousBytes(url, limit, fetcher, timeoutMs) {
-  const controller = new AbortController();
-  let timer;
-  let response;
-  const operation = async () => {
-    response = await fetcher(url, {
-      method: 'GET', headers: { accept: 'application/json, application/octet-stream' },
-      credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
-    });
-    controller.signal.throwIfAborted();
-    assert.equal(response.status, 200, 'Published peer read failed; no fallback');
-    assert.notEqual(response.redirected, true, 'Published peer redirect forbidden');
-    if (response.url) assert.equal(response.url, url, 'Published peer response URL changed');
-    const length = response.headers.get('content-length');
-    if (length !== null) {
-      assert.match(length, /^(?:0|[1-9][0-9]{0,8})$/);
-      assert.ok(Number(length) <= limit, 'Published peer response exceeds limit');
-    }
-    const chunks = [];
-    let size = 0;
-    for await (const chunk of response.body) {
-      controller.signal.throwIfAborted();
-      size += chunk.length;
-      assert.ok(size <= limit, 'Published peer response exceeds limit');
-      chunks.push(Buffer.from(chunk));
-    }
-    controller.signal.throwIfAborted();
-    return Buffer.concat(chunks);
-  };
-  try {
-    return await Promise.race([operation(), new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error('Published peer read deadline exceeded'));
-      }, timeoutMs);
-    })]);
-  } catch (error) {
-    controller.abort();
-    if (!response?.body?.locked) response?.body?.cancel?.().catch(() => {});
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function downloadPublishedPeer({
   approval, env, target, fetcher = (...args) => globalThis.fetch(...args),
-  timeoutMs = PUBLISHED_PEER_LIMITS.timeoutMs,
+  timeoutMs = PUBLISHED_PEER_LIMITS.timeoutMs, verifyBundle,
 }) {
   assert.ok(Number.isSafeInteger(timeoutMs) &&
     timeoutMs > 0 &&
     timeoutMs <= PUBLISHED_PEER_LIMITS.timeoutMs, 'Invalid published peer deadline');
   const readJson = async url => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
-    await anonymousBytes(url, PUBLISHED_PEER_LIMITS.metadataBytes, fetcher, timeoutMs)));
+    await boundedAnonymousBytes(url, PUBLISHED_PEER_LIMITS.metadataBytes, fetcher, timeoutMs)));
   const packument = await readJson(`${POLICY.registry}${POLICY.name}`);
   const version = publishedRegistryBinding(packument, approval);
   const peer = approval.peerArtifact;
   const commit = await readJson(`https://api.github.com/repos/${POLICY.repository}/git/commits/${peer.commit}`);
   assert.equal(commit?.sha, peer.commit);
   assert.equal(commit.tree?.sha, peer.tree);
-  const bytes = await anonymousBytes(version.dist.tarball, PUBLISHED_PEER_LIMITS.tarballBytes, fetcher, timeoutMs);
-  const result = validatePublishedPeer({ approval, env, packument, commit, bytes });
+  const bytes = await boundedAnonymousBytes(version.dist.tarball, PUBLISHED_PEER_LIMITS.tarballBytes, fetcher, timeoutMs);
+  const attestations = peer.sourceProof
+    ? await boundedAnonymousBytes(version.dist.attestations.url, PUBLISHED_PEER_LIMITS.metadataBytes, fetcher, timeoutMs)
+    : undefined;
+  const result = await validatePublishedPeer({ approval, env, packument, commit, bytes, attestations, verifyBundle });
   destination(target, env);
   mkdirSync(target, { mode: 0o700 });
   const tarball = join(target, 'peer.tgz');
-  writeFileSync(tarball, bytes, { flag: 'wx', mode: 0o600 });
+  writeFileSync(tarball, result.bytes, { flag: 'wx', mode: 0o600 });
   return { tarball, inspection: result.inspection, comparison: result.comparison, evidence: result.evidence };
 }

@@ -1,10 +1,10 @@
-name: Prepare or stage npm candidate
+name: Collect, prepare, or stage npm candidate
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: Prepare never stages; stage requires separate exact artifact approval
+        description: Collection and preparation do not publish; staging requires separate exact approval
         type: choice
         options: [collect-secrets, prepare, stage]
         default: prepare

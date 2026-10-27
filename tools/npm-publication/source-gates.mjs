@@ -5,14 +5,10 @@ import { GateRunner, gateOptions, passed, readJson, ROOT } from './gates.mjs';
 import { POLICY } from './policy.mjs';
 import { validateLocalApproval } from './local-regression.mjs';
 import { requireHostedLocalPreparation } from './local-regression-hosted.mjs';
+import { classifyNativeAudit, requiresProducerAdvisoryEvidence, validateProducerAdvisories } from '../publication-scanners/advisories.mjs';
 
-export function validateAudit(output) {
-  const report = JSON.parse(output);
-  assert.equal(report.auditReportVersion, 2, 'Unexpected npm12 audit report');
-  assert.deepEqual(report.vulnerabilities, {}, 'Producer advisory findings remain unresolved');
-  for (const severity of ['info', 'low', 'moderate', 'high', 'critical', 'total']) {
-    assert.equal(report.metadata?.vulnerabilities?.[severity], 0, `Producer advisories: ${severity}`);
-  }
+export function validateAudit(output, context, execution) {
+  return classifyNativeAudit(output, execution, context);
 }
 
 export function runSourceChecks(runner) {
@@ -24,12 +20,22 @@ export function runSourceChecks(runner) {
   assert.equal(runner.npm(['--version'], 'Verify publishing npm version').stdout, POLICY.npm);
   const restores = [];
   const audits = [];
+  const auditDetails = [];
   for (const prefix of [[], ['--prefix', 'ui']]) {
     restores.push(runner.npm([...prefix, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'],
       `Restore exact ${prefix.length ? 'UI' : 'root'} producer lock`).evidence);
     const audit = runner.npm([...prefix, 'audit', '--json', '--audit-level=low'],
       `Audit actual ${prefix.length ? 'UI' : 'root'} producer graph`);
-    validateAudit(audit.stdout);
+    const context = audit.auditContext;
+    if (context) {
+      assert.equal(context.phase, 'source');
+      assert.equal(context.scope, prefix.length ? 'producer-ui' : 'producer-root');
+      assert.equal(context.version, source.version);
+      assert.equal(context.lockSha256, prefix.length ? source.uiLockSha256 : source.rootLockSha256);
+    }
+    const detail = validateAudit(audit.rawStdout ?? audit.stdout, context,
+      { exitCode: audit.evidence.exitCode ?? 0 });
+    auditDetails.push({ scope: prefix.length ? 'producer-ui' : 'producer-root', ...detail });
     audits.push(audit.evidence);
   }
   const ui = [runner.npm(['--prefix', 'ui', '--silent', 'run', 'typecheck'], 'UI typecheck').evidence];
@@ -45,18 +51,30 @@ export function runSourceChecks(runner) {
   const sourceTests = runner.script('test').evidence;
   const external = runner.external('source', source);
   assert.deepEqual(runner.snapshot(), source, 'Source, generated files or producer locks changed during gates');
-  return {
+  assert.equal(external.gates['producer-advisories'].status, 'passed', 'Producer advisory scan failed');
+  assert.equal(external.gates['producer-advisories'].riskAcceptance, undefined,
+    'Fresh source checks cannot reuse retired producer risk acceptance');
+  const producerGate = { ...external.gates['producer-advisories'],
+    ...passed(...external.gates['producer-advisories'].evidence, ...audits) };
+  if (requiresProducerAdvisoryEvidence(source.version)) {
+    producerGate.nativeAudits = auditDetails;
+    producerGate.disposition = 'advisory-free';
+    producerGate.advisoryFree = true;
+  }
+  const report = {
     schemaVersion: 1, phase: 'source', source,
     localRegression: runner.context.approval.localRegression,
     toolchain: { node: POLICY.node, npm: POLICY.npm },
-    checks: { restores, sourceTests, uiTests, compatibility: 'pending-exact-tarball' },
+    checks: { restores, sourceTests, uiTests, audits: auditDetails, compatibility: 'pending-exact-tarball' },
     nativeIdentity: external.nativeIdentity, authorIdentity: external.authorIdentity,
     ...(external.scannerDetails?.secrets?.collection
       ? { secretEvidence: external.scannerDetails.secrets } : {}),
     gates: { ...external.gates,
-      'producer-advisories': passed(...external.gates['producer-advisories'].evidence, ...audits),
+      'producer-advisories': producerGate,
       'ui-build': passed(...ui) },
   };
+  validateProducerAdvisories(producerGate, { source, version: source.version, checks: report.checks, complete: true });
+  return report;
 }
 
 export async function main(args = process.argv.slice(2)) {

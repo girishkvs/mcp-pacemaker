@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
+import { releaseRole, validateLocalApproval, validatePreparedLocal } from './local-regression.mjs';
 import { readOwnerLocalAcceptance } from './local-regression-hosted.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -9,6 +9,12 @@ import { inflateRawSync } from 'node:zlib';
 import { POLICY, digest, publicationTagName, sameDigests, validatePackage, validateSource } from './policy.mjs';
 import { inspectTarball } from './tarball.mjs';
 import { consumerSummary } from './gates.mjs';
+import { sourceCiAttempt } from './secret-report.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime, LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST, LIFETIME_FILES } from '../windows-process-lifetime/inventory.mjs';
+import { verifyLegacyFeature, legacyBrokerRequired, verifyLegacyExecution } from './legacy-broker-gate.mjs';
+import { LEGACY_BROKER_TEST } from '../windows-legacy/inventory.mjs';
+import { verifyTaskChannelFeature, taskChannelRequired, verifyTaskChannelExecution } from './task-channel-gate.mjs';
+import { TASK_CHANNEL_TEST } from '../windows-task-channel/inventory.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const LIMIT = 128 * 1024 * 1024;
@@ -59,7 +65,8 @@ export function validateMatrixContext(env, approval, event) {
   assert.equal(approval.scope, 'prepare');
   assert.equal(approval.approver, POLICY.owner);
   assert.equal(approval.name, POLICY.name);
-  assert.ok(['1.3.1', '2.0.1'].includes(approval.version));
+  releaseRole(approval.version);
+  if (Object.hasOwn(approval, 'ciAttempt')) sourceCiAttempt(approval.ciAttempt);
   publicationTagName(approval.ref, approval.version);
   for (const key of ['tagObject', 'commit', 'tree']) assert.match(approval[key] ?? '', /^[a-f0-9]{40}$/);
   // Source preparation checks freshness once. Long-running gates do not spend another approval.
@@ -243,8 +250,7 @@ export function githubReaders(env, { fetcher = fetch } = {}) {
     assert.equal(response.status, 200, 'GitHub read failed; no fallback');
     return response.json();
   };
-  const pages = (path, key) => readGithubPages(
-    page => get(`${path}?per_page=100&page=${page}`), key);
+  const pages = (path, key) => readGithubPages(page => get(`${path}?per_page=100&page=${page}`), key);
   return {
     readJson: get,
     readArtifactMetadata: artifactId => get(`actions/artifacts/${id(artifactId)}`),
@@ -314,7 +320,8 @@ export async function verifyPreparedBundle({
     files.has('source-gates.json'), 'Incomplete prepared bundle');
   assert.equal(sha256(files.get('prepared.json')), env.PREPARED_MANIFEST_SHA256);
   const prepared = JSON.parse(files.get('prepared.json').toString('utf8'));
-  validatePreparedLocal(prepared, approval);
+  validatePreparedLocal(prepared, approval, approval,
+    JSON.parse(files.get('source-gates.json').toString('utf8')));
   assert.equal(prepared.schemaVersion, 1);
   assert.equal(prepared.status, 'prepared-awaiting-platform-gates');
   assert.equal(prepared.name, POLICY.name);
@@ -341,12 +348,16 @@ function requireJob(jobs, lane, env) {
   const matches = jobs.filter(job => job.name === lane.jobName);
   assert.equal(matches.length, 1, `Missing/duplicate current-run job: ${lane.jobName}`);
   const job = matches[0];
+  return validateConsumerJob(job, lane, { runId: env.GITHUB_RUN_ID, commit: env.GITHUB_SHA });
+}
+
+export function validateConsumerJob(job, lane, expected) {
   id(job.id);
   id(job.runner_id);
   assert.ok(job.runner_name);
-  assert.equal(id(job.run_id), id(env.GITHUB_RUN_ID));
+  assert.equal(id(job.run_id), id(expected.runId));
   assert.equal(job.run_attempt, 1);
-  assert.equal(job.head_sha, env.GITHUB_SHA);
+  assert.equal(job.head_sha, expected.commit);
   assert.equal(job.status, 'completed');
   assert.equal(job.conclusion, 'success', `Consumer job did not succeed: ${lane.jobName}`);
   assert.ok(job.labels?.includes(lane.image), 'Consumer ran on a different image');
@@ -431,12 +442,12 @@ function nativeTap(stdout) {
 }
 
 function helperFiles(inspection, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version));
+  releaseRole(version);
   const files = inspection.files.filter(file => file.path.startsWith('bin/windows/'));
   const paths = ['bin/windows/PoolingSecurityHelper.exe', 'bin/windows/PoolingSecurityHelper.build.json',
     'bin/windows/src/AssemblyInfo.cs', 'bin/windows/src/PoolingSecurityHelper.cs',
     'bin/windows/src/PoolingSecurityReader.cs'];
-  if (version === '2.0.1') paths.push('bin/windows/src/PoolingNativeFiles.cs');
+  if (releaseRole(version) === 'current') paths.push('bin/windows/src/PoolingNativeFiles.cs');
   assert.deepEqual(files.map(file => file.path).sort(), paths.sort());
   return files.map(({ path, sha256: hash }) => ({ path, sha256: hash }));
 }
@@ -490,11 +501,39 @@ export async function runMatrix({
         'Checkout helper bytes differ from the tarball');
     }
     const args = ['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs'];
+    const taskChannel = verifyTaskChannelFeature(root);
+    if (taskChannel) {
+      for (const file of taskChannel.files) {
+        assert.equal(bundle.inspection.files.find(item => item.path === file.path)?.sha256, file.sha256,
+          'Task channel checkout differs from the exact candidate tarball');
+      }
+      args.push(TASK_CHANNEL_TEST);
+    }
+    const legacyBroker = verifyLegacyFeature(root);
+    if (legacyBroker) {
+      for (const file of legacyBroker.files) {
+        assert.equal(bundle.inspection.files.find(item => item.path === file.path)?.sha256, file.sha256,
+          'Legacy broker checkout differs from the exact candidate tarball');
+      }
+      args.push(LEGACY_BROKER_TEST);
+    }
+    let processLifetime;
+    if (requiresProcessLifetime(approval.version)) {
+      processLifetime = verifyProcessLifetimeAssets(root, approval.version);
+      for (const file of processLifetime.files) {
+        assert.equal(bundle.inspection.files.find((item) => item.path === file.path)?.sha256, file.sha256,
+          'Lifetime helper checkout differs from the exact candidate tarball');
+      }
+      args.push(LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST);
+    }
     const output = invoke(paths.node, args);
     nativeWindows = {
       status: 'actual-windows-execution', files, counts: nativeTap(output.stdout), stdout: output.stdout,
       evidence: commandEvidence(command(args), output), rebuild: 'not-performed',
       ordinaryDesktopToken: 'not-proven', inheritedBaseline: 'not-verified-by-matrix',
+      ...(legacyBroker ? { legacyBroker } : {}),
+      ...(taskChannel ? { taskChannel } : {}),
+      ...(processLifetime ? { processLifetime } : {}),
     };
   }
   assert.equal(sha256(readFileSync(join(root, 'package-lock.json'))), lockHash, 'Producer lock changed');
@@ -514,6 +553,73 @@ export async function runMatrix({
   return report;
 }
 
+export function validateConsumerReport(report, {
+  approval, prepared, sourceArtifact, workflow, lane, job, inspection, artifactId,
+}) {
+  assert.equal(report.schemaVersion, 2, 'Fresh consumer matrix schema 2 is required');
+  assert.equal(report.phase, 'consumer-matrix');
+  assert.equal(report.name, POLICY.name);
+  assert.equal(report.version, approval.version);
+  assert.deepEqual(report.source, sourceTuple(approval));
+  assert.deepEqual(report.sourceArtifact, sourceArtifact);
+  sameDigests(report.artifact, prepared.artifact);
+  assert.deepEqual(report.workflow, workflow);
+  assert.deepEqual(report.job, { key: 'consumers', name: lane.jobName });
+  assert.equal(report.platform, lane.platform);
+  assert.deepEqual(report.toolchain, { node: lane.node, npm: lane.npm });
+  assert.equal(report.runner.environment, 'github-hosted');
+  assert.equal(report.runner.os, lane.os);
+  assert.ok(['X64', 'ARM64'].includes(report.runner.arch));
+  assert.equal(report.runner.name, job.runner_name);
+  const paths = report.paths;
+  assert.equal(paths.sha256, prepared.artifact.sha256);
+  for (const key of ['node', 'cli', 'root', 'tarball']) {
+    assert.equal(typeof paths[key], 'string');
+    assert.ok(/^(?:[A-Za-z]:[\\/]|\/)/.test(paths[key]), 'Evidence path must be absolute');
+  }
+  const command = args => ({ file: paths.node, args, cwd: paths.root });
+  checkEvidence(report.rootCi, command([paths.cli, 'ci', '--ignore-scripts']));
+  assert.deepEqual(report.consumers.map(item => item.mode), MODES, 'Both consumer modes are required');
+  const consumerLanes = [];
+  for (const consumer of report.consumers) {
+    assert.deepEqual(JSON.parse(consumer.stdout), consumer.result);
+    checkConsumer(consumer.result, lane, approval, prepared.artifact, consumer.mode);
+    checkEvidence(consumer.evidence, command(consumerArgs(paths, approval, consumer.mode)), consumer.stdout);
+    consumerLanes.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
+      mode: consumer.mode, result: consumer.result, evidence: consumer.evidence,
+      artifactId: id(artifactId), jobId: id(job.id) });
+  }
+  const nativeWindowsEvidence = [];
+  if (lane.platform === 'win32') {
+    const native = report.nativeWindows;
+    assert.equal(native.status, 'actual-windows-execution');
+    assert.deepEqual(native.files, helperFiles(inspection, approval.version));
+    assert.equal(native.rebuild, 'not-performed');
+    assert.equal(native.ordinaryDesktopToken, 'not-proven');
+    assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
+    assert.deepEqual(native.counts, nativeTap(native.stdout));
+    const nativeArgs = ['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs'];
+    if (taskChannelRequired(inspection.files)) nativeArgs.push(TASK_CHANNEL_TEST);
+    verifyTaskChannelExecution(native, inspection);
+    if (legacyBrokerRequired(inspection.files)) nativeArgs.push(LEGACY_BROKER_TEST);
+    verifyLegacyExecution(native, inspection);
+    if (requiresProcessLifetime(approval.version)) {
+      nativeArgs.push(LIFETIME_TEST, LIFETIME_STARTUP_TEST, LIFETIME_IDENTITY_TEST);
+      assert.equal(native.processLifetime?.status, 'source-and-binary-hashes-verified');
+      assert.deepEqual(native.processLifetime.files.map((file) => file.path), [...LIFETIME_FILES]);
+      for (const file of native.processLifetime.files) {
+        assert.equal(inspection.files.find((item) => item.path === file.path)?.sha256, file.sha256);
+      }
+    }
+    checkEvidence(native.evidence, command(nativeArgs), native.stdout);
+    nativeWindowsEvidence.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
+      ...native, artifactId: id(artifactId), jobId: id(job.id) });
+  } else {
+    assert.deepEqual(report.nativeWindows, { status: 'not-applicable', reason: 'Not a Windows runner' });
+  }
+  return { consumerLanes, nativeWindowsEvidence };
+}
+
 export async function verifyMatrixReports({ directory, approval, prepared, env, ...injected }) {
   validateMatrixContext(env, approval);
   const readers = { ...githubReaders(env), ...injected };
@@ -531,53 +637,12 @@ export async function verifyMatrixReports({ directory, approval, prepared, env, 
     const files = await verifiedArchive(metadata, readers, join(directory, metadata.name));
     assert.deepEqual([...files.keys()], ['report.json'], 'Each matrix artifact must contain exactly one report');
     const report = JSON.parse(files.get('report.json').toString('utf8'));
-    assert.equal(report.schemaVersion, 2, 'Fresh consumer matrix schema 2 is required');
-    assert.equal(report.phase, 'consumer-matrix');
-    assert.equal(report.name, POLICY.name);
-    assert.equal(report.version, approval.version);
-    assert.deepEqual(report.source, sourceTuple(approval));
-    assert.deepEqual(report.sourceArtifact, bundle.sourceArtifact);
-    sameDigests(report.artifact, prepared.artifact);
-    assert.deepEqual(report.workflow, workflowBinding(env));
-    assert.deepEqual(report.job, { key: 'consumers', name: lane.jobName });
-    assert.equal(report.platform, lane.platform);
-    assert.deepEqual(report.toolchain, { node: lane.node, npm: lane.npm });
-    assert.equal(report.runner.environment, 'github-hosted');
-    assert.equal(report.runner.os, lane.os);
-    assert.ok(['X64', 'ARM64'].includes(report.runner.arch));
-    assert.equal(report.runner.name, job.runner_name);
-    const paths = report.paths;
-    assert.equal(paths.sha256, prepared.artifact.sha256);
-    for (const key of ['node', 'cli', 'root', 'tarball']) {
-      assert.equal(typeof paths[key], 'string');
-      assert.ok(/^(?:[A-Za-z]:[\\/]|\/)/.test(paths[key]), 'Evidence path must be absolute');
-    }
-    const command = args => ({ file: paths.node, args, cwd: paths.root });
-    checkEvidence(report.rootCi, command([paths.cli, 'ci', '--ignore-scripts']));
-    assert.deepEqual(report.consumers.map(item => item.mode), MODES, 'Both consumer modes are required');
-    for (const consumer of report.consumers) {
-      assert.deepEqual(JSON.parse(consumer.stdout), consumer.result);
-      checkConsumer(consumer.result, lane, approval, prepared.artifact, consumer.mode);
-      checkEvidence(consumer.evidence, command(consumerArgs(paths, approval, consumer.mode)), consumer.stdout);
-      consumerLanes.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
-        mode: consumer.mode, result: consumer.result, evidence: consumer.evidence,
-        artifactId: id(metadata.id), jobId: id(job.id) });
-    }
-    if (lane.platform === 'win32') {
-      const native = report.nativeWindows;
-      assert.equal(native.status, 'actual-windows-execution');
-      assert.deepEqual(native.files, helperFiles(bundle.inspection, approval.version));
-      assert.equal(native.rebuild, 'not-performed');
-      assert.equal(native.ordinaryDesktopToken, 'not-proven');
-      assert.equal(native.inheritedBaseline, 'not-verified-by-matrix');
-      assert.deepEqual(native.counts, nativeTap(native.stdout));
-      checkEvidence(native.evidence,
-        command(['--test', '--test-reporter=tap', 'test/windows-security-helper.test.mjs']), native.stdout);
-      nativeWindowsEvidence.push({ platform: lane.platform, node: lane.node, npm: lane.npm,
-        ...native, artifactId: id(metadata.id), jobId: id(job.id) });
-    } else {
-      assert.deepEqual(report.nativeWindows, { status: 'not-applicable', reason: 'Not a Windows runner' });
-    }
+    const validated = validateConsumerReport(report, {
+      approval, prepared, sourceArtifact: bundle.sourceArtifact, workflow: workflowBinding(env),
+      lane, job, inspection: bundle.inspection, artifactId: metadata.id,
+    });
+    consumerLanes.push(...validated.consumerLanes);
+    nativeWindowsEvidence.push(...validated.nativeWindowsEvidence);
     artifactEvidence.push({ id: id(metadata.id), name: metadata.name, digest: metadata.digest,
       reportSha256: sha256(files.get('report.json')), runId: env.GITHUB_RUN_ID, attempt: 1,
       jobId: id(job.id), jobName: job.name });

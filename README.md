@@ -27,13 +27,13 @@ is separate planned work.
 ## Quick start
 
 This README describes **1.3.x legacy behavior**. New installations should use the current
-[2.0.x documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v2.0.1/README.md).
+[2.1.x documentation](https://github.com/girishkvs/mcp-pacemaker/blob/v2.1.2/README.md).
 See the [support policy](SECURITY.md#supported-versions) for the legacy maintenance window.
 
 Use a maintained **Node.js 22 or 24** release; see [installation requirements](#install)
-before setup. `2.0.1` is available from the official npm package linked above.
+before setup. `2.1.2` is available from the official npm package linked above.
 
-The compatibility checks cover **1.3.0 / 2.0.0** and the **1.3.1 / 2.0.1** patch pair.
+The compatibility checks cover **1.3.0 / 2.0.0** and the **1.3.2 / 2.1.2** patch pair.
 This describes tested version pairs, not npm publication status.
 A 2.x client handles legacy immediate saves. A 1.x client cannot write pooling settings to a
 2.x bridge: update the CLI and refresh old dashboard tabs. Before downgrading, settle pending
@@ -42,11 +42,11 @@ for exact pairs; other minor versions are not covered.
 
 ```bash
 # Current line for new installations:
-npm install -g mcp-pacemaker@2.0.1
+npm install -g mcp-pacemaker@2.1.2
 mcp-pacemaker --version
 ```
 
-The version check prints `2.0.1` and does not run setup. Before setup, have a readable
+The version check prints `2.1.2` and does not run setup. Before setup, have a readable
 JSON host configuration containing server definitions, or prepare
 [`~/.mcp-pacemaker/servers.json`](#serversjson). Import sources are `vscode`, `cursor`,
 `claude` (Claude Desktop), `copilot-cli` and `gemini`. Codex and Claude Code are wiring
@@ -172,7 +172,7 @@ Its repository link should point to
 For new installations, use the current line rather than this branch's legacy save behavior:
 
 ```bash
-npm install -g mcp-pacemaker@2.0.1
+npm install -g mcp-pacemaker@2.1.2
 mcp-pacemaker --version
 ```
 

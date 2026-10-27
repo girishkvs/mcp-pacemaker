@@ -69,16 +69,22 @@ sleeping a fixed interval.
 
 ## Real-version compatibility gates
 
+The dashboard uses the Tailwind 4 PostCSS adapter. Its optimizer stays disabled
+until generated selectors and license attribution have been checked; Vite still
+minifies the final CSS. Keep the inline Vite and standalone PostCSS settings
+consistent, and check the dashboard before regenerating it and the notices.
+
 These gates run actual legacy/current CLI, API and built dashboard code, not mocked backend
-responses. Scope is explicitly **1.3.0, 1.3.1, 2.0.0 and 2.0.1**. The maintained branches use
-the same harness, with exact version assertions and separate historical evidence.
+responses. Scope is the fixed **1.3.0 / 2.0.0** baselines and the packed patch versions. The
+maintained branches use the same harness, with exact version assertions and separate
+historical evidence.
 
 | Preparation | Selected legacy / current pair |
 |---|---|
-| Default in this 1.3.1 checkout | Packed 1.3.1 / immutable 2.0.0 |
-| Default in the 2.0.1 checkout | Immutable 1.3.0 / packed 2.0.1 |
+| Default in this 1.3.2 checkout | Packed 1.3.2 / immutable 2.0.0 |
+| Default in the 2.1.2 checkout | Immutable 1.3.0 / packed 2.1.2 |
 | `npm run compat:prepare:baseline` | Immutable 1.3.0 / immutable 2.0.0 |
-| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.1 / packed 2.0.1 |
+| `npm run compat:prepare -- --peer-root <opposite-patch-checkout>` | Packed 1.3.2 / packed explicit 2.x peer |
 
 ```bash
 npm run compat:prepare
@@ -100,7 +106,7 @@ Linux/Node 22 Chromium lane. Node 20 is legacy runtime compatibility, not a supp
 
 Publication artifact gates add `--candidate-tarball <absolute.tgz> --candidate-sha256 <digest>`.
 This supplies the checkout's own candidate role without repacking it: here that is the legacy
-1.3.1 role. Complete input hashes and the archive digest must match; historical mode cannot
+1.3.2 role. Complete input hashes and the archive digest must match; historical mode cannot
 substitute a patch. The manifest also records the exact npm CLI version.
 
 Historical sources are pinned to `2d525f4ced01b978a5aeb83aef69145e96cced05` (1.3.0) and
@@ -125,7 +131,7 @@ Unresolved transactions, arbitrary ACL changes and OS-service installation are s
 
 ## npm consumer validation
 
-`npm run consumer:check -- --tarball <absolute-file> --sha256 <digest> --version 1.3.1 --name mcp-pacemaker`
+`npm run consumer:check -- --tarball <absolute-file> --sha256 <digest> --version 1.3.2 --name mcp-pacemaker`
 uses an owned disposable project and a separate global prefix. It does not copy the producer
 lock: it records fresh dependency resolution, checks the installed command shim and exercises
 the packaged bridge, CLI and UI assets with synthetic servers/private state.

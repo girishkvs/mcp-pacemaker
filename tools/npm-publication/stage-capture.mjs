@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { closeSync, fsyncSync, openSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { channelFor, publicationTagName } from './policy.mjs';
 
 export const STAGE_URL = 'https://registry.npmjs.org/-/stage/package/mcp-pacemaker';
 export const CAPTURE_LIMITS = Object.freeze({
@@ -37,11 +38,10 @@ export function captureSubject(record) {
     source: record.source, workflow: record.workflow, artifact: record.artifact,
   };
   assert.equal(subject.name, 'mcp-pacemaker');
-  assert.ok(['1.3.1', '2.0.1'].includes(subject.version));
-  assert.equal(subject.channel, subject.version === '1.3.1' ? 'legacy' : 'latest');
+  assert.equal(subject.channel, channelFor(subject.version));
   keys(subject.source, ['ref', 'tagObject', 'commit', 'tree']);
   for (const key of ['tagObject', 'commit', 'tree']) assert.match(subject.source[key], /^[a-f0-9]{40}$/);
-  assert.ok(subject.source.ref.startsWith('refs/tags/'));
+  publicationTagName(subject.source.ref, subject.version);
   keys(subject.workflow, ['ref', 'commit', 'runId', 'attempt']);
   assert.equal(subject.workflow.ref,
     `girishkvs/mcp-pacemaker/.github/workflows/npm-publish.yml@${subject.source.ref}`);

@@ -8,21 +8,27 @@ import {
 import { connect, createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { releaseRole } from '../npm-publication/local-regression.mjs';
 import {
   isolatedEnvironment, removeOwnedDirectory, run, sha256,
 } from '../compatibility/fixtures.mjs';
 import { inspectTarball, extractTarball } from '../npm-publication/tarball.mjs';
+import { LIFETIME_FILES, requiresProcessLifetime } from '../windows-process-lifetime/inventory.mjs';
+import { LEGACY_BROKER_FILES } from '../windows-legacy/inventory.mjs';
+import { legacyBrokerRequired } from '../npm-publication/legacy-broker-gate.mjs';
+import { TASK_CHANNEL_FILES } from '../windows-task-channel/inventory.mjs';
+import { taskChannelRequired } from '../npm-publication/task-channel-gate.mjs';
 import {
   CompatibilityBridge, assertImmediate, assertPending, assertSnapshot, waitFor,
 } from '../../test/compat/bridge.mjs';
 
-const versions = { legacy: '1.3.1', current: '2.0.1' };
+const roles = ['legacy', 'current'];
 const auditUnavailable = 'Automatic pooling edits require readable audit policy so security can be preserved. No config data was written.';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function replacementOptions(args) {
   const values = {};
-  const allowed = Object.keys(versions).flatMap((role) => [`--${role}-tarball`, `--${role}-sha256`]);
+  const allowed = roles.flatMap((role) => [`--${role}-tarball`, `--${role}-sha256`, `--${role}-version`]);
   for (let index = 0; index < args.length; index++) {
     const key = args[index];
     assert.ok(allowed.includes(key), `Unknown service-replacement option: ${key}`);
@@ -32,7 +38,9 @@ export function replacementOptions(args) {
       !value.startsWith('--'), `Missing value for ${key}`);
     values[key] = value;
   }
-  return Object.fromEntries(Object.entries(versions).map(([role, version]) => {
+  return Object.fromEntries(roles.map(role => {
+    const version = values[`--${role}-version`];
+    assert.equal(releaseRole(version), role, `--${role}-version must select the exact supported role`);
     const tarball = values[`--${role}-tarball`];
     assert.ok(tarball, `--${role}-tarball is required; source checkouts cannot substitute for artifacts`);
     assert.match(tarball, /\.tgz$/i, `--${role}-tarball must be a .tgz file`);
@@ -63,6 +71,9 @@ export function readArtifact(spec, version) {
   for (const path of [
     'supervisor/supervise.mjs', 'supervisor/bridge-child.mjs', 'bin/service-control.mjs',
     'bin/pooling-writer.mjs', 'bin/windows/PoolingSecurityHelper.exe',
+    ...(requiresProcessLifetime(version) ? LIFETIME_FILES : []),
+    ...(legacyBrokerRequired(inspection.files) ? LEGACY_BROKER_FILES : []),
+    ...(taskChannelRequired(inspection.files) ? TASK_CHANNEL_FILES : []),
   ]) {
     assert.ok(inspection.files.some((file) => file.path === path &&
       file.size > 0), `Missing packed lifecycle/runtime file: ${path}`);
@@ -181,7 +192,7 @@ class ReplacementService extends CompatibilityBridge {
   async select(artifact) {
     this.artifact = artifact;
     this.control = await import(`${pathToFileURL(join(this.root, 'bin', 'service-control.mjs')).href}?sha256=${artifact.sha256}`);
-    if (artifact.version === versions.current) {
+    if (releaseRole(artifact.version) === 'current') {
       const module = await import(`${pathToFileURL(join(this.root, 'bin', 'pooling-files.mjs')).href}?sha256=${artifact.sha256}`);
       this.PoolingFiles = module.PoolingFiles;
     }
@@ -450,12 +461,12 @@ async function legacyWrite(service, baseline) {
     assert.deepEqual(fileState(service.config), identity);
     assert.equal((await service.snapshot()).prewarm.revision, before.prewarm.revision);
   } else {
-    assertImmediate(response.body, versions.legacy);
+    assertImmediate(response.body, service.artifact.version);
     assert.equal(JSON.parse(service.text()).alpha.sharing, 'isolated');
     const restored = await service.mutation({ undoId: response.body.undoId }, false);
     assert.equal(restored.status, 200, restored.text);
     assert.equal(restored.body.ok, true);
-    assertSnapshot(restored.body.snapshot, versions.legacy);
+    assertSnapshot(restored.body.snapshot, service.artifact.version);
     assert.equal(service.text(), service.original);
   }
   assert.ok(service.workers().length > 0, 'The legacy write/refusal must run its real lazy worker');
@@ -467,7 +478,7 @@ async function legacyWrite(service, baseline) {
 async function currentWrite(service) {
   const changed = await service.mutation({ mode: 'isolated' });
   assert.equal(changed.status, 202, changed.text);
-  assertPending(changed.body, versions.current);
+  assertPending(changed.body, service.artifact.version);
   assert.equal(service.text(), service.original, 'Staging must not replace the active config');
   assert.ok(service.workers().length > 0, 'A real 2.x worker must service stageApply');
   const applied = await service.applied(changed.body.batchId);
@@ -475,7 +486,7 @@ async function currentWrite(service) {
   assert.equal(applied.servers.find((server) => server.name === 'alpha').sharing, 'isolated');
   const restored = await service.mutation({ undoId: changed.body.undoId });
   assert.equal(restored.status, 202, restored.text);
-  assertPending(restored.body, versions.current);
+  assertPending(restored.body, service.artifact.version);
   assert.equal(JSON.parse(service.text()).alpha.sharing, 'isolated', 'Undo must stage before activation');
   const settled = await service.applied(restored.body.batchId);
   assertSettled(settled);
@@ -485,8 +496,10 @@ async function currentWrite(service) {
 
 export async function checkReplacement(options) {
   // Both exact artifacts must pass before any process or install/config fixture exists.
-  const artifacts = Object.fromEntries(Object.entries(versions).map(([role, version]) =>
-    [role, readArtifact(options[role], version)]));
+  const artifacts = Object.fromEntries(roles.map(role => {
+    assert.equal(releaseRole(options[role]?.version), role);
+    return [role, readArtifact(options[role], options[role].version)];
+  }));
   for (const path of ['bin/pooling-writer.mjs', 'bin/windows/PoolingSecurityHelper.exe']) {
     assert.notEqual(artifacts.legacy.files.find((file) => file.path === path).sha256,
       artifacts.current.files.find((file) => file.path === path).sha256, `Expected distinct major generations: ${path}`);

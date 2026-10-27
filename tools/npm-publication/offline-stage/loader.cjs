@@ -60,7 +60,8 @@ if (mode === 'loader-main') {
   const { installStageCapture } = await import(pathToFileURL(join(root, 'tools/npm-publication/stage-sdk.mjs')));
   const directory = join(home, 'capture');
   mkdirSync(directory);
-  assert.throws(() => installStageCapture({ cli, expected: fixture('2.0.1').record, directory }),
+  const version = JSON.parse(readFileSync(join(root, 'package.json'))).version;
+  assert.throws(() => installStageCapture({ cli, expected: fixture(version).record, directory }),
     /loader distribution changed|empty module cache|require.resolve/);
   assert.equal(globalThis[marker], undefined, 'Alternate/cache code executed before rejection');
   assert.deepEqual(denied, []);

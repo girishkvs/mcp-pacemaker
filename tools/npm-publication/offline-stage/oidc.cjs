@@ -3,12 +3,13 @@
 const attempts = require('./deny.cjs');
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
-const { writeFileSync } = require('node:fs');
+const { readFileSync, writeFileSync } = require('node:fs');
 const { join, dirname, resolve } = require('node:path');
 const [cliArgument, homeArgument] = process.argv.slice(2);
 const cli = resolve(cliArgument);
 const req = createRequire(cli);
 const home = resolve(homeArgument);
+const version = JSON.parse(readFileSync(join(__dirname, '../../../package.json'))).version;
 for (const name of ['user.npmrc', 'global.npmrc', 'saved.sigstore']) {
   writeFileSync(join(home, name), name.endsWith('sigstore') ? '{"fixture":"saved"}' : '', { flag: 'wx' });
 }
@@ -65,18 +66,18 @@ const configFor = args => new Config({
   await config.load();
   assert.equal(config.isDefault('provenance'), true);
   const opts = { ...config.flat, stage: true, access: 'public', registry: 'https://registry.npmjs.org/',
-    defaultTag: 'legacy', npmVersion: '12.0.2', fetchRetries: 0 };
+    defaultTag: version.startsWith('1.') ? 'legacy' : 'latest', npmVersion: '12.0.2', fetchRetries: 0 };
   assert.equal(opts.provenanceFile, saved);
   await req(join(dirname(dirname(cli)), 'lib/utils/oidc.js')).oidc({
     packageName: 'mcp-pacemaker', registry: opts.registry, opts, config,
   });
   console.log(JSON.stringify({ syntheticOnly: true, requests, diagnostics, attempts }));
   assert.equal(opts.provenance, true, 'Actual OIDC must reproduce default-provenance replacement');
-  await req('libnpmpublish').publish({ name: 'mcp-pacemaker', version: '1.3.1' },
+  await req('libnpmpublish').publish({ name: 'mcp-pacemaker', version },
     Buffer.from('synthetic tarball, not a publication candidate'), opts);
   assert.equal(generated, 1);
   assert.equal(verified, 0);
-  const data = body._attachments['mcp-pacemaker-1.3.1.sigstore'].data;
+  const data = body._attachments[`mcp-pacemaker-${version}.sigstore`].data;
   assert.equal(typeof data, 'string');
   assert.ok(JSON.parse(data).dsseEnvelope);
   assert.notEqual(data, '{"fixture":"saved"}');

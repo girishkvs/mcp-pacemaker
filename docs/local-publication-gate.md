@@ -5,6 +5,60 @@ does not publish, authenticate, download dependencies, alter the live bridge, or
 replace the genuine hosted publication evidence. A successful report always says
 `releaseReady: false`.
 
+This checkout is the 1.x legacy line. It targets the **1.3.2** legacy-line
+candidate (channel `legacy`). It cannot run the gate itself; see
+[Legacy (1.x) release](#legacy-1x-release).
+
+The controller inventory also binds the native-audit/source-gate and OSV
+adapter/evaluator files. The temporary
+[2.0.2 CLI-runtime and UI-build risk review](npm-publishing.md#temporary-202-producer-risk-acceptance)
+does not waive local qualification or authenticate it. Its raw findings and expiry
+remain explicit; old controller evidence is invalid after these source changes.
+The immutable 1.3.1 stage-proof contract and its original member pins are unchanged.
+
+Published-peer `sourceProof` is a separate approved ref/run pin, not a local qualification
+receipt. Its registry SLSA is verified through the pinned SDK in a fresh bounded child;
+local evidence cannot stand in for that registry proof. The source/verifier/loader inputs
+are included in the controller and stage-proof bindings. See the published-peer contract
+in [npm publishing](npm-publishing.md).
+
+Stage proof schema 4 has source-specific, independently selected file contracts.
+New/current sources require the complete current `STAGE_PROOF_FILES` inventory,
+including the registry-peer verifier. The immutable published 1.3.1 source
+`688b1038f88f020312230a94ff355732c34ae185` retains its original 20-file contract.
+Selection requires its exact Git commit, tree, package version and all 20 pinned
+Git member identities (including the original contract and loader), not its label
+or a report-supplied inventory. The actual bounded Git reader and checked-out bytes
+bind that selection before replay. Unknown sources use the full current contract.
+
+The immutable producer still runs its own unchanged proof code. Its schema-4 case
+semantics match the current replay checks, so the current verifier checks all 48
+cases against the original source's exact file contract without upgrading or
+relabelling the receipt. Current-source proofs cannot substitute the smaller
+historical inventory. Read-only compatibility replay of an old receipt is a
+component preflight, never a new completed paired qualification.
+
+## Legacy (1.x) release
+
+A 1.x checkout cannot be the gate controller. The controller inventory
+(`LOCAL_CONTROLLER` in `tools/npm-publication/local-regression.mjs`) hashes
+`bin/runtime-context.mjs`, `tools/ci/execution-context.mjs`, `tools/ci/run-tests.mjs`
+and `tools/ci/test-process.mjs`, which exist only on the 2.x line.
+
+For a 1.x release such as 1.3.2:
+
+1. The peer is the published 2.x release **2.1.2** (`latest`). Every run needs one
+   1.x and one 2.x version, so a 1.x peer is rejected.
+2. Start `local-windows.mjs` (or `publication:local-gate`) from the 2.x checkout and
+   pass this 1.x checkout as `--peer-root`.
+3. Run `publication:verify-local` from the same 2.x checkout, with this checkout as
+   `--legacy-root`. It checks the controller files of the checkout it runs from.
+4. These parts apply only to 2.x cases, not to the 1.x cases: the session lane,
+   audit companions, the `ContainerUser` check, the execution-contract preflight,
+   the process lifetime and task channel helpers, and the `windows-ordinary` CI
+   lane. 1.x cases keep their original image account and producer code, and 1.x CI
+   runs its Windows suite in `test (windows-latest, <node>)` jobs.
+
 ## Required private verification and owner acceptance
 
 After the complete run, invoke `publication:verify-local` (or its Node entrypoint)
@@ -18,16 +72,20 @@ with these explicit local paths:
   --npm-root C:\retained\npm\node_modules\npm `
   --git-root 'C:\Program Files\Git' `
   --pwsh-root 'C:\Program Files\PowerShell\7' `
-  --node-root C:\retained\nodes
+  --node-root C:\retained\nodes `
+  --native-packages C:\retained\native-packages
 ```
 
 The verifier does not run tests, npm, Docker, a signing SDK or a network request.
 It reads bounded private evidence, compares original TAR/command receipts and
 re-enumerates the frozen and live inputs. Missing, partial, controls-only,
-changed or old-schema evidence fails. It prints a compact `localRegression`
-statement only after those checks; **it never generates owner acceptance**.
+changed or old-schema evidence fails, as does a run history that does not match
+`run-state.json` (see [Resume an interrupted run](#resume-an-interrupted-run)). It
+prints a compact `localRegression` statement only after those checks; **it never
+generates owner acceptance**.
 
-Fresh inner reports use schema 4 and retain a private `fixture.tgz` alongside
+Fresh current-line inner reports use schema 5; the immutable legacy producer
+retains schema 4. Both retain a private `fixture.tgz` alongside
 the command receipts. The verifier recomputes its SHA256, SHA512 and SRI,
 independently inspects the compressed tarball and requires its complete file
 inventory to match both npm's raw output and the frozen published source bytes.
@@ -47,12 +105,12 @@ empty or partial receipt does not qualify.
 
 The component-only `verifyRecordedSteps` API can inspect older private diagnostic
 evidence, but it does not accept a case or produce a publication statement.
-`verifyRawSteps` requires schema 4, retained compressed bytes, a verified Git
+`verifyRawSteps` requires schema 4/5, retained compressed bytes, a verified Git
 checkout binding and the offline stage proof. Older evidence is not upgraded
 or relabelled as qualification for changed source.
 
 The stage proof records the exact bytes executed in `checkout-false`, not the
-raw Windows input snapshot. Inner schema 4 records `core.eol=crlf` explicitly
+raw Windows input snapshot. Inner schemas 4 and 5 record `core.eol=crlf` explicitly
 for each Git checkout, alongside its `core.autocrlf` setting. Committed `eol=lf`
 attributes still force LF for MJS/JSON; `text=auto` CJS follows the explicit
 Windows checkout policy. Declared binary files remain byte-exact.
@@ -70,7 +128,8 @@ The in-memory checkout binding is created by those verified Git reads, not
 accepted from report JSON. Standalone proof generation/validation still hashes
 the exact raw execution root. All changed verifier/producer modules were already
 in `LOCAL_CONTROLLER`; their changed bytes invalidate an old controller binding.
-Outer reports remain schema 2 and nested stage proofs remain schema 4. Component
+Fresh outer reports use schema 3; nested stage proofs remain schema 4. The public
+compact statement schema, contract and six-source-case coverage are unchanged. Component
 replay can inspect older inner schemas 1/2/3 (including the historical Windows
 native-EOL policy only when no local `core.eol` override was recorded), but cannot
 produce a fresh qualifying result. New source still needs a new full run.
@@ -147,7 +206,8 @@ node tools\npm-publication\local-windows.mjs `
   --peer-root Q:\checkouts\other-release-line `
   --output Q:\evidence\new-run-directory `
   --node-root C:\retained\nodes `
-  --pwsh-root 'C:\Program Files\PowerShell\7'
+  --pwsh-root 'C:\Program Files\PowerShell\7' `
+  --native-packages C:\retained\native-packages
 ```
 
 `publication:local-gate` invokes this same contained launcher. Never invoke the
@@ -155,10 +215,39 @@ inner `local-gate.mjs` as a substitute. Its default entrypoint refuses a full ru
 `--controls-only` exercises the isolation controls, not the source or publication
 path; its report cannot stand for a complete gate.
 
-Every full run requires both 1.3.1 and 2.0.1 and runs their complete registered
+Every full run requires one explicitly selected stable 1.x legacy source and one
+stable 2.x current source, and runs their complete registered
 source suites on Node 20, 22, and 24. It does not change test concurrency, shorten
 the selected suite, increase application deadlines, or retry failures. UI and
 publisher operations use the separately pinned Node 24.21.0 runtime.
+
+Current-line source cases use the image's existing `ContainerUser`, with a fresh
+production ordinary-caller check before execution. Each also requires a separate
+privileged audit companion from the same frozen input manifest and Node executable.
+Legacy cases retain their original image account and producer code. There are
+three containment controls, six complete source cases and three audit companions;
+no host account, image, policy or production guard is changed.
+
+Before the current source suite, the gate invokes the same
+execution-contract preflight as CI (see `docs/execution-context.md` in the 2.x
+checkout), for the `source-ordinary` contract. The verifier requires its exact original
+receipt. `ContainerUser` is an ordinary caller but supplies no real WTS logon, so the
+contained suite excludes the four
+`SESSION_REQUIRED_TESTS` files and records them in `sessionDeferredTests`. The host half
+runs exactly those files and the verifier requires their `session-lane.json` receipt,
+bound to the same commit. Neither the audit companion nor a previously passing subset
+makes that source case complete.
+
+Full qualification also takes the two already-retained, hash-pinned archives used
+by Windows CI (see `tools/windows-ci/README.md` in the 2.x checkout): the Roslyn
+compiler package and matching .NET 4.6.2 reference cabinet. They are frozen with both
+inputs and checked again by the offline verifier. Before each current-line source suite,
+the existing
+CI restorer extracts them into owned guest work storage with an explicit offline
+`-PackageDirectory`. Its exact returned paths are recorded and passed to the nine
+native fixture builders. No download, machine installation, compiler fallback or
+legacy-producer change is made. Containment-only controls do not require these
+archives.
 
 The source-suite child receives `CI=true` and an owned temporary-directory alias
 inside the guest work directory. This covers CI-dependent behavior and temporary
@@ -167,6 +256,89 @@ linked inputs remain rejected. Tests for local-only operations must scope and
 restore their own local environment and separately verify CI rejection. These
 conditions do not supply GitHub identity, credentials, or authenticated hosted
 evidence, and do not change the environment of the other gate commands.
+
+PowerShell's module-analysis cache is explicitly placed under each owned command
+home, so profile-less module loading cannot add cache files to the source checkout.
+
+## Resume an interrupted run
+
+A full run takes hours and stops at its first failing case. To keep the steps that
+already passed, run the launcher again with the same arguments, replacing
+`--output NEW_DIRECTORY` with `--resume RUN_DIRECTORY`:
+
+```powershell
+node tools\npm-publication\local-windows.mjs `
+  --npm-cli C:\retained\npm\node_modules\npm\bin\npm-cli.js `
+  --peer-root Q:\checkouts\other-release-line `
+  --resume Q:\evidence\new-run-directory `
+  --node-root C:\retained\nodes `
+  --pwsh-root 'C:\Program Files\PowerShell\7' `
+  --native-packages C:\retained\native-packages
+```
+
+Every run writes `run-state.json` before its first case and updates it as each step
+starts and passes. It records the run binding: run ID, scope, pinned image, the Docker
+engine (server version, API version, OS and kernel), the Windows build and update
+revision (UBR), argument paths, Git root, the complete controller binding, the three Node
+runtime hashes, and canonical hashes of the npm, PowerShell, Git and native-package trees
+and of both source selections (commit, tree, checkout files and retained dependencies).
+The input steps compare their frozen copies with this binding, so an input that changes
+after the run starts fails the run. Each passed step adds a checkpoint with the hash of its
+evidence members and of the command journal up to that point. Runs started before this
+file existed cannot be resumed. The launcher resolves the run path once, so
+`RUN_DIRECTORY` and `RUN_DIRECTORY\` name the same run.
+
+The plan is fixed: the three controls, `inputs-<current>`, `inputs-<legacy>`,
+`session-lane`, the current-line audit and source cases, then the legacy source cases.
+Passed steps always form a prefix of it. A resume:
+
+1. Refuses unless the live binding is identical to the recorded one. A changed controller
+   file, Docker engine, Windows build or update revision, source commit, tree or byte,
+   retained dependency, npm, PowerShell, Git or native-package file, Node runtime, image or
+   argument path refuses, so controls proven on one engine and build never stand for cases
+   run on another. It also refuses a run that already passed, a controls-only run
+   (`--resume` with `--controls-only` is rejected), a run directory without
+   `run-state.json`, a clock that stepped back behind the recorded history, and a second
+   launcher on a run directory that a live launcher holds. Each launcher holds a named
+   pipe derived from its run directory, which Windows releases when the process exits.
+   A Windows cumulative update or a Docker update changes the UBR or engine version, so a
+   run interrupted across one of those cannot be resumed and must start over.
+2. Re-hashes every reused step against its checkpoint: each case directory and its
+   storage-admission receipt, `session-lane.json`, and each input manifest with every
+   copied input byte. It also checks the frozen controller and runtime trees, the empty
+   Docker configuration and the checkpointed command receipts. Any difference refuses.
+3. Sets aside everything after the last checkpoint into the sibling directory
+   `RUN_DIRECTORY.attempts\before-invocation-N`: the failed or partial case directory, its
+   storage-admission receipt, the failed `result.json`, a partial input directory and the
+   command receipts written after that checkpoint. Receipts move from the highest number
+   down, so a resume killed part way still leaves a contiguous journal for the next one.
+   Nothing is deleted. Any other member refuses.
+4. Kills and removes any container that still carries the run's ownership label, with the
+   same stopped-state, zero-PID and absence checks as case cleanup. It does not stop host
+   processes; make sure a killed launcher's session-lane child has exited before resuming.
+5. Keeps the run ID and reruns the first step that has not passed, and every later step,
+   from scratch.
+
+A refusal changes nothing in the run directory. Because the session lane runs the live
+working tree, every run re-verifies all frozen inputs right after the lane, and its receipt
+is reused only after that check passed. Before a run records a pass it checks that its
+evidence inventory can be built. A run cut off after recording the pass, which leaves
+`evidence-manifest.json` missing or partly written, resumes: that invocation is recorded as
+failed and the next one reruns nothing. Any other passed run refuses, and says so if its
+evidence no longer matches its inventory. Each invocation keeps its own deadline; nothing
+bounds the total time across invocations.
+
+The final `result.json` records every invocation in `invocations`: start and end time (an
+interrupted invocation has no end time), status (`failed`, `interrupted` or `passed`), binding
+hash, the steps it reused and ran, and what it set aside or removed. A normal run has one
+invocation. The verifier requires that history to equal `run-state.json` and rejects it
+unless invocation numbers have no gap or duplicate, each invocation reused exactly the
+passed prefix and ran the next steps in plan order, every planned step passed exactly once,
+only the last invocation passed, and every invocation has the same binding hash. The
+binding must match the report's controller, image and runtimes and both frozen input
+manifests, cases must appear in plan order, and every checkpointed evidence member and
+command receipt must still match its checkpoint hash. The compact `localRegression`
+statement is unchanged; resume details stay in the private report.
 
 ## Isolation and evidence
 
@@ -202,10 +374,13 @@ Admission may wait up to 60 seconds for the required free space, recording its
 samples before starting a case. This does not retry any test.
 No Docker daemon settings, existing images, or unrelated containers are changed.
 
-The complete source suite has a dedicated 25-minute harness budget inside a
-30-minute guest-case budget. Ordinary inner commands retain their 15-minute
-default, timeout controls retain 15 seconds, and the whole run remains bounded
-at two hours. The source budget covers complete native-heavy suites; it does not
+The contained source suite has a dedicated 60-minute harness budget on the current
+release line; legacy cases keep the 25-minute budget their own line shipped, and the
+verifier checks each recorded budget against the label the case used. The host session
+lane is bounded separately at 40 minutes. Ordinary inner commands retain their 15-minute
+default, timeout controls retain 15 seconds, and each launcher invocation is bounded by a
+whole-run deadline derived from the cases it plans. A resumed run has no bound across
+invocations. The source budget covers complete native-heavy suites; it does not
 change application/helper deadlines, test concurrency, or test selection.
 Each inner command receipt records its actual `timeoutMs`.
 
@@ -222,13 +397,20 @@ Evidence export is a bounded 128 MiB TAR stream, not an unbounded directory copy
 Only regular files/directories with safe, unique paths are extracted; the output
 volume must retain its reserve. Disposable checkouts, dependencies and temporary
 files are kept outside the exported receipt directory.
-The current-line source suite requires a non-skipped audit oracle in each guest.
-The gate selects a restricted worker token with the same user, medium integrity,
+Each current-line audit companion requires the existing audit test to pass without
+a skip. Its privileged verifier selects a restricted worker token with the same user, medium integrity,
 administrator membership disabled and no security privilege. Its suspended child
 enters an owned kill-on-close job before running the original 19-case worker.
 The elevated oracle verifies the actual audit, label, owner, group and DACL state
 afterward. Missing privileges, worker failures or an unavailable report fail the
 required case. No Explorer process or interactive desktop is needed.
+
+The ordinary source suite retains its actual capability-skip result for this
+privileged test; it is not relabeled as a pass. The separate audit is mandatory on
+every current-line Node version. The offline verifier requires the original audit
+command, exact test selection, successful exit, unchanged source, matching input
+manifest/runtime and all 19 audit cases. Missing, swapped, skipped, failed or
+changed companion evidence rejects the entire qualification.
 
 The restricted worker has a 120-second test-only deadline within a 150-second
 PowerShell test budget. These cover the measured native process startup cost in
@@ -239,11 +421,16 @@ runtime. Missing, duplicate, changed or skipped audit evidence cannot qualify.
 Ordinary test runs retain the existing Explorer mode and its 20-second worker /
 30-second PowerShell budgets. A capability skip there remains explicitly a skip,
 not security coverage. Legacy has no equivalent audit test and is not relabeled.
+The companion Node command has a 210-second envelope for that unchanged oracle,
+its existing cleanup control and process overhead; the audit guest is bounded to
+five minutes. Companion reports are private schema-1 `local-privileged-audit`
+records, not full-source or publication-success reports.
 
 Each run writes private command vectors, exit/error/signal details, byte hashes,
 guest facts, input manifests and original results. Keep this evidence outside
 the repository. A changed input invalidates the run; do not combine passing
-pieces from different source snapshots into a green report.
+pieces from different source snapshots into a green report. A resumed run combines
+only steps bound to the identical recorded inputs.
 
 ## Publication regression coverage
 

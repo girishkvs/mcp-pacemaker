@@ -1,18 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
 import {
-  LocalGate, HOSTED_BOUNDARIES, SOURCE_SUITE_TIMEOUT_MS, localEnvironment, testArguments, testTotals,
+  existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync,
+  truncateSync, writeFileSync,
+} from 'node:fs';
+import { join, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import {
+  LocalGate, HOSTED_BOUNDARIES, SOURCE_SUITE_TIMEOUT_MS, localEnvironment, selectedTestFiles, testArguments, testTotals,
 } from '../../tools/npm-publication/local-gate.mjs';
-import { evidenceEntryFilter, validateContainer, WindowsLocalGate } from '../../tools/npm-publication/local-windows.mjs';
+import {
+  evidenceEntryFilter, launcherArguments, validateContainer, WindowsLocalGate,
+} from '../../tools/npm-publication/local-windows.mjs';
 import { InputSnapshot, safeName, verifyManifest, writeManifest } from '../../tools/npm-publication/local-inputs.mjs';
 import { LocalGitConfig } from '../../tools/npm-publication/local-git.mjs';
 import { LocalSourceReader } from '../../tools/npm-publication/local-source.mjs';
 import { bindGuestIdentity, windowsSystemEnvironment } from '../../tools/npm-publication/local-environment.mjs';
+import { localCaseUser, localCases, localCommitment, LOCAL_NATIVE_PACKAGES } from '../../tools/npm-publication/local-regression.mjs';
+import { LocalRunLock, LocalRunState, localRunPlan } from '../../tools/npm-publication/local-run-state.mjs';
+import { evidenceInventory } from '../../tools/npm-publication/local-evidence.mjs';
+import { verifyLocalHeader } from '../../tools/npm-publication/verify-local.mjs';
+import { LEFTOVER_CONTAINER, ResumeFixture } from './local-resume-fixture.mjs';
+import { CONTROLLER_SKIP } from './legacy-checkout.mjs';
 
 function totals(overrides = {}) {
   return Object.entries({ tests: 3, pass: 2, fail: 0, cancelled: 0, skipped: 1, todo: 0, ...overrides })
@@ -40,11 +52,18 @@ function runner(t) {
 test('local gate selects complete explicit Node files without shell or name-filter substitutions', () => {
   assert.deepEqual(testArguments('node --test test/a.test.mjs test/b.test.mjs'),
     ['--test', '--test-reporter=tap', 'test/a.test.mjs', 'test/b.test.mjs']);
+  assert.deepEqual(testArguments('node --test --test-concurrency=6 test/a.test.mjs test/b.test.mjs'),
+    ['--test', '--test-concurrency=6', '--test-reporter=tap', 'test/a.test.mjs', 'test/b.test.mjs']);
+  assert.deepEqual(selectedTestFiles(testArguments('node --test --test-concurrency=6 test/a.test.mjs')),
+    ['test/a.test.mjs']);
   for (const script of [
     'node --test', 'echo passed', 'node --test --test-name-pattern=missing test/a.test.mjs',
     'node --test test/a.test.mjs && exit 0', 'node --test test/a.test.mjs test/a.test.mjs',
     'node --test test/a.test.mjs;exit', 'node --test ../test/a.test.mjs',
-    'node --test test/../a.test.mjs',
+    'node --test test/../a.test.mjs', 'node --test --test-concurrency=6',
+    'node --test --test-concurrency=0 test/a.test.mjs',
+    'node --test --test-concurrency=100 test/a.test.mjs',
+    'node --test --concurrency=6 test/a.test.mjs',
   ]) assert.throws(() => testArguments(script));
 });
 
@@ -60,7 +79,8 @@ test('local environment excludes owner credentials, hosted identity, proxies, in
   const parent = { ...process.env, NPM_TOKEN: 'never-issued', GITHUB_TOKEN: 'never-issued',
     NODE_OPTIONS: '--bad', HTTPS_PROXY: 'https://invalid.invalid', GITHUB_ACTIONS: 'true',
     RUNNER_ENVIRONMENT: 'github-hosted', MCP_BRIDGE_PORT: '8792',
-    MCP_POOLING_TRACE_ARTIFACT_DIR: 'unowned', DOCKER_HOST: 'tcp://invalid.invalid' };
+    MCP_POOLING_TRACE_ARTIFACT_DIR: 'unowned', DOCKER_HOST: 'tcp://invalid.invalid',
+    PSModuleAnalysisCachePath: 'unowned-cache' };
   const env = localEnvironment(parent, join(directory(t), 'home'));
   for (const key of ['NPM_TOKEN', 'GITHUB_TOKEN', 'NODE_OPTIONS', 'HTTPS_PROXY', 'GITHUB_ACTIONS',
     'RUNNER_ENVIRONMENT', 'MCP_BRIDGE_PORT', 'MCP_POOLING_TRACE_ARTIFACT_DIR', 'DOCKER_HOST']) {
@@ -68,6 +88,7 @@ test('local environment excludes owner credentials, hosted identity, proxies, in
   }
   assert.equal(env.npm_config_offline, 'true');
   assert.equal(env.npm_config_ignore_scripts, 'true');
+  assert.equal(env.PSModuleAnalysisCachePath, join(env.HOME, 'powershell-module-cache'));
   assert.equal(readFileSync(env.npm_config_userconfig, 'utf8'), '');
   assert.equal(readFileSync(env.npm_config_globalconfig, 'utf8'), '');
 });
@@ -127,15 +148,30 @@ test('source-suite harness budget is explicit while ordinary commands and timeou
     gate.root, false, SOURCE_SUITE_TIMEOUT_MS);
   const records = gate.steps.map(step => JSON.parse(readFileSync(join(gate.output, step.file))));
   assert.equal(records[0].timeoutMs, 15 * 60_000);
-  assert.equal(records[1].timeoutMs, 25 * 60_000);
+  assert.equal(records[1].timeoutMs, 60 * 60_000);
   assert.throws(() => gate.command('over-budget command', process.execPath, ['-e', 'process.exit(0)'],
     gate.root, false, SOURCE_SUITE_TIMEOUT_MS + 1), /Invalid command deadline/);
   assert.equal(gate.steps.length, 2);
   const outer = Object.create(WindowsLocalGate.prototype);
-  assert.equal(outer.caseTimeout('gate'), 30 * 60_000);
+  assert.ok(outer.caseTimeout('gate') > SOURCE_SUITE_TIMEOUT_MS,
+    'The outer case must outlast the complete source suite it contains');
+  assert.equal(outer.caseTimeout('gate'), SOURCE_SUITE_TIMEOUT_MS + 30 * 60_000);
+  assert.equal(outer.caseTimeout('audit'), 5 * 60_000);
   assert.equal(outer.caseTimeout('fail'), 20 * 60_000);
   for (const mode of ['timeout', 'timeout-early-exit']) assert.equal(outer.caseTimeout(mode), 15_000);
   assert.throws(() => outer.caseTimeout('unknown'), /Unsupported local case mode/);
+});
+
+test('qualification keeps all six source cases and requires an audit companion for each current runtime', () => {
+  const cases = localCases(['1.3.1', '2.1.0']);
+  assert.equal(cases.length, 12);
+  assert.equal(cases.filter(item => item.mode === 'gate').length, 6);
+  assert.equal(cases.filter(item => item.mode === 'audit').length, 3);
+  for (const item of cases) {
+    const ordinary = item.mode === 'gate' && item.version === '2.1.0';
+    assert.equal(localCaseUser(item.mode, item.version), ordinary ? 'ContainerUser' : '');
+  }
+  assert.throws(() => localCaseUser('audit', '1.3.1'));
 });
 
 test('the local Windows launcher rejects uncontained, wrong-owner or credential-bearing containers', () => {
@@ -148,6 +184,11 @@ test('the local Windows launcher rejects uncontained, wrong-owner or credential-
       StorageOpt: { size: '4GB' }, IOMaximumBandwidth: 32 * 1024 ** 2 },
   };
   validateContainer(value, binding);
+  const ordinary = structuredClone(value);
+  ordinary.Config.User = 'ContainerUser';
+  validateContainer(ordinary, { ...binding, user: 'ContainerUser' });
+  assert.throws(() => validateContainer(value, { ...binding, user: 'ContainerUser' }));
+  assert.throws(() => validateContainer(ordinary, binding));
   for (const mutate of [
     v => { v.Config.Labels['pacemaker.local-gate'] = 'someone-else'; },
     v => { v.Image = 'wrong'; },
@@ -224,8 +265,8 @@ test('retained directory re-enumeration rejects newly added package or tool file
   assert.throws(() => snapshot.verify(), /Input inventory or content changed/);
 });
 
-test('actual tool input wiring rejects top-level npm and pwsh additions, including empty directories', t => {
-  for (const tool of ['npm', 'pwsh']) {
+test('actual tool input wiring rejects top-level npm, pwsh and native additions, including empty directories', t => {
+  for (const tool of ['npm', 'pwsh', 'native']) {
     for (const kind of ['file', 'directory']) {
       const home = directory(t);
       const root = join(home, 'source');
@@ -237,7 +278,7 @@ test('actual tool input wiring rejects top-level npm and pwsh additions, includi
       mkdirSync(gate.output);
       gate.snapshots = [];
       gate.sourceBindings = [];
-      for (const name of ['npm', 'pwsh', 'git']) {
+      for (const name of ['npm', 'pwsh', 'git', 'native']) {
         gate[`${name}Root`] = join(home, name);
         mkdirSync(gate[`${name}Root`]);
       }
@@ -276,6 +317,38 @@ test('actual tool input wiring rejects top-level npm and pwsh additions, includi
       assert.throws(() => gate.verifyInputs(), /Input inventory or content changed/, `${tool}/${kind}`);
     }
   }
+});
+
+test('local native archives match the unchanged CI restore pins', () => {
+  const script = readFileSync(new URL('../../tools/windows-ci/restore-toolchain.ps1', import.meta.url), 'utf8');
+  for (const [name, hash] of Object.entries(LOCAL_NATIVE_PACKAGES)) {
+    assert.ok(script.includes(`Name = '${name}'`));
+    assert.ok(script.includes(`Sha256 = '${hash}'`));
+  }
+  const gate = Object.create(WindowsLocalGate.prototype);
+  assert.throws(() => gate.run(), /--native-packages/);
+});
+
+test('native archive admission bounds files and rejects links before hashing', t => {
+  const root = directory(t);
+  const names = Object.keys(LOCAL_NATIVE_PACKAGES);
+  const gate = Object.create(WindowsLocalGate.prototype);
+  for (const name of names) writeFileSync(join(root, name), '');
+  truncateSync(join(root, names[0]), 129 * 1024 ** 2);
+  assert.throws(() => gate.nativeInputs(root), /Oversized/);
+  rmSync(join(root, names[0]));
+  const target = join(directory(t), 'archive-directory');
+  mkdirSync(target);
+  symlinkSync(target, join(root, names[0]), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => gate.nativeInputs(root), /Linked/);
+  // Windows junctions report as directories, so the link itself needs the recursive form to
+  // unlink on every supported Node version. Removal never follows the link to its target.
+  rmSync(join(root, names[0]), { recursive: true });
+  mkdirSync(join(root, names[0]));
+  assert.throws(() => gate.nativeInputs(root), /regular files/);
+  rmSync(join(root, names[0]), { recursive: true });
+  writeFileSync(join(root, names[0]), 'wrong archive');
+  assert.throws(() => gate.nativeInputs(root), /hash differs/);
 });
 
 test('actual source identity binds a clean Git tree and declared checkout bytes before rejecting edits', t => {
@@ -398,7 +471,8 @@ test('Git key parsing never follows includes and rejects parser failure or chang
   }), /Git configuration changed/);
   writeFileSync(config, allowed);
   const binding = new LocalGitConfig(gate.root, gate.gitEmpty, parse);
-  assert.deepEqual(binding.options(), ['-c', `core.worktree=${gate.root}`, '-c', 'extensions.worktreeConfig=false']);
+  assert.deepEqual(binding.options(), ['-c', `safe.directory=${gate.root}`,
+    '-c', `core.worktree=${gate.root}`, '-c', 'extensions.worktreeConfig=false']);
   writeFileSync(config, '[core] fsmonitor = changed\n');
   assert.throws(() => binding.verify(), /Git configuration changed/);
   writeFileSync(config, '[invalid syntax');
@@ -479,4 +553,501 @@ test('successful local controls do not remove genuine hosted and publication bou
   assert.ok(HOSTED_BOUNDARIES.some(item => item.includes('Fresh registry')));
   assert.ok(HOSTED_BOUNDARIES.some(item => item.includes('OIDC')));
   assert.ok(HOSTED_BOUNDARIES.some(item => item.includes('Actual staged provenance')));
+});
+
+const FULL_SCOPE = 'both-release-lines-local-only';
+const PLAN = localRunPlan(FULL_SCOPE, ['1.3.1', '2.1.0']);
+const notInput = step => !step.startsWith('inputs-');
+
+test('a normal local run records one complete invocation and still verifies', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  const report = f.gate().run();
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(f.ran, PLAN.filter(notInput));
+  assert.equal(report.invocations.length, 1);
+  const [invocation] = report.invocations;
+  assert.deepEqual([invocation.index, invocation.status, invocation.reused, invocation.ran, invocation.setAside,
+    invocation.removedContainers], [1, 'passed', [], PLAN, null, []]);
+  assert.equal(invocation.startedAt, report.startedAt);
+  assert.equal(invocation.completedAt, report.completedAt);
+  assert.deepEqual(f.json('run-state.json').binding.platform, { docker: { version: f.server.Version,
+    apiVersion: f.server.ApiVersion, os: f.server.Os, kernelVersion: f.server.KernelVersion }, windows: f.windows });
+  verifyLocalHeader(report);
+  assert.deepEqual(f.json('evidence-manifest.json'), evidenceInventory(f.output));
+  new LocalRunState(f.output).verify(report, f.inputs());
+  assert.equal(existsSync(f.attempts), false, 'A normal run sets nothing aside');
+});
+
+test('a resumed run reruns only the failed case onwards and preserves the failed attempt aside', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  const failed = PLAN.indexOf('v2.1.0-node20.20.2');
+  f.failRun(PLAN[failed]);
+  const before = f.json('run-state.json');
+  const bound = before.checkpoints.at(-1).commands;
+  const report = f.gate(true).run();
+  assert.equal(report.status, 'passed');
+  assert.equal(report.runId, before.runId);
+  assert.equal(report.startedAt, before.startedAt);
+  assert.deepEqual(f.ran, PLAN.slice(failed));
+  assert.deepEqual(report.invocations.map(item => item.status), ['failed', 'passed']);
+  assert.deepEqual(report.invocations[0].ran, PLAN.slice(0, failed + 1));
+  assert.deepEqual(report.invocations[1].reused, PLAN.slice(0, failed));
+  assert.deepEqual(report.invocations[1].ran, PLAN.slice(failed));
+  const aside = join(f.attempts, 'before-invocation-2');
+  const receipts = readdirSync(join(aside, 'commands')).map(name => Number.parseInt(name, 10)).sort((a, b) => a - b);
+  assert.equal(receipts[0], bound + 1, 'Only receipts after the last checkpoint are set aside');
+  assert.deepEqual(report.invocations[1].setAside, { directory: 'before-invocation-2',
+    members: ['result.json', PLAN[failed], `${PLAN[failed]}-storage-admission.json`], commands: [bound + 1, receipts.at(-1)] });
+  assert.equal(JSON.parse(readFileSync(join(aside, 'result.json'))).status, 'failed');
+  assert.equal(JSON.parse(readFileSync(join(aside, PLAN[failed], 'result.json'))).status, 'failed');
+  assert.deepEqual(f.json('run-state.json').checkpoints.slice(0, failed), before.checkpoints,
+    'Checkpoints of the reused steps are carried forward unchanged');
+  const runState = new LocalRunState(f.output);
+  assert.deepEqual(report.cases.map(item => item.name), PLAN.filter(step => runState.isCase(step)));
+  for (const item of report.cases) assert.equal(item.status, 'passed');
+  verifyLocalHeader(report);
+  assert.deepEqual(f.json('evidence-manifest.json'), evidenceInventory(f.output));
+  runState.verify(report, f.inputs());
+});
+
+test('a killed run resumes from its last checkpoint and removes the container it left running', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  const first = f.gate();
+  first.createState(FULL_SCOPE);
+  first.caseStep('failure-control', 'fail');
+  first.caseStep('timeout-control', 'timeout');
+  f.interrupt(first, PLAN[2]);
+  assert.equal(existsSync(join(f.output, 'result.json')), false);
+  f.ran.length = 0;
+  const report = f.gate(true).run();
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(f.ran, PLAN.slice(2).filter(notInput));
+  const [killed, resumed] = report.invocations;
+  assert.deepEqual([killed.status, killed.completedAt, killed.ran], ['interrupted', null, PLAN.slice(0, 3)]);
+  assert.deepEqual(resumed.reused, PLAN.slice(0, 2));
+  assert.deepEqual(resumed.removedContainers, [LEFTOVER_CONTAINER]);
+  assert.equal(f.containers.size, 0, 'The leftover owned container was removed');
+  assert.deepEqual(resumed.setAside.members, [PLAN[2], `${PLAN[2]}-storage-admission.json`]);
+  const receipts = join(f.attempts, 'before-invocation-2', 'commands');
+  assert.ok(readdirSync(receipts).some(name => readFileSync(join(receipts, name)).length === 0),
+    'The receipt cut off by the kill is preserved aside, not left in the journal');
+  assert.equal(existsSync(join(f.output, 'run-state.json.tmp')), false, 'The cut-off state write was replaced');
+  verifyLocalHeader(report);
+  assert.deepEqual(f.json('evidence-manifest.json'), evidenceInventory(f.output));
+  new LocalRunState(f.output).verify(report, f.inputs());
+});
+
+test('a leftover container that keeps a process after kill is not removed and fails the resume', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  const first = f.gate();
+  first.createState(FULL_SCOPE);
+  first.caseStep('failure-control', 'fail');
+  f.interrupt(first, 'timeout-control');
+  f.containers.get(LEFTOVER_CONTAINER).stuck = true;
+  assert.throws(() => f.gate(true).run(), /The owned container still has a process after kill/);
+  assert.equal(f.containers.has(LEFTOVER_CONTAINER), true, 'A container that still has a process is left in place');
+});
+
+test('resume refuses a changed controller, platform, source, tool, runtime or image and leaves the run untouched', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  f.failRun('v1.3.1-node20.20.2');
+  const statePath = join(f.output, 'run-state.json');
+  const before = f.tree();
+  const add = path => {
+    writeFileSync(path, 'SYNTHETIC unbound addition');
+    return () => rmSync(path);
+  };
+  const changes = [
+    [/the controller binding differs/, () => {
+      // A live controller edit cannot be staged inside the repository under test, so the run records another one.
+      const value = f.json('run-state.json');
+      value.binding.controller.files[0].sha256 = '0'.repeat(64);
+      value.binding.controller.sha256 = localCommitment(value.binding.controller.files);
+      value.bindingSha256 = localCommitment(value.binding);
+      for (const invocation of value.invocations) invocation.bindingSha256 = value.bindingSha256;
+      return f.replace(statePath, JSON.stringify(value));
+    }],
+    [/the platform binding differs/, () => {
+      f.server.Version = '24.0.7';
+      return () => { f.server.Version = '20.10.15+azure'; };
+    }],
+    [/the platform binding differs/, () => {
+      f.windows.ubr++;
+      return () => { f.windows.ubr--; };
+    }],
+    [/the sources binding differs/, () => {
+      f.heads.set(f.roots[0], 'f'.repeat(40));
+      return () => f.heads.set(f.roots[0], 'a'.repeat(40));
+    }],
+    [/the sources binding differs/, () => f.replace(join(f.roots[1], 'node_modules', 'retained.js'), 'changed peer dependency')],
+    [/the tools binding differs/, () => add(join(f.tools.pwsh, 'added.dll'))],
+    [/the tools binding differs/, () => f.replace(join(f.tools.npm, 'tool.bin'), 'changed npm')],
+    [/the tools binding differs/, () => f.replace(join(f.tools.native, 'tool.bin'), 'changed native archive')],
+    [/the tools binding differs/, () => f.replace(join(f.tools.git, 'cmd', 'git.exe'), 'changed git')],
+    [/the nodes binding differs/, () => f.replace(join(f.tools.node, 'node-v22.23.2-win-x64', 'node.exe'), 'changed runtime')],
+  ];
+  for (const [pattern, change] of changes) {
+    const undo = change();
+    assert.throws(() => f.gate(true), pattern);
+    undo();
+    assert.deepEqual(f.tree(), before, `${pattern} refusal changed the run`);
+  }
+  assert.throws(() => f.gate(true, { image: `sha256:${'0'.repeat(64)}` }), /the image binding differs/);
+  assert.deepEqual(f.tree(), before);
+  assert.equal(f.gate(true).run().status, 'passed', 'The unchanged run still resumes');
+});
+
+test('resume refuses tampered reused evidence or an unexplained run member and leaves the run untouched', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  f.failRun('v1.3.1-node20.20.2');
+  const tampering = [
+    [/Reused evidence changed after it passed: failure-control/, join('failure-control', 'guest', 'runtime.json')],
+    [/Reused evidence changed after it passed: audit-v2\.1\.0-node20\.20\.2/, 'audit-v2.1.0-node20.20.2-storage-admission.json'],
+    [/Reused evidence changed after it passed: session-lane/, 'session-lane.json'],
+    [/Reused evidence changed after it passed: inputs-2\.1\.0/, join('inputs-2.1.0', 'manifest.json')],
+    [/Reused evidence changed after it passed: inputs-1\.3\.1/, join('inputs-1.3.1', 'source', 'package.json')],
+    [/Command receipts changed after they were checkpointed/, join('commands', '2.json')],
+    [/The frozen runtime differs/, join('runtime', 'node-v20.20.2-win-x64', 'node.exe')],
+    [/The frozen controller differs/, join('controller', 'tools', 'npm-publication', 'local-inputs.mjs')],
+    [/Checkpoints do not follow the run plan/, 'run-state.json', bytes => {
+      const value = JSON.parse(bytes);
+      value.checkpoints.reverse();
+      return JSON.stringify(value);
+    }],
+  ];
+  for (const [pattern, member, change = bytes => Buffer.concat([bytes, Buffer.from(' ')])] of tampering) {
+    const path = join(f.output, member);
+    const undo = f.replace(path, change(readFileSync(path)));
+    const before = f.tree();
+    assert.throws(() => f.gate(true), pattern, member);
+    assert.deepEqual(f.tree(), before, `${member}: a refused resume changed the run`);
+    undo();
+  }
+  for (const [pattern, member] of [
+    [/Unexpected run member; refusing to resume: notes\.txt/, 'notes.txt'],
+    [/Unexpected private Docker configuration/, join('docker-config', 'config.json')],
+  ]) {
+    writeFileSync(join(f.output, member), '{}');
+    const before = f.tree();
+    assert.throws(() => f.gate(true), pattern);
+    assert.deepEqual(f.tree(), before);
+    rmSync(join(f.output, member));
+  }
+  renameSync(join(f.output, 'timeout-control'), join(f.home, 'timeout-control'));
+  assert.throws(() => f.gate(true), /Reused evidence is missing: timeout-control/);
+  renameSync(join(f.home, 'timeout-control'), join(f.output, 'timeout-control'));
+  assert.equal(existsSync(f.attempts), false);
+  assert.equal(f.gate(true).run().status, 'passed', 'The restored run still resumes');
+});
+
+test('resume refuses a passed run, a controls-only run, a run without durable state and a stepped-back clock', { skip: CONTROLLER_SKIP }, t => {
+  const passed = new ResumeFixture(t);
+  passed.gate().run();
+  assert.throws(() => passed.gate(true), /This run already passed; there is nothing to resume/);
+  const controls = new ResumeFixture(t);
+  controls.failures.add('timeout-control');
+  assert.throws(() => controls.gate().run({ controlsOnly: true }), { message: 'SYNTHETIC failure: timeout-control' });
+  assert.throws(() => controls.gate(true), /Only a full qualification run can be resumed/);
+  const unbound = new ResumeFixture(t);
+  unbound.failRun('failure-control');
+  rmSync(join(unbound.output, 'run-state.json'));
+  assert.throws(() => unbound.gate(true), /no run-state\.json/);
+  const clock = new ResumeFixture(t);
+  clock.failRun('timeout-control');
+  const state = clock.json('run-state.json');
+  state.invocations[0].completedAt = new Date(Date.now() + 3_600_000).toISOString();
+  writeFileSync(join(clock.output, 'run-state.json'), JSON.stringify(state));
+  const before = clock.tree();
+  assert.throws(() => clock.gate(true), /Invocations overlap or are out of order/);
+  assert.deepEqual(clock.tree(), before, 'A clock that stepped back is refused before anything is recorded');
+});
+
+test('a run proves its inventory before it passes, and a pass cut off before its inventory resumes', { skip: CONTROLLER_SKIP }, t => {
+  const stray = new ResumeFixture(t);
+  stray.hooks.set(PLAN.at(-1), gate => writeFileSync(join(gate.output, 'notes.txt'), 'SYNTHETIC stray member'));
+  assert.throws(() => stray.gate().run(), /Missing or unexpected local run members/);
+  assert.equal(stray.json('result.json').status, 'failed');
+  assert.equal(stray.json('run-state.json').invocations[0].status, 'failed');
+  assert.equal(existsSync(join(stray.output, 'evidence-manifest.json')), false);
+  rmSync(join(stray.output, 'notes.txt'));
+  stray.hooks.clear();
+  stray.ran.length = 0;
+  assert.equal(stray.gate(true).run().status, 'passed');
+  assert.deepEqual(stray.ran, [], 'Nothing reruns once the stray member is gone');
+  const cut = new ResumeFixture(t);
+  cut.gate().run();
+  // The process died after recording the pass and before writing the inventory.
+  rmSync(join(cut.output, 'evidence-manifest.json'));
+  cut.ran.length = 0;
+  const report = cut.gate(true).run();
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(cut.ran, []);
+  assert.deepEqual(report.invocations.map(item => item.status), ['failed', 'passed']);
+  assert.equal(report.invocations[0].error, 'The run passed but its evidence inventory was not written');
+  assert.deepEqual(report.invocations[1].setAside.members, ['result.json']);
+  assert.deepEqual(cut.json('evidence-manifest.json'), evidenceInventory(cut.output));
+  new LocalRunState(cut.output).verify(report, cut.inputs());
+});
+
+test('only an absent or partly written inventory reopens a passed run; anything else refuses', { skip: CONTROLLER_SKIP }, t => {
+  for (const partial of [bytes => bytes.subarray(0, bytes.length >> 1), () => Buffer.alloc(0)]) {
+    const f = new ResumeFixture(t);
+    f.gate().run();
+    // The process died part way through writing the inventory.
+    const path = join(f.output, 'evidence-manifest.json');
+    writeFileSync(path, partial(readFileSync(path)));
+    f.ran.length = 0;
+    const report = f.gate(true).run();
+    assert.equal(report.status, 'passed');
+    assert.deepEqual(f.ran, []);
+    assert.equal(report.invocations[0].error, 'The run passed but its evidence inventory was not written');
+    assert.deepEqual(report.invocations[1].setAside.members, ['evidence-manifest.json', 'result.json']);
+    new LocalRunState(f.output).verify(report, f.inputs());
+  }
+  const f = new ResumeFixture(t);
+  f.gate().run();
+  const before = f.tree();
+  const link = (target, name) => {
+    linkSync(target, join(f.home, name));
+    return () => rmSync(join(f.home, name));
+  };
+  for (const [pattern, change] of [
+    [/The evidence changed after the run passed/, () => {
+      const path = join(f.output, 'result.json');
+      return f.replace(path, Buffer.concat([readFileSync(path), Buffer.from(' ')]));
+    }],
+    [/Missing, linked, empty or oversized local evidence/, () => link(join(f.output, 'evidence-manifest.json'), 'manifest')],
+    [/Hardlinked evidence is not independent/, () => link(join(f.output, 'failure-control', 'guest', 'runtime.json'), 'runtime')],
+  ]) {
+    const undo = change();
+    const changed = f.tree();
+    assert.throws(() => f.gate(true), pattern);
+    assert.deepEqual(f.tree(), changed, `${pattern}: a refused resume changed the run`);
+    undo();
+  }
+  assert.deepEqual(f.tree(), before);
+  assert.throws(() => f.gate(true), /This run already passed; there is nothing to resume/);
+});
+
+test('a run state that cannot be recorded still writes the report and never hides the original error', { skip: CONTROLLER_SKIP }, t => {
+  for (const [failed, message] of [[false, 'SYNTHETIC state write failure'], [true, 'SYNTHETIC failure: failure-control']]) {
+    const f = new ResumeFixture(t);
+    if (failed) f.failures.add('failure-control');
+    const gate = f.gate();
+    const create = gate.createState.bind(gate);
+    gate.createState = scope => {
+      create(scope);
+      gate.state.finish = () => {
+        throw new Error('SYNTHETIC state write failure');
+      };
+    };
+    assert.throws(() => gate.run(), { message });
+    const report = f.json('result.json');
+    assert.equal(report.status, 'failed');
+    assert.match(report.error, /The run state was not recorded: SYNTHETIC state write failure$/);
+    if (failed) assert.match(report.error, /^SYNTHETIC failure: failure-control; /);
+    assert.equal(existsSync(join(f.output, 'evidence-manifest.json')), false);
+  }
+});
+
+test('a resume killed while setting evidence aside leaves a contiguous journal and resumes again', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  f.hooks.set('timeout-control', gate => {
+    for (let index = 0; index < 3; index++) gate.docker(['logs', 'SYNTHETIC']);
+  });
+  f.failRun('timeout-control');
+  const bound = f.json('run-state.json').checkpoints.at(-1).commands;
+  const total = readdirSync(join(f.output, 'commands')).length;
+  const move = LocalRunState.prototype.move;
+  let moved = 0;
+  LocalRunState.prototype.move = function (source, target) {
+    if (source.includes(`${sep}commands${sep}`) &&
+        ++moved > 2) throw new Error('SYNTHETIC kill while setting evidence aside');
+    return move.call(this, source, target);
+  };
+  try {
+    assert.throws(() => f.gate(true), /SYNTHETIC kill while setting evidence aside/);
+  } finally {
+    LocalRunState.prototype.move = move;
+  }
+  const left = readdirSync(join(f.output, 'commands')).map(name => Number.parseInt(name, 10)).sort((a, b) => a - b);
+  assert.deepEqual(left, Array.from({ length: total - 2 }, (_, index) => index + 1),
+    'Receipts move from the highest down, so the journal left behind is a contiguous prefix');
+  const report = f.gate(true).run();
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(report.invocations.map(item => item.status), ['failed', 'interrupted', 'passed']);
+  assert.deepEqual(report.invocations[1].setAside.commands, [bound + 1, total]);
+  assert.deepEqual(report.invocations[2].setAside, { directory: 'before-invocation-3', members: [],
+    commands: [bound + 1, total - 2] });
+  assert.equal(readdirSync(join(f.attempts, 'before-invocation-2', 'commands')).length, 2);
+  verifyLocalHeader(report);
+  assert.deepEqual(f.json('evidence-manifest.json'), evidenceInventory(f.output));
+  new LocalRunState(f.output).verify(report, f.inputs());
+});
+
+test('a resume recovers from a failed input step, a failed or unverified session lane and a failed final check', { skip: CONTROLLER_SKIP }, t => {
+  const inputs = new ResumeFixture(t);
+  inputs.failRun('inputs-1.3.1');
+  const fromInputs = inputs.gate(true).run();
+  assert.deepEqual(fromInputs.invocations[1].ran, PLAN.slice(PLAN.indexOf('inputs-1.3.1')));
+  assert.deepEqual(fromInputs.invocations[1].setAside.members, ['inputs-1.3.1', 'result.json']);
+  new LocalRunState(inputs.output).verify(fromInputs, inputs.inputs());
+  const plain = new ResumeFixture(t);
+  plain.failRun('session-lane');
+  const fromPlain = plain.gate(true).run();
+  assert.deepEqual(fromPlain.invocations[1].ran, PLAN.slice(PLAN.indexOf('session-lane')));
+  assert.deepEqual(fromPlain.invocations[1].setAside.members, ['result.json']);
+  new LocalRunState(plain.output).verify(fromPlain, plain.inputs());
+  const lane = new ResumeFixture(t);
+  const restore = [];
+  lane.hooks.set('session-lane', () => {
+    restore.push(lane.replace(join(lane.roots[0], 'node_modules', 'retained.js'), 'edited while the lane ran'));
+  });
+  assert.throws(() => lane.gate().run(), /Input inventory or content changed/);
+  restore.pop()();
+  lane.hooks.clear();
+  const fromLane = lane.gate(true).run();
+  assert.deepEqual(fromLane.invocations[1].ran, PLAN.slice(PLAN.indexOf('session-lane')));
+  assert.ok(fromLane.invocations[1].setAside.members.includes('session-lane.json'),
+    'A receipt whose tree changed is set aside, not reused');
+  new LocalRunState(lane.output).verify(fromLane, lane.inputs());
+  const final = new ResumeFixture(t);
+  final.hooks.set(PLAN.at(-1), () => {
+    restore.push(final.replace(join(final.tools.pwsh, 'tool.bin'), 'edited after the last case'));
+  });
+  assert.throws(() => final.gate().run(), /Input inventory or content changed/);
+  assert.equal(final.json('run-state.json').checkpoints.length, PLAN.length);
+  restore.pop()();
+  final.hooks.clear();
+  final.ran.length = 0;
+  const fromFinal = final.gate(true).run();
+  assert.equal(fromFinal.status, 'passed');
+  assert.deepEqual(final.ran, [], 'Every step is reused');
+  assert.deepEqual([fromFinal.invocations[1].reused, fromFinal.invocations[1].ran], [PLAN, []]);
+  new LocalRunState(final.output).verify(fromFinal, final.inputs());
+});
+
+test('the launcher resolves one run path and keeps strict argument positions', t => {
+  const run = join(directory(t), 'run1');
+  const values = ['--npm-cli', join(run, 'npm-cli.js'), '--peer-root', join(run, 'peer'), '--resume', `${run}${sep}`,
+    '--node-root', join(run, 'nodes'), '--pwsh-root', join(run, 'pwsh')];
+  const parsed = launcherArguments(values);
+  assert.equal(parsed.options.output, run, 'A trailing separator names the same run');
+  assert.deepEqual([parsed.controlsOnly, parsed.options.resume], [false, true]);
+  assert.equal(launcherArguments([...values.slice(0, 4), '--output', `${run}${sep}`, ...values.slice(6)]).options.output, run);
+  assert.throws(() => launcherArguments([...values, '--controls-only']), /Only a full qualification run can be resumed/);
+  assert.throws(() => launcherArguments([...values.slice(4, 6), ...values.slice(0, 4), ...values.slice(6)]),
+    { message: /^Usage: local-windows\.mjs/ });
+  assert.throws(() => launcherArguments([...values.slice(0, 5), 'relative-run', ...values.slice(6)]),
+    /Absolute paths required/);
+  const script = fileURLToPath(new URL('../../tools/npm-publication/local-windows.mjs', import.meta.url));
+  const launched = spawnSync(process.execPath, [script, ...values, '--controls-only'],
+    { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  assert.equal(launched.status, 1);
+  assert.match(launched.stderr, /Only a full qualification run can be resumed/);
+});
+
+test('a trailing separator on --resume names the same run and keeps the attempts directory beside it', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t);
+  f.failRun('timeout-control');
+  const { options } = launcherArguments(['--npm-cli', join(f.tools.npm, 'npm-cli.js'), '--peer-root', f.roots[1],
+    '--resume', `${f.output}${sep}`, '--node-root', f.tools.node, '--pwsh-root', f.tools.pwsh]);
+  assert.equal(f.gate(true, { output: options.output }).run().status, 'passed');
+  assert.equal(existsSync(join(f.attempts, 'before-invocation-2', 'timeout-control')), true);
+  assert.equal(existsSync(join(f.output, '.attempts')), false, 'Nothing is set aside inside the run');
+});
+
+test('the launcher refuses an unnormalized run path before touching it', { skip: process.platform !== 'win32' }, t => {
+  const base = directory(t);
+  assert.throws(() => new WindowsLocalGate({ output: `${join(base, 'run1')}${sep}`,
+    npmCli: join(base, 'npm', 'bin', 'npm-cli.js'), peerRoot: join(base, 'peer'), nodeRoot: join(base, 'nodes'),
+    pwshRoot: join(base, 'pwsh') }), /The run directory path must be normalized/);
+  assert.deepEqual(readdirSync(base), []);
+});
+
+test('the platform binding reads the Docker engine and the Windows build and refuses unreadable output', t => {
+  const f = new ResumeFixture(t);
+  const gate = Object.create(WindowsLocalGate.prototype);
+  gate.config = join(f.home, 'docker-config');
+  gate.probe = (file, args) => f.probe(file, args);
+  assert.deepEqual(gate.platform(), { docker: { version: '20.10.15+azure', apiVersion: '1.41', os: 'windows',
+    kernelVersion: f.server.KernelVersion }, windows: { build: '26300', ubr: 9457 } });
+  delete f.server.ApiVersion;
+  assert.throws(() => gate.platform(), /Unreadable Docker engine version/);
+  f.server.ApiVersion = '1.41';
+  gate.probe = (file, args) => file === 'reg' ? '    CurrentBuildNumber    REG_SZ    26300\r\n' : f.probe(file, args);
+  assert.throws(() => gate.platform(), /Unreadable Windows build/);
+});
+
+test('the read-only source probe lists exactly the files the frozen input copies', { skip: process.platform !== 'win32' }, t => {
+  const base = directory(t);
+  const root = join(base, 'source');
+  mkdirSync(join(root, 'src'), { recursive: true });
+  writeFileSync(join(root, 'package.json'), '{"version":"2.1.0"}\n');
+  writeFileSync(join(root, '.gitignore'), 'ignored.log\nbuild/\n');
+  writeFileSync(join(root, 'src', 'kept.mjs'), 'tracked');
+  writeFileSync(join(root, 'src', 'deleted.mjs'), 'tracked, then deleted');
+  const reader = new LocalSourceReader(root);
+  reader.git(['init', '--quiet']);
+  reader.git(['add', '--', '.']);
+  reader.git(['-c', 'user.name=Local fixture', '-c', 'user.email=fixture@invalid.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Owned source probe fixture']);
+  rmSync(join(root, 'src', 'deleted.mjs'));
+  mkdirSync(join(root, 'notes'));
+  writeFileSync(join(root, 'notes', 'untracked.mjs'), 'untracked');
+  writeFileSync(join(root, 'ignored.log'), 'ignored');
+  mkdirSync(join(root, 'build'));
+  writeFileSync(join(root, 'build', 'output.js'), 'ignored');
+  const gate = Object.create(WindowsLocalGate.prototype);
+  gate.output = join(base, 'run');
+  mkdirSync(join(gate.output, 'commands'), { recursive: true });
+  gate.config = join(base, 'docker-config');
+  mkdirSync(gate.config);
+  gate.env = gate.hostEnvironment();
+  gate.deadline = performance.now() + 60_000;
+  gate.commandIndex = 0;
+  gate.cleaning = false;
+  gate.gitRoot = gate.gitRootOf(gate.probe('git', ['--exec-path']));
+  const journaled = gate.sourceNames(root);
+  const probed = gate.readSource(root);
+  assert.deepEqual(journaled, ['.gitignore', 'notes/untracked.mjs', 'package.json', 'src/kept.mjs']);
+  assert.deepEqual(probed.names, journaled, 'The binding and the frozen input must select the same files');
+  assert.equal(probed.head, gate.git(root, ['rev-parse', 'HEAD']).trim());
+  assert.equal(probed.version, '2.1.0');
+});
+
+test('one run directory admits one live launcher at a time', { skip: process.platform !== 'win32' }, async t => {
+  const output = join(directory(t), 'run');
+  const first = new LocalRunLock(output);
+  await first.acquire();
+  await assert.rejects(new LocalRunLock(output).acquire(), /Another invocation is already using this run directory/);
+  await first.release();
+  const next = new LocalRunLock(output);
+  await next.acquire();
+  await next.release();
+});
+
+test('a killed launcher releases its run lock', { skip: process.platform !== 'win32' }, async t => {
+  const output = join(directory(t), 'run');
+  const module = new URL('../../tools/npm-publication/local-run-state.mjs', import.meta.url).href;
+  const holder = spawn(process.execPath, ['--input-type=module', '-e', [
+    `const { LocalRunLock } = await import(${JSON.stringify(module)});`,
+    `await new LocalRunLock(${JSON.stringify(output)}).acquire();`,
+    "console.log('locked');",
+    'setInterval(() => {}, 1000);',
+  ].join('\n')], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
+  t.after(() => holder.kill());
+  await new Promise((accept, reject) => {
+    holder.stdout.on('data', chunk => {
+      if (chunk.toString().includes('locked')) accept();
+    });
+    holder.once('exit', code => reject(new Error(`The lock holder exited early: ${code}`)));
+  });
+  await assert.rejects(new LocalRunLock(output).acquire(), /Another invocation is already using this run directory/);
+  const exited = new Promise(accept => holder.once('exit', accept));
+  holder.kill();
+  await exited;
+  const next = new LocalRunLock(output);
+  await next.acquire();
+  await next.release();
 });

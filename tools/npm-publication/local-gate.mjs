@@ -16,11 +16,25 @@ import { inspectRuntimeLicenses } from './runtime-licenses.mjs';
 import { LocalGitConfig } from './local-git.mjs';
 import { windowsSystemEnvironment } from './local-environment.mjs';
 import { validateStageProof } from './stage-proof-contract.mjs';
-import { auditEnvironment, auditEvidence } from './local-audit-report.mjs';
+import { auditArguments, AUDIT_COMMAND_TIMEOUT_MS, AUDIT_MODE_VARIABLE, auditEnvironment, auditEvidence } from './local-audit-report.mjs';
+import { releaseRole } from './local-regression.mjs';
+import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
-export const SOURCE_SUITE_TIMEOUT_MS = 25 * 60 * 1000;
+export const SOURCE_SUITE_TIMEOUT_MS = 60 * 60 * 1000;
+export const LOCAL_NATIVE_PATHS = Object.freeze({
+  CompilerPath: 'C:\\work\\native\\compiler\\csc.exe',
+  ReferenceAssemblyPath: 'C:\\work\\native\\references',
+  PackageDirectory: 'C:\\input\\native',
+});
+
+export function nativeRestoreArguments() {
+  return ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference='Stop'; & '.\\tools\\windows-ci\\restore-toolchain.ps1' " +
+    "-DestinationDirectory 'C:\\work\\native' -PackageDirectory 'C:\\input\\native' | ConvertTo-Json -Compress"];
+}
+
 export const HOSTED_BOUNDARIES = Object.freeze([
   'Fresh registry resolution and advisory/signature checks',
   'GitHub OIDC, protected environments and fresh owner approval',
@@ -33,6 +47,8 @@ export function testArguments(script) {
   const args = script.trim().split(/\s+/);
   assert.equal(args.shift(), 'node');
   assert.equal(args.shift(), '--test');
+  // A declared file-concurrency bound is preserved exactly; it never changes the selection.
+  const bounded = /^--test-concurrency=([1-9][0-9]?)$/.test(args[0] ?? '') ? args.shift() : null;
   assert.ok(args.length > 0, 'Empty test selection');
   for (const file of args) {
     assert.match(file, /^test\/[\w./-]+\.test\.mjs$/, 'Unsupported test selector');
@@ -41,7 +57,24 @@ export function testArguments(script) {
       part !== ''), 'Invalid test path');
   }
   assert.equal(new Set(args).size, args.length, 'Duplicate test selection');
-  return ['--test', '--test-reporter=tap', ...args];
+  return ['--test', ...(bounded ? [bounded] : []), '--test-reporter=tap', ...args];
+}
+
+export function selectedTestFiles(args) {
+  return args.filter(value => value.startsWith('test/'));
+}
+
+// A Windows container has no interactive logon session, so the files that bind one run in the
+// host session lane instead. `testContract` is what requires every session file to stay
+// registered; this only splits the selection and records the split for the verifier.
+export function containedSelection(selected, version) {
+  if (releaseRole(version) !== 'current') return { contained: selected, deferred: [] };
+  const deferred = selectedTestFiles(selected).filter(file => SESSION_REQUIRED_TESTS.includes(file));
+  return { contained: selected.filter(value => !SESSION_REQUIRED_TESTS.includes(value)), deferred };
+}
+
+export function sourceSuiteLabel(version) {
+  return releaseRole(version) === 'current' ? 'Contained source suite' : 'Complete source suite';
 }
 
 export function testTotals(stdout) {
@@ -93,7 +126,7 @@ export function testTotals(stdout) {
 }
 
 export function uiTestArguments(root, version) {
-  assert.ok(['1.3.1', '2.0.1'].includes(version), 'Unsupported UI test lane');
+  releaseRole(version);
   const ui = json(join(root, 'ui/package.json'));
   assert.equal(ui.version, version, 'UI version differs from source lane');
   assert.equal(ui.scripts.typecheck, 'tsc --noEmit', 'UI typecheck script changed');
@@ -101,13 +134,13 @@ export function uiTestArguments(root, version) {
   const directory = join(root, 'ui/test');
   if (!Object.hasOwn(ui.scripts, 'test') &&
       !existsSync(directory)) {
-    assert.equal(version, '1.3.1', 'The 2.0.1 UI suite is required');
+    assert.equal(releaseRole(version), 'legacy', 'The current UI suite is required');
     return null;
   }
   const selected = testArguments(ui.scripts.test);
   const files = readdirSync(directory, { recursive: true })
     .filter(file => file.endsWith('.test.mjs')).map(file => `test/${file.split(sep).join('/')}`);
-  assert.deepEqual(selected.slice(2).sort(), files.sort(), 'The complete UI suite must execute');
+  assert.deepEqual(selectedTestFiles(selected).sort(), files.sort(), 'The complete UI suite must execute');
   return selected;
 }
 
@@ -118,6 +151,7 @@ export function localEnvironment(parent, home, node = process.execPath) {
     HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     TEMP: home, TMP: home, TMPDIR: home,
     XDG_CACHE_HOME: home, XDG_CONFIG_HOME: home, XDG_STATE_HOME: home,
+    PSModuleAnalysisCachePath: join(home, 'powershell-module-cache'),
     NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never',
     GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1',
     GIT_OPTIONAL_LOCKS: '0',
@@ -323,13 +357,27 @@ export class LocalGate {
   }
 
   sourceSuite(root, version, selected) {
-    const environment = auditEnvironment({ ...this.env, CI: 'true' }, version);
+    releaseRole(version);
+    const environment = { ...this.env, CI: 'true' };
+    assert.equal(environment[AUDIT_MODE_VARIABLE], undefined, 'Privileged audit mode must not enter the ordinary source suite');
+    if (releaseRole(version) === 'current') {
+      const context = JSON.parse(this.command('Verify user-runtime execution contract', process.execPath,
+        ['tools/ci/run-tests.mjs', 'source-ordinary', '--check'], root, false, 15 * 60_000, environment));
+      assert.deepEqual(context, { contract: 'source-ordinary', platform: 'win32', role: 'user-runtime',
+        verified: true });
+      environment.OS = 'Windows_NT';
+      const restored = JSON.parse(this.command('Restore pinned native fixture toolchain',
+        'C:\\input\\pwsh\\pwsh.exe', nativeRestoreArguments(), root, false, 15 * 60_000, environment));
+      assert.deepEqual(restored, LOCAL_NATIVE_PATHS, 'Unexpected restored native tool paths');
+      environment.MCP_NATIVE_COMPILER = restored.CompilerPath;
+      environment.MCP_NATIVE_REFERENCES = restored.ReferenceAssemblyPath;
+    }
     const temporary = join(this.work, 'source-test-temp');
     const alias = join(this.work, 'source-test-temp-alias');
     mkdirSync(temporary);
     symlinkSync(temporary, alias, process.platform === 'win32' ? 'junction' : 'dir');
     for (const key of ['TEMP', 'TMP', 'TMPDIR']) environment[key] = alias;
-    return this.command('Complete source suite', process.execPath, selected,
+    return this.command(sourceSuiteLabel(version), process.execPath, selected,
       root, false, SOURCE_SUITE_TIMEOUT_MS, environment);
   }
 
@@ -356,7 +404,7 @@ export class LocalGate {
 
   async native(root, version) {
     const commit = this.git(['rev-parse', 'HEAD'], root);
-    const baseline = version === '1.3.1' ? LEGACY_REF : CURRENT_REF;
+    const baseline = releaseRole(version) === 'legacy' ? LEGACY_REF : CURRENT_REF;
     this.git(['cat-file', '-e', `${baseline}^{commit}`], root);
     return verifyNativeIdentity({ sourceRoot: root, commit, version }, {
       run: (file, args, options) => {
@@ -420,13 +468,16 @@ export class LocalGate {
       const pkg = json(join(this.root, 'package.json'));
       validatePackage(pkg, { version: pkg.version });
       report.version = pkg.version;
+      if (releaseRole(pkg.version) === 'current') report.schemaVersion = 5;
       const uiSelected = uiTestArguments(this.root, pkg.version);
       for (const file of ['package-lock.json', 'ui/package-lock.json']) checkLockfile(join(this.root, file));
       report.checks.publicLockfiles = true;
       const selected = testArguments(pkg.scripts.test);
-      const listed = selected.slice(2).sort();
+      const listed = selectedTestFiles(selected).sort();
       assert.deepEqual(listed, readdirSync(join(this.root, 'test')).filter(file => file.endsWith('.test.mjs'))
         .map(file => `test/${file}`).sort(), 'The complete source suite must execute');
+      const { contained, deferred } = containedSelection(selected, pkg.version);
+      report.sessionDeferredTests = deferred;
       for (const autocrlf of ['false', 'true']) {
         const root = this.checkout(snapshot, autocrlf);
         const checks = report.checks[`checkout-${autocrlf}`] = {
@@ -439,13 +490,14 @@ export class LocalGate {
         checks.uiRebuild = true;
         assert.deepEqual(this.snapshot(root), before, 'UI rebuild modified checkout files');
         if (autocrlf === 'true') continue;
-        const sourceOutput = this.sourceSuite(root, pkg.version, selected);
+        const sourceOutput = this.sourceSuite(root, pkg.version, contained);
         checks.sourceTests = testTotals(sourceOutput);
-        auditEvidence(sourceOutput, pkg.version, process.version);
+        if (report.schemaVersion === 5) checks.auditExecution = 'required-privileged-companion';
+        else auditEvidence(sourceOutput, pkg.version, process.version);
         this.publisher('UI typecheck', ['node_modules/typescript/bin/tsc', '--noEmit'], join(root, 'ui'));
         checks.uiTests = uiSelected === null
           ? { status: 'not-defined', executed: false,
-            reason: 'Legacy 1.3.1 defines neither a UI test script nor a ui/test directory' }
+            reason: `Legacy ${pkg.version} defines neither a UI test script nor a ui/test directory` }
           : testTotals(this.publisher('UI tests', uiSelected, join(root, 'ui')));
         assert.deepEqual(this.snapshot(root), before, 'Source/UI tests modified checkout files');
         const packed = join(this.work, 'pack');
@@ -471,7 +523,9 @@ export class LocalGate {
           tarball, extractedRoot: extracted, artifact: checks.artifact, name: pkg.name,
           version: pkg.version, commit: fixtureCommit,
         });
-        for (const nativeFile of checks.nativeIdentity.files) {
+        const nativeFiles = [...checks.nativeIdentity.files, ...(checks.nativeIdentity.legacyBroker?.files ?? []),
+          ...(checks.nativeIdentity.taskChannel?.files ?? []), ...(checks.nativeIdentity.processLifetime?.files ?? [])];
+        for (const nativeFile of nativeFiles) {
           assert.deepEqual(extractedFiles.find(file => file.path === nativeFile.path), nativeFile,
             `Packed native bytes differ: ${nativeFile.path}`);
         }
@@ -486,7 +540,7 @@ export class LocalGate {
         assert.equal(checks.sdk.provenanceVerified, false);
         assert.equal(checks.sdk.signatureVerified, false);
         assert.equal(checks.sdk.version, pkg.version);
-        assert.equal(checks.sdk.contract, pkg.version === '1.3.1'
+        assert.equal(checks.sdk.contract, releaseRole(pkg.version) === 'legacy'
           ? 'legacy-staged-signature' : 'owner-sdk-and-provenance');
         assert.equal(checks.sdk.node, report.publisherNode);
         assert.equal(checks.sdk.npm, POLICY.npm);
@@ -504,6 +558,55 @@ export class LocalGate {
         try {
           assert.deepEqual(this.snapshot(), snapshot, 'Original source changed during gate');
           assert.equal(this.git(['rev-parse', 'HEAD']), report.source.head, 'Original HEAD changed during gate');
+          report.originalPreserved = true;
+        } catch (error) {
+          report.originalPreserved = false;
+          report.originalError = error.message;
+          failure ??= error;
+        }
+      }
+      if (failure) {
+        report.status = 'failed';
+        report.error ??= failure.message;
+      }
+      writeFileSync(join(this.output, 'result.json'), `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', flush: true });
+    }
+    if (failure) throw failure;
+    return report;
+  }
+
+  async runAudit() {
+    validateContainment(this.containment, this.root, this.output, this.work);
+    const report = {
+      schemaVersion: 1, kind: 'local-privileged-audit', status: 'failed', releaseReady: false,
+      node: process.version, platform: process.platform, npm: POLICY.npm,
+      containment: this.containment, publicationCandidate: false, steps: this.steps,
+    };
+    let snapshot;
+    let failure;
+    try {
+      report.publisherNode = this.publisher('Pinned publisher runtime', ['-p', 'process.version'], this.root).trim();
+      assert.equal(report.publisherNode, `v${POLICY.node}`);
+      snapshot = this.snapshot();
+      report.source = { head: this.git(['rev-parse', 'HEAD']), files: snapshot };
+      report.version = json(join(this.root, 'package.json')).version;
+      assert.equal(releaseRole(report.version), 'current');
+      const context = JSON.parse(this.command('Verify privileged fixture execution contract', process.execPath,
+        ['tools/ci/run-tests.mjs', 'audit', '--check']));
+      assert.deepEqual(context, { contract: 'audit', platform: 'win32', role: 'privileged-fixture', verified: true });
+      const output = this.command('Required privileged audit', process.execPath, auditArguments(),
+        this.root, false, AUDIT_COMMAND_TIMEOUT_MS, auditEnvironment({ ...this.env, CI: 'true' }, report.version));
+      report.tests = testTotals(output);
+      report.audit = auditEvidence(output, report.version, process.version);
+      report.status = 'passed';
+    } catch (error) {
+      failure = error;
+      report.error = error.message;
+    } finally {
+      if (snapshot) {
+        try {
+          assert.deepEqual(this.snapshot(), snapshot, 'Original source changed during audit');
+          assert.equal(this.git(['rev-parse', 'HEAD']), report.source.head, 'Original HEAD changed during audit');
           report.originalPreserved = true;
         } catch (error) {
           report.originalPreserved = false;

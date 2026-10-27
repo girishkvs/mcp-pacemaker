@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
-import './helpers/github-reader-contracts.mjs';
-import { syntheticLocalApproval, syntheticPreparedLocal } from './helpers/local-regression-fixture.mjs';
+import { syntheticLocalApproval, syntheticPreparedLocal, syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { fixtureLicenseEvidence } from './fixtures/consumer-license-evidence.mjs';
+import { lifetimeFixtureFiles, lifetimeFixtureNames } from './helpers/lifetime-package-fixture.mjs';
+import { lifetimeSkip } from './helpers/legacy-checkout.mjs';
+import { verifyProcessLifetimeAssets, requiresProcessLifetime } from '../tools/windows-process-lifetime/inventory.mjs';
 import { test } from 'node:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { digest, POLICY } from '../tools/npm-publication/policy.mjs';
+import { digest, POLICY, REQUIRED_GATES } from '../tools/npm-publication/policy.mjs';
+import { readCandidateEvidence, readSigningRun, readOwnerRun } from '../tools/npm-publication/bootstrap-readers.mjs';
+import { exactArchive } from '../tools/npm-publication/bootstrap.mjs';
 import { inspectTarball } from '../tools/npm-publication/tarball.mjs';
 import { verifyWindowsExecution } from '../tools/npm-publication/external-gates.mjs';
 import { CURRENT_REF, LEGACY_REF } from '../tools/compatibility/fixtures.mjs';
+import { releaseRole } from '../tools/npm-publication/local-regression.mjs';
 import {
   MATRIX, githubReaders, matrixLane, runMatrix, selectMatrixArtifacts, validateMatrixContext,
   verifyMatrixReports, verifyPreparedBundle, zipFiles,
@@ -23,8 +28,9 @@ import {
 const hash = data => digest(data).sha256;
 const hex = value => value.repeat(40);
 const approval = syntheticLocalApproval({
-  schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version: '1.3.1',
-  ref: 'refs/tags/v1.3.1', tagObject: hex('a'), commit: hex('b'), tree: hex('c'),
+  schemaVersion: 1, scope: 'prepare', approver: POLICY.owner, name: POLICY.name, version: '2.0.1',
+  ref: 'refs/tags/v2.0.1', tagObject: hex('a'), commit: hex('b'), tree: hex('c'),
+  peerArtifact: { version: '1.3.1', commit: hex('e'), tree: hex('f') },
 });
 const nativeNames = [
   'real helper inspection emits only one fingerprint and does not change file contents',
@@ -73,10 +79,12 @@ function zip(entries) {
 }
 
 function packageFixture(version = approval.version, nativeFiles) {
+  const tomlVersion = ['1.3.1', '2.0.1', '2.0.2'].includes(version) ? '1.8.0' : '1.9.0';
   const pkg = {
     name: POLICY.name, version, repository: { url: `git+https://github.com/${POLICY.repository}.git` },
-    dependencies: { 'smol-toml': '^1.8.0' }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
-    files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt'],
+    dependencies: { 'smol-toml': `^${tomlVersion}` }, scripts: { 'consumer:check': 'node tools/npm-consumer/check.mjs' },
+    files: ['bin/', 'ui/', 'THIRD_PARTY_NOTICES.txt',
+      ...(requiresProcessLifetime(version) ? ['tools/windows-process-lifetime/'] : [])],
   };
   const files = {
     'package.json': JSON.stringify(pkg), 'README.md': 'readme', LICENSE: 'MIT', 'CHANGELOG.md': 'changes',
@@ -86,8 +94,9 @@ function packageFixture(version = approval.version, nativeFiles) {
     'bin/windows/PoolingSecurityHelper.exe': 'fake bytes; never executed',
     'bin/windows/PoolingSecurityHelper.build.json': '{}',
     ...Object.fromEntries(['AssemblyInfo', 'PoolingNativeFiles', 'PoolingSecurityHelper', 'PoolingSecurityReader']
-      .filter(name => version === '2.0.1' || name !== 'PoolingNativeFiles')
+      .filter(name => releaseRole(version) === 'current' || name !== 'PoolingNativeFiles')
       .map(name => [`bin/windows/src/${name}.cs`, 'fixture source'])),
+    ...lifetimeFixtureFiles(version),
   };
   if (nativeFiles) {
     for (const path of Object.keys(files).filter(path => path.startsWith('bin/windows/'))) delete files[path];
@@ -111,8 +120,9 @@ function packageFixture(version = approval.version, nativeFiles) {
 
 class Fixture {
   constructor(t, version = approval.version, nativeFiles) {
-    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}` });
-    const selectedApproval = this.approval;
+    this.approval = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/v${version}`,
+      peerArtifact: { ...approval.peerArtifact, version: version.startsWith('1.') ? '2.0.1' : '1.3.1' } });
+    const approved = this.approval;
     this.dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'pacemaker-matrix-unit-')));
     t.after(() => rmSync(this.dir, { recursive: true, force: true }));
     this.env = {
@@ -122,22 +132,34 @@ class Fixture {
       GITHUB_API_URL: 'https://api.github.com', GITHUB_EVENT_NAME: 'workflow_dispatch',
       GITHUB_REPOSITORY: POLICY.repository, GITHUB_REPOSITORY_OWNER: POLICY.owner, GITHUB_REPOSITORY_ID: '100',
       GITHUB_ACTOR: POLICY.owner, GITHUB_TRIGGERING_ACTOR: POLICY.owner, GITHUB_RUN_ATTEMPT: '1',
-      GITHUB_RUN_ID: '200', GITHUB_REF: selectedApproval.ref, GITHUB_SHA: selectedApproval.commit,
-      GITHUB_WORKFLOW_SHA: selectedApproval.commit, GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${selectedApproval.ref}`,
+      GITHUB_RUN_ID: '200', GITHUB_REF: approval.ref, GITHUB_SHA: approval.commit,
+      GITHUB_WORKFLOW_SHA: approval.commit, GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${approval.ref}`,
       GITHUB_JOB: 'consumers', GITHUB_TOKEN: 'must-not-reach-child', NODE_AUTH_TOKEN: 'must-not-reach-child',
       NPM_TOKEN: 'must-not-reach-child', NODE_OPTIONS: '--bad-injection',
       npm_config_registry: 'https://unapproved.invalid/', npm_config_ignore_scripts: 'true',
     };
-    this.event = { inputs: { action: 'prepare', approval: JSON.stringify(selectedApproval) },
+    this.event = { inputs: { action: 'prepare', approval: JSON.stringify(approval) },
       repository: { full_name: POLICY.repository, fork: false, private: false }, sender: { login: POLICY.owner } };
     this.package = packageFixture(version, nativeFiles);
-    const sourceReport = Buffer.from('{"schemaVersion":1}\n');
+    Object.assign(this.env, { GITHUB_REF: approved.ref,
+      GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${approved.ref}` });
+    this.event.inputs.approval = JSON.stringify(approved);
+    const producer = !['1.3.1', '2.0.1'].includes(version) ? syntheticCleanProducerEvidence({
+      version, commit: approved.commit, rootLockSha256: 'd'.repeat(64), uiLockSha256: 'e'.repeat(64),
+    }) : undefined;
+    const sourceReport = Buffer.from(JSON.stringify({ schemaVersion: 1, ...(producer ? {
+      phase: 'source', source: producer.source, checks: producer.checks,
+      gates: { 'producer-advisories': producer.gate },
+    } : {}) }) + '\n');
     this.prepared = {
       schemaVersion: 1, status: 'prepared-awaiting-platform-gates', name: POLICY.name, version,
-      source: { ref: selectedApproval.ref, tagObject: selectedApproval.tagObject, commit: selectedApproval.commit, tree: selectedApproval.tree },
+      source: { ref: approved.ref, tagObject: approved.tagObject, commit: approved.commit, tree: approved.tree },
       toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash(sourceReport),
+      ...(producer ? { producerAdvisories: producer, producerLocks: {
+        root: producer.source.rootLockSha256, ui: producer.source.uiLockSha256,
+      } } : {}),
       artifact: { filename: 'candidate.tgz', ...digest(this.package.tarball),
-        files: inspectTarball(this.package.tarball, selectedApproval).files },
+        files: inspectTarball(this.package.tarball, approved).files },
     };
     syntheticPreparedLocal(this.prepared, this.approval);
     this.sourceFiles = {
@@ -165,6 +187,123 @@ class Fixture {
       readArtifacts: async () => structuredClone(this.metadata),
       readJobs: async () => structuredClone(this.jobs),
     };
+  }
+
+  async checkBootstrapReaders() {
+    const f = this;
+    const workflow = { ref: f.env.GITHUB_WORKFLOW_REF, commit: approval.commit, runId: '200', attempt: 1 };
+    const locks = { root: 'd'.repeat(64), ui: 'e'.repeat(64) };
+    Object.assign(f.prepared, {
+      major: 2, channel: 'latest', workflow, producerLocks: locks,
+      ci: { runId: '199', attempt: 1, headSha: approval.commit, conclusion: 'success' },
+      stage: { status: 'not-submitted', stageId: null }, publicationApproval: { status: 'not-authorized' },
+      registrySignatures: { status: 'pending-publication' },
+      privateContentReview: { status: 'pending-owner-review', commit: approval.commit,
+        artifact: digest(f.package.tarball) },
+    });
+    delete f.sourceFiles['baseline.json'];
+    rmSync(join(f.env.RUNNER_TEMP, 'npm-prepared/baseline.json'));
+    f.sourceFiles['prepared.json'] = JSON.stringify(f.prepared);
+    f.archives.set('300', zip(f.sourceFiles));
+    f.metadata[0].digest = `sha256:${hash(f.archives.get('300'))}`;
+    f.env.PREPARED_ARTIFACT_DIGEST = f.metadata[0].digest;
+    f.env.PREPARED_MANIFEST_SHA256 = hash(f.sourceFiles['prepared.json']);
+    f.writeSource(f.env.RUNNER_TEMP);
+    await f.complete();
+    const matrix = await f.verify();
+    const actor = { login: POLICY.owner, id: 101 };
+    const repository = { id: 100, full_name: POLICY.repository, fork: false, private: false, owner: actor };
+    const run = { id: 200, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+      run_attempt: 1, status: 'completed', conclusion: 'success',
+      repository, head_repository: repository, actor, triggering_actor: actor };
+    const peerSource = { ref: 'refs/tags/npm/v1.3.1', tagObject: hex('d'), commit: hex('e'), tree: hex('f') };
+    const peerPackage = packageFixture('1.3.1');
+    const peerPrepared = { schemaVersion: 1, name: POLICY.name, version: '1.3.1',
+      status: 'prepared-awaiting-platform-gates', source: peerSource,
+      toolchain: { node: POLICY.node, npm: POLICY.npm }, sourceReportSha256: hash('{}'),
+      artifact: { filename: 'candidate.tgz', ...digest(peerPackage.tarball),
+        files: inspectTarball(peerPackage.tarball, { version: '1.3.1' }).files } };
+    syntheticPreparedLocal(peerPrepared, f.approval);
+    const peerMetadata = f.addArtifact(700, 'npm-prepared-198-1', {
+      'candidate.tgz': peerPackage.tarball, 'prepared.json': JSON.stringify(peerPrepared), 'source-gates.json': '{}',
+    });
+    Object.assign(peerMetadata.workflow_run, { id: 198, head_sha: peerSource.commit });
+    const peerJobs = f.jobs.map(job => ({ ...structuredClone(job), id: job.id + 1000,
+      run_id: 198, head_sha: peerSource.commit }));
+    peerJobs.push({ id: 1600, name: 'source', run_id: 198, run_attempt: 1, head_sha: peerSource.commit,
+      status: 'completed', conclusion: 'success', runner_id: 600, runner_name: 'unit-source', labels: ['ubuntu-24.04'],
+      steps: ['Validate source, run required gates, and pack exactly once',
+        'Retain canonical source bundle without repacking'].map(name => ({ name, status: 'completed', conclusion: 'success' })) });
+    const peerArtifact = { schemaVersion: 1, purpose: 'service-comparison-only', name: POLICY.name,
+      version: '1.3.1', source: peerSource, repository: POLICY.repository, repositoryId: '100',
+      artifactId: '700', artifactDigest: peerMetadata.digest, runId: '198', runAttempt: 1,
+      manifestSha256: hash(JSON.stringify(peerPrepared)), sourceReportSha256: hash('{}'),
+      ...digest(peerPackage.tarball), stageEligible: false, privateScans: 'pending', humanApproval: 'pending',
+      sourceJob: { id: '1600', name: 'source' },
+      consumerJobs: peerJobs.slice(0, 6).map(job => ({ id: String(job.id), name: job.name })),
+      sourcePassed: true, matrixPassed: true, finalizerNotRequired: true };
+    const gates = { schemaVersion: 1, commit: approval.commit, artifact: digest(f.package.tarball),
+      localRegression: f.approval.localRegression,
+      sourceReportSha256: f.prepared.sourceReportSha256, gates: Object.fromEntries(REQUIRED_GATES.map(name => [name, {
+        status: 'passed', evidence: [{ description: 'unit-only injected gate evidence', sha256: hash(name) }],
+      }])) };
+    const { status, ...prepared } = f.prepared;
+    const manifest = { ...prepared, phase: 'prepared-not-staged', gateReportSha256: hash(JSON.stringify(gates)),
+      sourceArtifact: { id: '300', digest: f.metadata[0].digest,
+        preparedSha256: hash(f.sourceFiles['prepared.json']), sourceReportSha256: f.prepared.sourceReportSha256 },
+      matrixArtifacts: matrix.artifactEvidence, peerArtifact };
+    const metadata = f.addArtifact(800, 'npm-candidate-200-1', {
+      'candidate.tgz': f.package.tarball, 'manifest.json': JSON.stringify(manifest), 'gates.json': JSON.stringify(gates),
+    });
+    const a = { ...approval, ciRunId: '199', ciAttempt: 1,
+      artifact: { ...digest(f.package.tarball), manifestSha256: hash(JSON.stringify(manifest)),
+        artifactId: '800', artifactDigest: metadata.digest, runId: '200', runAttempt: 1 } };
+    f.jobs.push(...['source', 'prepare'].map(name => ({ name, head_sha: approval.commit, status: 'completed', conclusion: 'success' })));
+    const readers = { ...f.readers, readJobs: async runId => runId === '198' ? peerJobs : f.jobs,
+      readJson: async path => {
+        if (path === 'actions/runs/200') return run;
+        if (path === 'actions/runs/198') return { ...run, id: 198, head_sha: peerSource.commit, conclusion: 'failure' };
+        if (path === 'git/ref/tags/npm/v1.3.1') return { ref: peerSource.ref, object: { type: 'tag', sha: peerSource.tagObject } };
+        if (path === `git/tags/${peerSource.tagObject}`) return { object: { type: 'commit', sha: peerSource.commit } };
+        if (path === `git/commits/${peerSource.commit}`) return { tree: { sha: peerSource.tree } };
+        throw new Error(`Unexpected unit-only read ${path}`);
+      } };
+    const evidence = await readCandidateEvidence(a, locks, readers);
+    assert.equal(evidence.evidence.consumerInstalls, 12);
+    assert.equal(evidence.evidence.consumerArtifacts, 6);
+    assert.equal(evidence.evidence.peerArtifactId, '700');
+    const original = f.archives.get('400');
+    f.archives.set('400', Buffer.from('substituted API archive'));
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers), /ZIP digest/);
+    f.archives.set('400', original);
+    f.jobs[0].conclusion = 'skipped';
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers));
+    f.jobs[0].conclusion = 'success';
+    peerJobs[0].steps[0].conclusion = 'skipped';
+    await assert.rejects(() => readCandidateEvidence(a, locks, readers), /Peer step/);
+    assert.throws(() => exactArchive(zip({ 'candidate.tgz': 'x', 'extra/': '' }), ['candidate.tgz']), /directory/);
+  }
+
+  async checkBootstrapSigningRun() {
+    const actor = { login: POLICY.owner, id: 101 };
+    const repository = { id: 100, full_name: POLICY.repository, fork: false, private: false, owner: actor };
+    const run = { id: 42, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+      run_attempt: 1, status: 'completed', conclusion: 'success',
+      repository, head_repository: repository, actor, triggering_actor: actor };
+    const job = { id: 55, name: 'sign-bootstrap', run_id: 42, run_attempt: 1, head_sha: approval.commit,
+      status: 'completed', conclusion: 'success', labels: ['ubuntu-24.04'], runner_name: 'unit-only',
+      steps: ['Sign and verify exact bootstrap bytes once', 'Export verified bootstrap bundle']
+        .map(name => ({ name, status: 'completed', conclusion: 'success' })) };
+    const readers = { readJson: async () => run, readJobs: async () => [job] };
+    assert.equal((await readSigningRun(approval, '42', readers, true)).repositoryId, '100');
+    job.steps[1].conclusion = 'failure';
+    await assert.rejects(() => readSigningRun(approval, '42', readers, true));
+    job.steps[1].conclusion = 'success';
+    await assert.rejects(() => readSigningRun(approval, '42', { ...readers, readJobs: async () => [
+      job, { name: 'stage', status: 'completed', conclusion: 'success' },
+    ] }, true));
+    run.run_attempt = 2;
+    await assert.rejects(() => readSigningRun(approval, '42', readers, true));
   }
 
   writeSource(temp) {
@@ -219,7 +358,12 @@ class Fixture {
       }
       if (args.at(-1) === '--version') return { stdout: lane.npm, stderr: '' };
       if (args.includes('ci')) return { stdout: 'injected root restore', stderr: '' };
-      if (args.includes('--test')) return { stdout: tap, stderr: '' };
+      if (args.includes('--test')) {
+        const names = [...nativeNames, ...lifetimeFixtureNames(approval.version)];
+        const stdout = `TAP version 13\n${names.map((name, index) => `ok ${index + 1} - ${name}\n`).join('')}` +
+          `1..${names.length}\n# tests ${names.length}\n# pass ${names.length}\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n`;
+        return { stdout, stderr: '' };
+      }
       assert.ok(args.includes('consumer:check'));
       const dependencies = [{ path: `node_modules/${POLICY.name}`, name: POLICY.name,
         version: approval.version, integrity: this.prepared.artifact.integrity }];
@@ -269,8 +413,8 @@ class Fixture {
   }
 }
 
-for (const version of ['1.3.1', '2.0.1']) {
-  test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, async t => {
+for (const version of ['1.3.1', '2.0.1', '1.3.2', '2.0.2', '2.7.13']) {
+  test(`Native inventory producer rejects missing, extra, renamed and changed ${version} helper files`, { skip: lifetimeSkip(version) }, async t => {
     const native = Object.fromEntries(Object.entries(packageFixture(version).files)
       .filter(([path]) => path.startsWith('bin/windows/')));
     const removed = 'bin/windows/src/PoolingSecurityReader.cs';
@@ -288,18 +432,21 @@ for (const version of ['1.3.1', '2.0.1']) {
     assert.equal(f.calls.filter(call => call.args.includes('--test')).length, 0);
   });
 
-  test(`Native inventory roundtrip carries exact ${version} paths through Windows producer and both finalizers`, async t => {
+  test(`Native inventory roundtrip carries exact ${version} paths through Windows producer and both finalizers`, { skip: lifetimeSkip(version) }, async t => {
     const f = new Fixture(t, version);
     const expected = Object.entries(f.package.files).filter(([path]) => path.startsWith('bin/windows/'))
       .map(([path, bytes]) => ({ path, sha256: hash(bytes) })).sort((a, b) => a.path.localeCompare(b.path));
-    assert.equal(expected.length, version === '1.3.1' ? 5 : 6);
-    assert.equal(expected.some(file => file.path.endsWith('/PoolingNativeFiles.cs')), version === '2.0.1');
+    assert.equal(expected.length, releaseRole(version) === 'legacy' ? 5 : 6);
+    assert.equal(expected.some(file => file.path.endsWith('/PoolingNativeFiles.cs')), releaseRole(version) === 'current');
     await f.complete();
     const matrix = await f.verify();
-    const identity = { baselineCommit: version === '1.3.1' ? LEGACY_REF : CURRENT_REF,
+    const identity = { baselineCommit: releaseRole(version) === 'legacy' ? LEGACY_REF : CURRENT_REF,
       files: [...expected, { path: 'tools/windows-security-helper/build.ps1', sha256: hash('unit script') }],
       reproducibilityBuild: 'not-executed-in-this-run' };
     const request = { version, matrix, extractedRoot: join(f.dir, 'lane2/checkout') };
+    if (requiresProcessLifetime(version)) {
+      identity.processLifetime = verifyProcessLifetimeAssets(request.extractedRoot, version);
+    }
     assert.equal(verifyWindowsExecution(request, identity).length, 2);
     for (const report of matrix.nativeWindowsEvidence) assert.deepEqual(
       report.files.toSorted((a, b) => a.path.localeCompare(b.path)), expected);
@@ -314,11 +461,53 @@ for (const version of ['1.3.1', '2.0.1']) {
   });
 }
 
+test('bootstrap unit: reader chain rechecks nine ZIPs, twelve reports and opposite T32 bytes', async t => {
+  await new Fixture(t).checkBootstrapReaders();
+});
+
+test('bootstrap unit: signing-run API requires original signing job and successful export', async t => {
+  await new Fixture(t).checkBootstrapSigningRun();
+});
+
+test('owner unit: actual current API run/job must be owner-only hosted original source, not signing or preparation', async () => {
+  const approval = { commit: 'a'.repeat(40) };
+  const owner = { login: POLICY.owner, id: 100 };
+  const repository = { full_name: POLICY.repository, id: 101, owner, private: false, fork: false };
+  const run = { id: 70, head_sha: approval.commit, path: POLICY.workflow, event: 'workflow_dispatch',
+    run_attempt: 1, status: 'in_progress', conclusion: null, repository, head_repository: repository,
+    actor: owner, triggering_actor: owner };
+  const job = { id: 71, name: 'publish-bootstrap', run_id: 70, run_attempt: 1, head_sha: approval.commit,
+    status: 'in_progress', conclusion: null, labels: ['ubuntu-24.04'], runner_name: 'unit-only-hosted' };
+  const readers = { readJson: async () => run, readJobs: async () => [job] };
+  assert.deepEqual(await readOwnerRun(approval, '70', readers), {
+    runId: '70', jobId: '71', attempt: 1, repositoryId: '101', ownerId: '100',
+  });
+  for (const mutate of [
+    () => { job.head_sha = 'b'.repeat(40); },
+    () => { job.run_attempt = 2; },
+    () => { job.name = 'sign-bootstrap'; },
+    () => { run.actor = { login: 'another-owner', id: 100 }; },
+    () => { run.event = 'push'; },
+  ]) {
+    const savedJob = structuredClone(job);
+    const savedRun = structuredClone(run);
+    mutate();
+    await assert.rejects(() => readOwnerRun(approval, '70', readers));
+    Object.assign(job, savedJob);
+    Object.assign(run, savedRun);
+  }
+  await assert.rejects(() => readOwnerRun(approval, '70', { ...readers,
+    readJobs: async () => [job, { ...job, id: 72, name: 'stage' }] }));
+  await assert.rejects(() => readOwnerRun(approval, '70', { ...readers,
+    readJobs: async () => [job, { ...job, id: 72 }] }));
+});
+
 test('consumer contexts bind npm-only refs without accepting a different tag namespace', t => {
   const f = new Fixture(t);
   for (const { version, namespace } of ['1.3.1', '2.0.1'].flatMap(version =>
-    ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/'].map(namespace => ({ version, namespace })))) {
-    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}` });
+    ['npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/'].map(namespace => ({ version, namespace })))) {
+    const a = syntheticLocalApproval({ ...approval, version, ref: `refs/tags/${namespace}v${version}`,
+      peerArtifact: { ...approval.peerArtifact, version: version.startsWith('1.') ? '2.0.1' : '1.3.1' } });
     const env = { ...f.env, GITHUB_REF: a.ref,
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${a.ref}` };
     const event = { ...f.event, inputs: { action: 'prepare', approval: JSON.stringify(a) } };
@@ -328,11 +517,11 @@ test('consumer contexts bind npm-only refs without accepting a different tag nam
       GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@refs/tags/v${version}`,
     }, a, event));
     for (const ref of ['refs/heads/main', `refs/tags/${namespace}v${version}-other`,
-      `refs/tags/other/v${version}`, `refs/tags/npm-r06/v${version}`]) {
+      `refs/tags/other/v${version}`, `refs/tags/npm-r01/v${version}`]) {
       const invalid = { ...a, ref };
       const invalidEnv = { ...env, GITHUB_REF: ref,
         GITHUB_WORKFLOW_REF: `${POLICY.repository}/${POLICY.workflow}@${ref}` };
-      assert.throws(() => validateMatrixContext(invalidEnv, invalid), /exact approved/);
+      assert.throws(() => validateMatrixContext(invalidEnv, invalid), /exact approved|supported/);
     }
   }
 });
@@ -582,7 +771,15 @@ test('consumer npm installer uses Node plus known CLI, exact pins, empty config 
   }
 });
 
-test('workflow is manual, pins six lanes, transfers exact IDs and keeps OIDC in protected stage only', () => {
+test('GitHub pagination rejects changed total counts rather than accepting a truncated run', async () => {
+  let page = 0;
+  const readers = githubReaders({ GITHUB_TOKEN: 'SYNTHETIC' }, { fetcher: async () =>
+    new Response(JSON.stringify({ total_count: page++ === 0 ? 3 : 2, jobs: [{ id: page }] })) });
+  await assert.rejects(readers.readJobs('123', 2), /total_count/);
+  assert.equal(page, 2);
+});
+
+test('workflow is manual, pins six lanes, transfers exact IDs and protects the only OIDC job', () => {
   const yaml = readFileSync(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
   assert.match(yaml, /workflow_dispatch:/);
   assert.doesNotMatch(yaml, /^\s+(?:push|pull_request|release|schedule):/m);
@@ -592,6 +789,7 @@ test('workflow is manual, pins six lanes, transfers exact IDs and keeps OIDC in 
   }
   assert.equal((yaml.match(/id-token: write/g) ?? []).length, 1);
   assert.ok(yaml.indexOf('id-token: write') > yaml.indexOf('\n  stage:'));
+  assert.doesNotMatch(yaml, /sign-bootstrap|publish-bootstrap/);
   assert.match(yaml, /environment: npm-publish/);
   assert.match(yaml, /needs: \[source, consumers\]/);
   assert.match(yaml, /artifact-ids: \$\{\{ steps.matrix.outputs.matrix-artifact-ids \}\}/);

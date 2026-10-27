@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { InputSnapshot, physical, safeName } from './local-inputs.mjs';
-import { LOCAL_CASES, LOCAL_CONTROLLER, LOCAL_VERSIONS, localHash, localCommitment } from './local-regression.mjs';
+import { localCases, localReportVersions, LOCAL_CONTROLLER, localHash, localCommitment } from './local-regression.mjs';
 
 export function readLocalBytes(path, limit = 32 * 1024 ** 2) {
   physical(path);
@@ -25,18 +25,29 @@ export function controllerBinding(root) {
   return { files, sha256: localCommitment(files) };
 }
 
-export function evidenceInventory(root) {
-  const expected = ['result.json', 'evidence-manifest.json', 'commands', 'controller', 'runtime', 'docker-config',
-    ...LOCAL_VERSIONS.map(version => `inputs-${version}`),
-    ...LOCAL_CASES.flatMap(item => [item.name, `${item.name}-storage-admission.json`])];
+// `pending` is the in-memory report of a run that has not written result.json yet. Every other
+// member is checked and hashed the same way, so a run proves its inventory before it passes.
+export function evidenceInventory(root, pending) {
+  const report = pending ?? readLocalJson(join(root, 'result.json'));
+  const written = pending ? [] : ['result.json'];
+  const versions = localReportVersions(report);
+  const cases = localCases(versions);
+  // The host session lane writes its receipt beside the report, so it is inventoried and hashed
+  // with every other run member rather than travelling as unbound evidence.
+  const sessionLane = report.sessionLane ? ['session-lane.json'] : [];
+  const expected = [...written, 'evidence-manifest.json', 'run-state.json', 'commands', 'controller', 'runtime',
+    'docker-config',
+    ...sessionLane,
+    ...versions.map(version => `inputs-${version}`),
+    ...cases.flatMap(item => [item.name, `${item.name}-storage-admission.json`])];
   const actual = readdirSync(physical(root)).filter(name => name !== 'evidence-manifest.json').sort();
   assert.deepEqual(actual, expected.filter(name => name !== 'evidence-manifest.json').sort(),
     'Missing or unexpected local run members');
   assert.deepEqual(readdirSync(physical(join(root, 'docker-config'))), [], 'Unexpected private Docker configuration');
   const snapshot = new InputSnapshot(root, { maxBytes: 2 * 1024 ** 3, maxFiles: 100_000 });
-  for (const path of ['result.json', 'commands', 'controller', 'runtime',
-    ...LOCAL_VERSIONS.map(version => `inputs-${version}/manifest.json`),
-    ...LOCAL_CASES.flatMap(item => [item.name, `${item.name}-storage-admission.json`])]) snapshot.add(path);
+  for (const path of [...written, 'run-state.json', 'commands', 'controller', 'runtime', ...sessionLane,
+    ...versions.map(version => `inputs-${version}/manifest.json`),
+    ...cases.flatMap(item => [item.name, `${item.name}-storage-admission.json`])]) snapshot.add(path);
   for (const file of snapshot.files) {
     assert.equal(lstatSync(join(root, file.path)).nlink, 1, 'Hardlinked evidence is not independent');
   }

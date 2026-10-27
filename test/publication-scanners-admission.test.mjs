@@ -20,15 +20,172 @@ import {
 } from '../tools/npm-publication/secret-report.mjs';
 import { collectSecrets } from '../tools/npm-publication/run.mjs';
 import { aggregateExternalGates, externalCli } from '../tools/npm-publication/external-gates.mjs';
-import { POLICY, REQUIRED_GATES, validateApproval, validateGates, validateTransfer } from '../tools/npm-publication/policy.mjs';
+import { POLICY, REQUIRED_GATES, digest, validateApproval, validateGates, validateTransfer } from '../tools/npm-publication/policy.mjs';
 import { validateLocalApproval } from '../tools/npm-publication/local-regression.mjs';
+import { MATRIX } from '../tools/npm-publication/matrix.mjs';
 import { syntheticLocalApproval } from './helpers/local-regression-fixture.mjs';
-import { CandidateFixture } from './helpers/npm-publication-candidate-fixture.mjs';
-import { digest } from '../tools/npm-publication/policy.mjs';
-import { validateLocalManifest } from '../tools/npm-publication/local-regression.mjs';
-import { MATRIX, verifyMatrixReports } from '../tools/npm-publication/matrix.mjs';
+import { CandidateFixture, syntheticRegistrySourceProof } from './helpers/npm-publication-candidate-fixture.mjs';
+import { lifetimeSkip } from './helpers/legacy-checkout.mjs';
 
-const SKIPPED_CONSUMER_JOB_NAME = 'consumer (${{ matrix.platform }}, ${{ matrix.npm }})';
+for (const [version, generation, proofRequired, corruption] of [['2.0.2', ''], ['2.7.13', 'npm-r27/'], ['1.3.2', 'npm-r12/']]
+  .flatMap(pair => [[...pair, false], [...pair, true]])
+  .flatMap(pair => ['none', 'missing-runtime', 'license-text', 'notices', 'native-source', 'native-report', 'replacement']
+    .map(corruption => [...pair, corruption]))) {
+  test(`Connected SYNTHETIC reusable collection -> admission -> prepare -> matrix -> finalizer -> stage: ${version}, sourceProof=${proofRequired}, corruption=${corruption}`, { skip: lifetimeSkip(version) }, async t => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
+    const f = await new Fixture().init(t, { version, generation });
+    f.approval.publicPackages.push(POLICY.name, 'smol-toml');
+    f.approval.ciAttempt = 2;
+    f.producerContext.ci.attempt = 2;
+    f.approval.expectedDistTags = { latest: '2.0.1', legacy: '1.3.1' };
+    const candidate = new CandidateFixture(t, f.approval, f.env, f.readers, {
+      package: files => {
+        if (corruption === 'missing-runtime') delete files['bin/service-control.mjs'];
+        if (corruption === 'native-source') delete files['bin/windows/PoolingSecurityHelper.exe'];
+        if (corruption === 'notices') files['THIRD_PARTY_NOTICES.txt'] = 'SYNTHETIC stale notices';
+        if (corruption === 'license-text') {
+          files.LICENSE = 'SYNTHETIC invalid license contents. '.repeat(8);
+          const manifest = JSON.parse(files['ui/dist/third-party-manifest.json']);
+          manifest.projectLicenseSha256 = digest(Buffer.from(files.LICENSE)).sha256;
+          files['ui/dist/third-party-manifest.json'] = JSON.stringify(manifest);
+        }
+      },
+      replacement: result => {
+        if (corruption === 'replacement') result.steps[0].heldBeforeAndAfterReplacement = false;
+      },
+    });
+    candidate.ciCompletedAt = f.producerContext.ci.completedAt;
+    const subject = f.approval.localRegression.subjects.find(item => item.version !== version);
+    const peerPackage = candidate.pack(subject.version);
+    const peer = f.approval.peerArtifact = { kind: 'npm-registry-published', version: subject.version,
+      commit: subject.commit, tree: subject.tree, ...digest(peerPackage.bytes) };
+    if (proofRequired) peer.sourceProof = { kind: 'registry-slsa-v1',
+      ref: `refs/tags/npm-r27/v${peer.version}`, runId: '777', runAttempt: 1 };
+    const collecting = { ...f.approval, scope: 'collect-secrets' };
+    for (const field of ['secretReview', 'publicPackages', 'peerArtifact', 'expectedDistTags']) delete collecting[field];
+    const collectionEnv = { ...f.env, GITHUB_RUN_ID: f.workflow.runId,
+      GITHUB_RUN_NUMBER: f.workflow.runNumber, GITHUB_JOB: 'secret-collection' };
+    const collected = await collectSecrets(collecting, {
+      env: collectionEnv, sourceRoot: f.root, tools: {},
+      runtime: { platform: 'linux', arch: 'x64', versions: { node: POLICY.node } },
+      preflight: (approval, options) => candidate.preflight(approval, options, collectionEnv),
+      scan: async () => f.secrets,
+      postflight: () => verifyCollectionSource(f.report, f.root, {}, f.readSource),
+    });
+    f.report = collected;
+    f.repack();
+    const emitted = Object.fromEntries(await Promise.all(['report.json',
+      ...collected.producerEvidence.receipts.map(item => item.file)].map(async name =>
+      [name, await readFile(join(f.temp, 'npm-secret-collection', name))])));
+    assert.deepEqual(emitted['report.json'], f.reportBytes);
+    f.archive = f.zip(emitted);
+    assert.equal(`sha256:${sha256(f.archive)}`, f.metadata.digest);
+    const admitted = await f.publication(await f.admit());
+    assert.equal(admitted.status, 'passed');
+    if (corruption === 'native-source') {
+      await assert.rejects(candidate.prepare(admitted));
+      assert.equal(candidate.prepared, undefined, 'Bad native source cannot produce preparation or stage admission');
+      return;
+    }
+    const prepared = await candidate.prepare(admitted);
+    const producer = prepared.prepared.producerAdvisories;
+    assert.equal(producer.source.version, version);
+    assert.equal(producer.gate.disposition, 'advisory-free');
+    assert.equal(producer.gate.rawFindingCount, 0);
+    assert.equal(producer.gate.riskAcceptance, undefined);
+    assert.deepEqual(producer.gate.nativeAudits.map(audit => [audit.scope, audit.rawExitCode]),
+      [['producer-root', 0], ['producer-ui', 0]]);
+    const matrix = await candidate.consumers();
+    assert.equal(matrix.consumerLanes.length, 12);
+    assert.equal(matrix.artifactEvidence.length, 6);
+    const tarballUrl = `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`;
+    const attestationsUrl = `${POLICY.registry}-/npm/v1/attestations/${POLICY.name}@${peer.version}`;
+    const responses = new Map([
+      [`${POLICY.registry}${POLICY.name}`, JSON.stringify({
+        name: POLICY.name, maintainers: [{ name: POLICY.owner }], 'dist-tags': f.approval.expectedDistTags,
+        versions: { [peer.version]: { name: POLICY.name, version: peer.version,
+          ...(proofRequired ? {} : { gitHead: peer.commit }),
+          dist: { tarball: tarballUrl, integrity: peer.integrity,
+            shasum: createHash('sha1').update(peerPackage.bytes).digest('hex'),
+            ...(proofRequired ? { attestations: { url: attestationsUrl,
+              provenance: { predicateType: 'https://slsa.dev/provenance/v1' } } } : {}) } } },
+      })],
+      [`https://api.github.com/repos/${POLICY.repository}/git/commits/${peer.commit}`,
+        JSON.stringify({ sha: peer.commit, tree: { sha: peer.tree } })],
+      [tarballUrl, peerPackage.bytes],
+    ]);
+    if (proofRequired) responses.set(attestationsUrl, JSON.stringify(syntheticRegistrySourceProof(peer, f.env)));
+    let cryptographicCalls = 0;
+    const verifyBundle = async () => { cryptographicCalls++; };
+    let peerReads = 0;
+    const peerReader = async url => {
+      peerReads++;
+      assert.ok(responses.has(url), 'Unexpected synthetic peer endpoint');
+      return new Response(responses.get(url));
+    };
+    const finalized = await candidate.finalize(peerReader, verifyBundle);
+    const expectedReads = proofRequired ? 4 : 3;
+    assert.equal(peerReads, expectedReads);
+    assert.equal(cryptographicCalls, proofRequired ? 1 : 0);
+    assert.deepEqual(finalized.matrix, matrix);
+    assert.deepEqual(finalized.prepared, prepared.prepared);
+    assert.equal(finalized.peer.prepared, undefined);
+    if (corruption === 'native-report') finalized.matrix.nativeWindowsEvidence[0].counts.pass = 0;
+    if (corruption !== 'none') {
+      await assert.rejects(candidate.stageInputs(finalized, admitted));
+      const failedGate = {
+        'missing-runtime': 'runtime-closure', 'license-text': 'licenses-notices', notices: 'licenses-notices',
+        'native-report': 'native-windows-execution', replacement: 'service-replacement',
+      }[corruption];
+      assert.equal(candidate.externalReport.status, 'failed');
+      assert.equal(candidate.externalReport.error.gate, failedGate,
+        'The real downstream validator, not an unconditional status fixture, must reject');
+      return;
+    }
+    const stage = await candidate.stageInputs(finalized, admitted);
+    assert.equal(candidate.externalReport.runtimeLicenses.coverage.consumerGraphs, 12);
+    assert.ok(candidate.externalReport.runtimeClosure.files.some(file => file.path === 'bin/service-control.mjs'));
+    assert.equal(candidate.externalReport.nativeWindows.length, 2);
+    assert.equal(candidate.externalReport.serviceReplacement.steps.length, 4);
+    const manifest = stage.validate();
+    assert.equal(manifest.version, version);
+    assert.equal(manifest.peerArtifact.version, peer.version);
+    assert.equal(manifest.peerArtifact.purpose, 'service-comparison-only');
+    if (proofRequired) {
+      assert.deepEqual(manifest.peerArtifact.provenance.sourceProof, peer.sourceProof);
+      assert.equal(manifest.peerArtifact.provenance.verification, 'cryptographically-verified');
+      const good = structuredClone(finalized.peer.evidence.provenance);
+      finalized.peer.evidence.provenance.verification = 'not-performed';
+      await assert.rejects(() => candidate.stageInputs(finalized, admitted), /must be verified/);
+      finalized.peer.evidence.provenance = good;
+    }
+    assert.equal(manifest.matrixArtifacts.length, 6);
+    assert.equal(stage.gates.consumers.length, 12);
+    assert.deepEqual(stage.gates.sourceSecretEvidence.collection, collected);
+    assert.equal(collected.producerEvidence.ci.attempt, 2);
+    const replacement = candidate.calls.find(call => call.file === 'tools/service-replacement/check.mjs');
+    assert.equal(replacement.args[replacement.args.indexOf('--current-version') + 1],
+      version.startsWith('2.') ? version : peer.version);
+    assert.equal(replacement.args[replacement.args.indexOf('--legacy-version') + 1],
+      version.startsWith('1.') ? version : peer.version);
+    for (const name of ['licenses-notices', 'runtime-closure', 'native-windows-execution', 'service-replacement']) {
+      assert.equal(stage.gates.gates[name].status, 'passed');
+    }
+    const substituted = { ...stage.approval, artifact: { ...stage.approval.artifact, ...finalized.peer.evidence } };
+    assert.throws(() => validateApproval(substituted, 'stage'), /comparison-only/);
+    assert.throws(() => validateTransfer(stage.run, stage.jobs, stage.metadata, substituted), /comparison-only/);
+    candidate.ciRun.run_attempt = 3;
+    await assert.rejects(candidate.finalize(peerReader, verifyBundle), error => error.stack.includes('validateCi'));
+    candidate.ciRun.run_attempt = 2;
+    candidate.jobs.pop();
+    await assert.rejects(candidate.finalize(peerReader, verifyBundle), /Missing\/duplicate current-run job/);
+    assert.equal(peerReads, expectedReads, 'Invalid own evidence fails before any peer read');
+    for (const invalid of ['3.0.2', '2.0.2-beta.1', '2.00.2']) {
+      assert.throws(() => validateApproval({ ...stage.approval, version: invalid }, 'stage'));
+    }
+    assert.throws(() => validateApproval({ ...stage.approval, ref: 'refs/tags/v2.9.9' }, 'stage'));
+  });
+}
 
 const NATIVE_URI_FIXTURES = [
   { blob: '2abc5b2058695c2274c3913b99b1be6d5427af5d', rawBytes: 44, fullBytes: 50,
@@ -42,9 +199,11 @@ const NATIVE_URI_FIXTURES = [
     fullSha256: '618386be8b79f7991b70268ae66b5dfbeaed06c2efb02a36c0027683980f388a' },
 ];
 
+const SKIPPED_CONSUMER_JOB_NAME = 'consumer (${{ matrix.platform }}, ${{ matrix.npm }})';
+
 // Synthetic execution, GitHub, Git and owner inputs only. No genuine approval is generated.
 class Fixture {
-  async init(t, { nativeUri = false, nativeCheckouts, version = '2.0.1' } = {}) {
+  async init(t, { nativeUri = false, nativeCheckouts, version = '2.0.1', generation = 'npm-r5/' } = {}) {
     this.nativeUri = nativeUri;
     if (nativeCheckouts !== undefined) {
       assert.ok(nativeUri && nativeCheckouts instanceof Map && nativeCheckouts.size === 3);
@@ -88,7 +247,7 @@ class Fixture {
     this.source = await this.readSource(this.root, { tools: {}, context: {} });
     this.secrets = await this.scan();
     this.workflow = { runId: '11', runNumber: '7', attempt: 1, repositoryId: '23', ownerId: '17',
-      ref: `refs/tags/npm-r5/v${version}` };
+      ref: `refs/tags/${generation}v${version}` };
     this.report = makeSecretCollection(this.secrets, this.workflow, this.producerContext);
     this.approval = syntheticLocalApproval({
       schemaVersion: 1, scope: 'prepare', name: POLICY.name, version, commit: this.commit,
@@ -127,8 +286,7 @@ class Fixture {
         'Post Run actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803', 'Complete job']
         .map((name, index) => ({ name, number: index + 1, status: 'completed', conclusion: 'success',
           started_at: this.time(index === 5 ? -53 : -59), completed_at: this.time(index === 4 ? -54 : index === 5 ? -29 : -21) })),
-    }, ...['source', 'prepare', 'stage', SKIPPED_CONSUMER_JOB_NAME,
-      ...(this.approval.version === '2.0.1' ? ['sign-bootstrap', 'publish-bootstrap'] : [])].map((name, index) =>
+    }, ...['source', 'prepare', 'stage', SKIPPED_CONSUMER_JOB_NAME].map((name, index) =>
       ({ id: 112 + index, run_id: 11, run_attempt: 1, head_sha: this.commit, name,
         status: 'completed', conclusion: 'skipped', steps: [] }))];
     this.repack();
@@ -408,197 +566,6 @@ class Fixture {
       sourceScanner: async () => this.secrets, ...extra });
   }
 }
-
-test('Connected synthetic collection, preparation, real matrix/finalizer validators and stage-input controls', async t => {
-  t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected network request'); });
-  const f = await new Fixture().init(t, { version: '1.3.1' });
-  f.approval.publicPackages.push(POLICY.name, 'smol-toml');
-  f.approval.ciAttempt = 2;
-  f.producerContext.ci.attempt = 2;
-  const candidate = new CandidateFixture(t, f.approval, f.env, f.readers);
-  candidate.ciCompletedAt = f.producerContext.ci.completedAt;
-  const peerPackage = candidate.pack('2.0.1');
-  const subject = f.approval.localRegression.subjects.find(item => item.version === '2.0.1');
-  const peer = f.approval.peerArtifact = { kind: 'npm-registry-published', version: subject.version,
-    commit: subject.commit, tree: subject.tree, ...digest(peerPackage.bytes) };
-  const collecting = { ...f.approval, scope: 'collect-secrets' };
-  for (const field of ['secretReview', 'publicPackages', 'peerArtifact']) delete collecting[field];
-  const collectionEnv = { ...f.env, GITHUB_RUN_ID: f.workflow.runId,
-    GITHUB_RUN_NUMBER: f.workflow.runNumber, GITHUB_JOB: 'secret-collection' };
-  const collected = await collectSecrets(collecting, {
-    env: collectionEnv, sourceRoot: f.root, tools: {},
-    runtime: { platform: 'linux', arch: 'x64', versions: { node: POLICY.node } },
-    preflight: (approval, options) => candidate.preflight(approval, options, collectionEnv),
-    scan: async () => f.secrets,
-    postflight: () => verifyCollectionSource(f.report, f.root, {}, f.readSource),
-  });
-  f.report = collected;
-  f.repack();
-  const emitted = Object.fromEntries(await Promise.all(['report.json',
-    ...collected.producerEvidence.receipts.map(item => item.file)].map(async name =>
-    [name, await readFile(join(f.temp, 'npm-secret-collection', name))])));
-  assert.deepEqual(emitted['report.json'], f.reportBytes);
-  f.archive = f.zip(emitted);
-  assert.equal(`sha256:${sha256(f.archive)}`, f.metadata.digest);
-  const admitted = await f.publication(await f.admit());
-  assert.equal(admitted.status, 'passed');
-  assert.equal(admitted.scannerDetails.secrets.collection.producerEvidence.ci.attempt, 2);
-  const prepared = await candidate.prepare(admitted);
-  assert.equal(prepared.prepared.sourceReportSha256, candidate.prepared.sourceReportSha256);
-  const matrix = await candidate.consumers();
-  assert.equal(matrix.consumerLanes.length, 12);
-  assert.equal(matrix.artifactEvidence.length, 6);
-  const tarballUrl = `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`;
-  const responses = new Map([
-    [`${POLICY.registry}${POLICY.name}`, jsonForPeer()],
-    [`https://api.github.com/repos/${POLICY.repository}/git/commits/${peer.commit}`,
-      JSON.stringify({ sha: peer.commit, tree: { sha: peer.tree } })],
-    [tarballUrl, peerPackage.bytes],
-  ]);
-  function jsonForPeer() {
-    return JSON.stringify({ name: POLICY.name, maintainers: [{ name: POLICY.owner }],
-      'dist-tags': { latest: peer.version }, versions: { [peer.version]: {
-        name: POLICY.name, version: peer.version, gitHead: peer.commit,
-        dist: { tarball: `${POLICY.registry}${POLICY.name}/-/${POLICY.name}-${peer.version}.tgz`,
-          integrity: peer.integrity, shasum: createHash('sha1').update(peerPackage.bytes).digest('hex') },
-      } } });
-  }
-  let peerReads = 0;
-  const peerReader = async url => {
-    peerReads++;
-    assert.ok(responses.has(url), 'Unexpected synthetic peer endpoint');
-    return new Response(responses.get(url));
-  };
-  const finalized = await candidate.finalize(peerReader);
-  assert.equal(peerReads, 3);
-  assert.deepEqual(finalized.matrix, matrix);
-  assert.deepEqual(finalized.prepared, prepared.prepared);
-  assert.equal(finalized.peer.prepared, undefined);
-  const stage = candidate.stageInputs(finalized, admitted);
-  const manifest = stage.validate();
-  assert.equal(manifest.producerLocks.root, candidate.source.rootLockSha256);
-  assert.equal(manifest.producerLocks.ui, candidate.source.uiLockSha256);
-  assert.equal(manifest.peerArtifact.purpose, 'service-comparison-only');
-  assert.equal(manifest.matrixArtifacts.length, 6);
-  assert.equal(stage.gates.consumers.length, 12);
-  assert.deepEqual(stage.gates.sourceSecretEvidence.collection, collected);
-  assert.equal(stage.gates.sourceSecretEvidence.collection.producerEvidence.ci.attempt, 2);
-
-  const sourceTree = candidate.sourceResponse.tagTree;
-  candidate.sourceResponse.tagTree = '0'.repeat(40);
-  await assert.rejects(candidate.finalize(peerReader), error => error.stack.includes('validateSource'));
-  candidate.sourceResponse.tagTree = sourceTree;
-  candidate.ciRun.run_attempt = 3;
-  await assert.rejects(candidate.finalize(peerReader), error => error.stack.includes('validateCi'));
-  candidate.ciRun.run_attempt = 2;
-  assert.equal(peerReads, 3);
-  const disclosed = f.approval.publicPackages.pop();
-  await assert.rejects(candidate.prepare(admitted), error => error.stack.includes('lockedCoordinates'));
-  f.approval.publicPackages.push(disclosed);
-
-  const verifyConsumers = () => verifyMatrixReports({ directory: candidate.reports,
-    approval: candidate.approval, env: candidate.env, prepared: candidate.prepared, ...candidate.readers });
-  const originalReport = JSON.parse(await readFile(join(candidate.reports, candidate.metadata[1].name, 'report.json')));
-  for (const change of [
-    report => { report.consumers.pop(); },
-    report => { report.platform = 'darwin'; },
-  ]) {
-    await verifyConsumers();
-    candidate.rewriteReport(0, change);
-    await assert.rejects(candidate.finalize(peerReader), error => error.stack.includes('verifyMatrixReports'));
-    assert.equal(peerReads, 3, 'Malformed own-candidate evidence must fail before resolving peer');
-    candidate.rewriteReport(0, report => Object.assign(report, structuredClone(originalReport)));
-    await verifyConsumers();
-  }
-  const job = candidate.jobs.pop();
-  await assert.rejects(candidate.finalize(peerReader), /Missing\/duplicate current-run job/);
-  assert.equal(peerReads, 3);
-  candidate.jobs.push(job);
-  await verifyConsumers();
-  candidate.replacePrepared(finalized.peer.evidence);
-  await assert.rejects(candidate.finalize(peerReader),
-    error => error.stack.includes('verifyPreparedBundle') &&
-      error.stack.includes('validatePreparedLocal') &&
-      !error.stack.includes('validateLocalReview'));
-  assert.equal(peerReads, 3);
-  candidate.replacePrepared(prepared.prepared);
-  await verifyConsumers();
-
-  stage.validate();
-  const substituted = { ...stage.approval, artifact: { ...stage.approval.artifact, ...finalized.peer.evidence } };
-  assert.throws(() => validateApproval(substituted, 'stage'), /comparison-only/);
-  assert.throws(() => validateTransfer(stage.run, stage.jobs, stage.metadata, substituted), /comparison-only/);
-  const peerManifest = Buffer.from(JSON.stringify(finalized.peer.evidence));
-  assert.throws(() => validateLocalManifest(peerManifest, { ...stage.approval,
-    artifact: { ...stage.approval.artifact, manifestSha256: sha256(peerManifest) } }),
-  error => error.stack.includes('validatePreparedLocal') &&
-    !error.stack.includes('validateLocalReview'));
-  stage.validate();
-});
-
-test('Source CI attempt 2 survives original collection and exact owner admission', async t => {
-  const f = await new Fixture().init(t);
-  f.producerContext.ci.attempt = 2;
-  f.approval.ciAttempt = 2;
-  f.report = makeSecretCollection(f.secrets, f.workflow, f.producerContext);
-  assert.equal(f.report.producerEvidence.ci.attempt, 2);
-  assert.equal(f.report.workflow.attempt, 1);
-  f.repack();
-  await f.admit();
-  for (const [key, value] of [['ciAttempt', 1], ['ciRunId', '101']]) {
-    const original = f.approval[key];
-    f.approval[key] = value;
-    await assert.rejects(f.admit(), /admission rejected/);
-    f.approval[key] = original;
-  }
-});
-
-test('Original collection accepts bounded repair refs and numeric source attempts, never collection reruns', async t => {
-  const f = await new Fixture().init(t);
-  for (const attempt of [1, 2, Number.MAX_SAFE_INTEGER]) {
-    for (const namespace of ['', 'npm/', 'npm-r2/', 'npm-r3/', 'npm-r4/', 'npm-r5/', 'npm-r6/', 'npm-r12/',
-      `npm-r${Number.MAX_SAFE_INTEGER}/`]) {
-      for (const version of ['1.3.1', '2.0.1']) {
-        const report = structuredClone(f.report);
-        report.producerEvidence.ci.attempt = attempt;
-        report.workflow.ref = `refs/tags/${namespace}v${version}`;
-        validateSecretCollection(report);
-        report.workflow.attempt = 2;
-        assert.throws(() => validateSecretCollection(report));
-      }
-    }
-  }
-  for (const attempt of [undefined, null, true, '1', '2', 0, -1, 1.5, NaN, Infinity,
-    Number.MAX_SAFE_INTEGER + 1]) {
-    const report = structuredClone(f.report);
-    report.producerEvidence.ci.attempt = attempt;
-    assert.throws(() => validateSecretCollection(report));
-    const approval = { ...f.approval, scope: 'collect-secrets', ciAttempt: attempt };
-    delete approval.secretReview;
-    delete approval.publicPackages;
-    assert.throws(() => validateApproval(approval, 'collect-secrets'));
-  }
-  for (const ref of ['refs/tags/npm-r06/v2.0.1', 'refs/tags/npm-r1/v2.0.1',
-    'refs/tags/npm-r9007199254740992/v2.0.1', 'refs/tags/npm-r6/v2.0.2',
-    'refs/tags/npm-r6/v1.3.1-beta', 'refs/tags/npm-r6/v2.0.1\n']) {
-    assert.throws(() => validateSecretCollection({ ...f.report, workflow: { ...f.workflow, ref } }));
-  }
-});
-
-test('Admission retains exact repair ref rather than accepting a different valid namespace', async t => {
-  const f = await new Fixture().init(t);
-  const ref = 'refs/tags/npm-r6/v2.0.1';
-  f.workflow.ref = ref;
-  f.report.workflow.ref = ref;
-  f.approval.ref = ref;
-  f.env.GITHUB_REF = ref;
-  f.env.GITHUB_WORKFLOW_REF = `${POLICY.repository}/${POLICY.workflow}@${ref}`;
-  f.repack();
-  await f.admit();
-  f.report.workflow.ref = 'refs/tags/npm-r12/v2.0.1';
-  f.repack();
-  await assert.rejects(f.admit(), /admission rejected/);
-});
 
 test('SYNTHETIC end-to-end collection is non-eligible; fresh exact owner admission preserves raw findings/183/3 per scope', async t => {
   const f = await new Fixture().init(t);
@@ -1113,7 +1080,7 @@ test('collection topology accepts the exact skipped matrix name and preserves in
   const workflow = await readFile(new URL('../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
   const consumers = workflow.slice(workflow.indexOf('\n  consumers:'), workflow.indexOf('\n  prepare:'));
   assert.ok(consumers.split(/\r?\n/).includes(`    name: ${SKIPPED_CONSUMER_JOB_NAME}`));
-  for (const version of ['1.3.1', '2.0.1']) {
+  for (const version of ['1.3.1', '1.3.2', '2.0.1', '2.0.2', '2.7.13']) {
     await t.test(version, async t => {
       const f = await new Fixture().init(t, { version });
       const original = structuredClone(f.jobs);
@@ -1150,13 +1117,13 @@ test('collection topology accepts the exact skipped matrix name and preserves in
 });
 
 test('collection step bounds honor GitHub second precision without widening precise timestamps', async t => {
-  for (const version of ['1.3.1', '2.0.1']) {
+  for (const version of ['1.3.1', '1.3.2', '2.0.1', '2.0.2', '2.7.13']) {
     await t.test(version, async t => {
       const f = await new Fixture().init(t, { version });
       const collect = f.jobs[0].steps.find(step => step.name === 'Collect redacted source secret evidence only');
       const end = Math.floor(Date.parse(f.report.completedAt) / 1000) * 1000;
       collect.completed_at = new Date(end).toISOString().replace('.000Z', 'Z');
-      for (const offset of [0, 34, 999]) {
+      for (const offset of [0, 223, 999]) {
         f.report.completedAt = new Date(end + offset).toISOString();
         f.repack();
         validateCollectionJobs(f.jobs, f.approval, f.report);
@@ -1170,7 +1137,7 @@ test('collection step bounds honor GitHub second precision without widening prec
       }
       f.report.completedAt = new Date(end + 999).toISOString();
       f.repack();
-      for (const offset of [0, 34, 999, 1000]) {
+      for (const offset of [0, 223, 999, 1000]) {
         const report = structuredClone(f.report);
         report.producerEvidence.receipts.at(-1).record.native.completedAt = new Date(end + offset).toISOString();
         if (offset < 1000) validateCollectionJobs(f.jobs, f.approval, report);
@@ -1180,16 +1147,18 @@ test('collection step bounds honor GitHub second precision without widening prec
       early.producerEvidence.receipts[0].record.native.startedAt =
         new Date(Date.parse(collect.started_at) - 1).toISOString();
       assert.throws(() => validateCollectionJobs(f.jobs, f.approval, early));
-      collect.completed_at = new Date(end + 34).toISOString();
-      for (const offset of [34, 35]) {
-        f.report.completedAt = new Date(end + offset).toISOString();
-        f.repack();
-        if (offset === 34) {
-          validateCollectionJobs(f.jobs, f.approval, f.report);
-          await f.admit();
-        } else {
-          assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
-          await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+      for (const preciseOffset of [0, 223]) {
+        collect.completed_at = new Date(end + preciseOffset).toISOString();
+        for (const offset of [preciseOffset, preciseOffset + 1]) {
+          f.report.completedAt = new Date(end + offset).toISOString();
+          f.repack();
+          if (offset === preciseOffset) {
+            validateCollectionJobs(f.jobs, f.approval, f.report);
+            await f.admit();
+          } else {
+            assert.throws(() => validateCollectionJobs(f.jobs, f.approval, f.report));
+            await assert.rejects(f.admit(), /Exact source secret admission rejected/);
+          }
         }
       }
     });
