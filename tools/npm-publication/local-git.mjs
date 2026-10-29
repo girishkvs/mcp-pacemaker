@@ -58,6 +58,8 @@ export class LocalGitConfig {
 
 // Binds a Git command to `root`. The local gate puts these first on each Local Git command it
 // records, and the offline verifier rebuilds them from here, so this part cannot drift apart.
+// The one exception is the pinned 1.3.1 peer, which predates `safe.directory`; see
+// LocalCaseReplay#gitRootPrefix.
 // Ownership is not a trust signal here: every executable configuration path this repository
 // could inherit is rejected above and re-verified after each command, so a checkout owned by
 // another account (a CI workspace, a shared agent) is read under the same guarantees.

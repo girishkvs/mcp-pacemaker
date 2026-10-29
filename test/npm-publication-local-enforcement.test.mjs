@@ -15,6 +15,7 @@ import { evidenceTar, evidenceInventory } from '../tools/npm-publication/local-e
 import { submitOnce, validateCi } from '../tools/npm-publication/policy.mjs';
 import { main as publicationMain } from '../tools/npm-publication/run.mjs';
 import { LocalCaseFixture } from './helpers/local-case-fixture.mjs';
+import { LocalCaseReplay } from '../tools/npm-publication/local-case-evidence.mjs';
 import { syntheticCleanProducerEvidence } from './helpers/local-regression-fixture.mjs';
 import { physical } from '../tools/npm-publication/local-inputs.mjs';
 import './helpers/npm-publication-local-audit.mjs';
@@ -557,20 +558,25 @@ test('verify-local accepts a resumed history and rejects malformed or inconsiste
 });
 
 test('raw timeout metadata requires the dedicated source budget without extending other commands', () => {
+  const pinned = PUBLISHED_LEGACY_STAGE_CONTRACT.head;
   const source = { label: 'Complete source suite', timeoutMs: 25 * 60_000, elapsedMs: 1000 };
   const other = { label: 'Local Git', timeoutMs: 15 * 60_000, elapsedMs: 10 };
-  verifyCommandTimeout(source);
+  verifyCommandTimeout(source, pinned);
   verifyCommandTimeout(other);
+  // A later 1.x source such as 1.3.2 runs the current tools, so its suite records the current budget.
+  verifyCommandTimeout({ ...source, timeoutMs: SOURCE_SUITE_TIMEOUT_MS }, 'a'.repeat(40));
+  assert.throws(() => verifyCommandTimeout(source, 'a'.repeat(40)), /timeoutMs/);
+  assert.throws(() => verifyCommandTimeout({ ...source, timeoutMs: SOURCE_SUITE_TIMEOUT_MS }, pinned), /timeoutMs/);
   verifyCommandTimeout({ label: 'Contained source suite', timeoutMs: SOURCE_SUITE_TIMEOUT_MS, elapsedMs: 1000 });
   assert.throws(() => verifyCommandTimeout({ label: 'Contained source suite',
     timeoutMs: 25 * 60_000, elapsedMs: 1000 }), /timeoutMs/);
   verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: AUDIT_COMMAND_TIMEOUT_MS, elapsedMs: 1000 });
   assert.throws(() => verifyCommandTimeout({ label: 'Required privileged audit', timeoutMs: 15 * 60_000, elapsedMs: 1000 }));
   for (const timeoutMs of [undefined, null, '1500000', NaN, Infinity, -1, 0, 15 * 60_000, 26 * 60_000]) {
-    assert.throws(() => verifyCommandTimeout({ ...source, timeoutMs }), /timeoutMs/);
+    assert.throws(() => verifyCommandTimeout({ ...source, timeoutMs }, pinned), /timeoutMs/);
   }
   assert.throws(() => verifyCommandTimeout({ ...other, timeoutMs: 25 * 60_000 }), /timeoutMs/);
-  assert.throws(() => verifyCommandTimeout({ ...source, elapsedMs: -1 }), /duration/);
+  assert.throws(() => verifyCommandTimeout({ ...source, elapsedMs: -1 }, pinned), /duration/);
 });
 
 test('audit companion replay rejects altered selection, runtime, source, skipped evidence and raw failures', async t => {
@@ -691,14 +697,18 @@ test('missing root and failed/changed raw command receipts reject without execut
   const directory = fixture.directory(t);
   await assert.rejects(() => verifyLocalEvidence({ directory, sourceRoots: {}, toolRoots: {} }));
   const record = { label: 'Complete source suite', exitCode: 1, signal: null, error: null,
-    timeoutMs: 25 * 60_000, elapsedMs: 1000,
+    timeoutMs: SOURCE_SUITE_TIMEOUT_MS, elapsedMs: 1000,
     executable: 'C:\\node.exe', args: [], stdout: '# fail 1', stderr: '', encoding: 'utf8' };
   const bytes = Buffer.from(JSON.stringify(record));
   writeFileSync(join(directory, 'command-1.json'), bytes);
   const gate = { kind: 'local-publication-regression', schemaVersion: 4, status: 'passed',
-    releaseReady: false, publicationCandidate: false, originalPreserved: true,
+    releaseReady: false, publicationCandidate: false, originalPreserved: true, source: { head: 'a'.repeat(40) },
     steps: [{ file: 'command-1.json', sha256: localHash(bytes), label: record.label, exitCode: 0, signal: null, error: null }] };
   await assert.rejects(() => verifyRawSteps(directory, gate, directory, '2.0.1'), /command failed/);
+  // readCommands must pass the source head through: under the pinned 1.3.1 head the current budget is refused.
+  gate.source.head = PUBLISHED_LEGACY_STAGE_CONTRACT.head;
+  await assert.rejects(() => verifyRawSteps(directory, gate, directory, '2.0.1'), /timeoutMs/);
+  gate.source.head = 'a'.repeat(40);
   const old = { ...record, exitCode: 0 };
   delete old.timeoutMs;
   const oldBytes = Buffer.from(JSON.stringify(old));
@@ -715,6 +725,23 @@ for (const version of ['1.3.2', '2.0.2', '2.7.13']) {
     await verifyRawSteps(f.directory, f.gate, f.root, version, { checkout: f.checkoutBinding });
   });
 }
+
+test('SYNTHETIC immutable 1.3.1 peer replays its original Git prefix and only that prefix', async t => {
+  const f = await new LocalCaseFixture(t, '1.3.1').create();
+  const original = f.commands.map(command => command.label === 'Local Git'
+    ? { ...command, args: command.args.slice(2) }
+    : command);
+  const replay = (head, commands) => {
+    const gate = { ...f.gate, source: { ...f.gate.source, head } };
+    const value = new LocalCaseReplay(commands, gate, f.root, '1.3.1');
+    value.take('Pinned publisher runtime', 'C:\\publisher-node.exe', ['-p', 'process.version'], 'C:\\source');
+    value.snapshot('C:\\source');
+  };
+  const pinned = PUBLISHED_LEGACY_STAGE_CONTRACT.head;
+  assert.doesNotThrow(() => replay(pinned, original));
+  assert.throws(() => replay(pinned, f.commands), /Supporting command vector changed/);
+  assert.throws(() => replay(f.gate.source.head, original), /Supporting command vector changed/);
+});
 
 for (const version of ['1.3.1', '2.0.1']) {
   test(`SYNTHETIC producer-complete case and independent record corruptions: ${version}`, async t => {

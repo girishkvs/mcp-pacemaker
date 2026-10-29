@@ -13,8 +13,8 @@ import {
 } from './local-regression.mjs';
 import { readLocalBytes, readLocalJson, controllerBinding, evidenceInventory, evidenceTar } from './local-evidence.mjs';
 import { validateContainer } from './local-windows.mjs';
-import { LOCAL_FROZEN_CONTROLLER, LOCAL_GIT_SELECTION, LocalRunState } from './local-run-state.mjs';
-import { bindStageProofCheckout, requireStageProofCheckout } from './stage-proof-contract.mjs';
+import { LOCAL_FROZEN_CONTROLLER, LocalRunState } from './local-run-state.mjs';
+import { bindStageProofCheckout, PUBLISHED_LEGACY_STAGE_CONTRACT, requireStageProofCheckout } from './stage-proof-contract.mjs';
 import { AUDIT_COMMAND_TIMEOUT_MS, validateOrdinarySourceContext } from './local-audit-report.mjs';
 import { SOURCE_SUITE_TIMEOUT_MS } from './local-gate.mjs';
 import { SESSION_REQUIRED_TESTS } from '../ci/test-contracts.mjs';
@@ -64,17 +64,20 @@ export function verifyLocalHeader(report) {
   return report;
 }
 
-// A legacy case records the 25-minute budget its own line shipped with; the current line raised it.
+// Every current gate records SOURCE_SUITE_TIMEOUT_MS for its suite, on either release line. Only the published
+// 1.3.1 peer still runs its original code, which recorded its original 25-minute budget.
 const COMMAND_BUDGETS_MS = Object.freeze({
   'Contained source suite': SOURCE_SUITE_TIMEOUT_MS,
-  'Complete source suite': 25 * 60_000,
+  'Complete source suite': SOURCE_SUITE_TIMEOUT_MS,
   'Required privileged audit': AUDIT_COMMAND_TIMEOUT_MS,
 });
 
-export function verifyCommandTimeout(command) {
+export function verifyCommandTimeout(command, sourceHead) {
   assert.equal(typeof command.label, 'string');
   assert.ok(Number.isSafeInteger(command.timeoutMs), 'Missing or invalid recorded local command timeoutMs');
-  const expected = COMMAND_BUDGETS_MS[command.label] ?? 15 * 60_000;
+  const pinnedLegacySuite = command.label === 'Complete source suite' &&
+    sourceHead === PUBLISHED_LEGACY_STAGE_CONTRACT.head;
+  const expected = pinnedLegacySuite ? 25 * 60_000 : COMMAND_BUDGETS_MS[command.label] ?? 15 * 60_000;
   assert.equal(command.timeoutMs, expected, 'Recorded local command timeoutMs differs from the reviewed harness budget');
   assert.ok(Number.isSafeInteger(command.elapsedMs) &&
     command.elapsedMs >= 0, 'Missing or invalid original command duration');
@@ -95,7 +98,7 @@ function readCommands(directory, gate) {
     const bytes = readLocalBytes(join(directory, step.file));
     assert.equal(localHash(bytes), step.sha256);
     const command = JSON.parse(bytes.toString('utf8'));
-    verifyCommandTimeout(command);
+    verifyCommandTimeout(command, gate.source.head);
     for (const value of [command, step]) {
       assert.equal(value.exitCode, 0, 'Original local command failed');
       assert.equal(value.signal, null);
@@ -294,6 +297,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
   assert.equal(process.versions.node, '24.21.0', 'Use the retained publisher Node for final verification');
   assert.equal(localHash(readLocalBytes(process.execPath, 128 * 1024 ** 2)), report.nodes[2].sha256);
   const gitExecutable = join(toolRoots.git, 'cmd/git.exe');
+  const gitSelection = new LocalRunState(directory).gitSelection(toolRoots.git);
   for (const node of report.nodes) {
     const name = `node-v${node.version}-win-x64/node.exe`;
     assert.equal(localHash(readLocalBytes(join(directory, 'runtime', name), 128 * 1024 ** 2)), node.sha256);
@@ -317,7 +321,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
     compareInputSelection(toolRoots.npm, 'npm', manifest);
     compareInputSelection(toolRoots.pwsh, 'pwsh', manifest);
     compareInputSelection(toolRoots.native, 'native', manifest);
-    compareInputSelection(toolRoots.git, 'git', manifest, LOCAL_GIT_SELECTION);
+    compareInputSelection(toolRoots.git, 'git', manifest, gitSelection);
     const checkout = bindStageProofCheckout({ root: join(input, 'source'), identity,
       readGit: args => reader.git(args, true) });
     const value = { directory: input, manifest, sha256: localHash(bytes), checkout };
@@ -344,7 +348,7 @@ export async function verifyLocalEvidence({ directory, sourceRoots, toolRoots, c
     compareInputSelection(toolRoots.npm, 'npm', input.manifest);
     compareInputSelection(toolRoots.pwsh, 'pwsh', input.manifest);
     compareInputSelection(toolRoots.native, 'native', input.manifest);
-    compareInputSelection(toolRoots.git, 'git', input.manifest, LOCAL_GIT_SELECTION);
+    compareInputSelection(toolRoots.git, 'git', input.manifest, gitSelection);
   }
   assert.deepEqual(report.controller, controllerBinding(controllerRoot));
   for (const node of report.nodes) {

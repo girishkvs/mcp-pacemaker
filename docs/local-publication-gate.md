@@ -33,6 +33,9 @@ cases against the original source's exact file contract without upgrading or
 relabelling the receipt. Current-source proofs cannot substitute the smaller
 historical inventory. Read-only compatibility replay of an old receipt is a
 component preflight, never a new completed paired qualification.
+The immutable producer's Local Git commands keep their original prefix without
+`safe.directory`, and its suite records its original 25-minute budget;
+the verifier expects both for this source only.
 
 ## Required private verification and owner acceptance
 
@@ -170,7 +173,8 @@ integrated and committed; a later source change requires new inputs and evidence
 
 Use Windows with Hyper-V containers enabled, the already cached image required
 by `local-windows.mjs`, physical retained dependencies in each checkout, Git for
-Windows, PowerShell 7, and the retained publisher npm 12.0.2 distribution.
+Windows with its MINGW64 or UCRT64 layout (2.56 and later ship UCRT64), PowerShell 7,
+and the retained publisher npm 12.0.2 distribution.
 The Node directory must contain `node-v20.20.2-win-x64`,
 `node-v22.23.2-win-x64`, and `node-v24.21.0-win-x64`.
 Missing inputs fail; the launcher does not install or fetch replacements.

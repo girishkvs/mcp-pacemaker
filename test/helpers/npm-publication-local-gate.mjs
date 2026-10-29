@@ -22,7 +22,7 @@ import { bindGuestIdentity, windowsSystemEnvironment } from '../../tools/npm-pub
 import { localCaseUser, localCases, localCommitment, LOCAL_NATIVE_PACKAGES } from '../../tools/npm-publication/local-regression.mjs';
 import { LocalRunLock, LocalRunState, localRunPlan } from '../../tools/npm-publication/local-run-state.mjs';
 import { evidenceInventory } from '../../tools/npm-publication/local-evidence.mjs';
-import { verifyLocalHeader } from '../../tools/npm-publication/verify-local.mjs';
+import { compareInputSelection, verifyLocalHeader } from '../../tools/npm-publication/verify-local.mjs';
 import { LEFTOVER_CONTAINER, ResumeFixture } from './local-resume-fixture.mjs';
 import { CONTROLLER_SKIP } from './legacy-checkout.mjs';
 
@@ -276,6 +276,7 @@ test('actual tool input wiring rejects top-level npm, pwsh and native additions,
       const gate = Object.create(WindowsLocalGate.prototype);
       gate.output = join(home, 'output');
       mkdirSync(gate.output);
+      gate.state = new LocalRunState(gate.output);
       gate.snapshots = [];
       gate.sourceBindings = [];
       for (const name of ['npm', 'pwsh', 'git', 'native']) {
@@ -684,6 +685,15 @@ test('resume refuses a changed controller, platform, source, tool, runtime or im
     [/the tools binding differs/, () => f.replace(join(f.tools.npm, 'tool.bin'), 'changed npm')],
     [/the tools binding differs/, () => f.replace(join(f.tools.native, 'tool.bin'), 'changed native archive')],
     [/the tools binding differs/, () => f.replace(join(f.tools.git, 'cmd', 'git.exe'), 'changed git')],
+    [/the tools binding differs/, () => {
+      // Git for Windows 2.56 replaced MINGW64 with UCRT64 in place, under the same root.
+      renameSync(join(f.tools.git, 'mingw64'), join(f.tools.git, 'ucrt64'));
+      f.execPath = join(f.tools.git, 'ucrt64', 'libexec', 'git-core');
+      return () => {
+        renameSync(join(f.tools.git, 'ucrt64'), join(f.tools.git, 'mingw64'));
+        f.execPath = join(f.tools.git, 'mingw64', 'libexec', 'git-core');
+      };
+    }],
     [/the nodes binding differs/, () => f.replace(join(f.tools.node, 'node-v22.23.2-win-x64', 'node.exe'), 'changed runtime')],
   ];
   for (const [pattern, change] of changes) {
@@ -695,6 +705,28 @@ test('resume refuses a changed controller, platform, source, tool, runtime or im
   assert.throws(() => f.gate(true, { image: `sha256:${'0'.repeat(64)}` }), /the image binding differs/);
   assert.deepEqual(f.tree(), before);
   assert.equal(f.gate(true).run().status, 'passed', 'The unchanged run still resumes');
+});
+
+test('a UCRT64 Git for Windows run freezes that layout and verify-local compares the same entries', { skip: CONTROLLER_SKIP }, t => {
+  const f = new ResumeFixture(t, { gitLayout: 'ucrt64' });
+  writeFileSync(join(f.execPath, 'git.exe'), 'SYNTHETIC ucrt64 git');
+  assert.equal(f.gate().run().status, 'passed');
+  const state = new LocalRunState(f.output);
+  for (const [version, { manifest }] of f.inputs()) {
+    assert.ok(manifest.files.some(file => file.path === 'git/ucrt64/libexec/git-core/git.exe'), version);
+    compareInputSelection(f.tools.git, 'git', manifest, state.gitSelection(f.tools.git));
+  }
+  renameSync(join(f.tools.git, 'ucrt64'), join(f.tools.git, 'mingw64'));
+  for (const [version, { manifest }] of f.inputs()) {
+    assert.throws(() => compareInputSelection(f.tools.git, 'git', manifest, state.gitSelection(f.tools.git)),
+      { code: 'ERR_ASSERTION' }, `A UCRT64 run must not verify against a MINGW64 Git: ${version}`);
+  }
+  renameSync(join(f.tools.git, 'mingw64'), join(f.tools.git, 'ucrt64'));
+  mkdirSync(join(f.tools.git, 'mingw64', 'libexec', 'git-core'), { recursive: true });
+  assert.throws(() => state.gitSelection(f.tools.git), /exactly one MINGW64 or UCRT64 layout/);
+  rmSync(join(f.tools.git, 'mingw64'), { recursive: true });
+  rmSync(join(f.tools.git, 'ucrt64'), { recursive: true });
+  assert.throws(() => state.gitSelection(f.tools.git), /exactly one MINGW64 or UCRT64 layout/);
 });
 
 test('resume refuses tampered reused evidence or an unexplained run member and leaves the run untouched', { skip: CONTROLLER_SKIP }, t => {
