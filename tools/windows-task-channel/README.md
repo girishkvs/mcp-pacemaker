@@ -296,6 +296,16 @@ complete observation**, not immunity to future thread creation/impersonation.
 Consume it before importing target code; do not cache it as lasting authority.
 Native-probe and role-roundtrip timings are not end-to-end CLI measurements.
 
+Node and Windows start and end worker threads in the calling process at any
+time. So when the refusal reason is one that a thread starting or ending
+mid-observation produces (`THREAD_SET_CHANGED`, `HELD_THREAD_CHANGED_OR_EXITED`,
+`THREAD_LIVENESS_CHANGED`, `THREAD_SNAPSHOT_METADATA_INVALID`,
+`THREAD_IDENTITY_CHANGED` when an exited thread's ID is reused, or
+`CONTEXT_QUERY_FAILED_87`), `requireOrdinaryUpgradeCaller` asks for a new
+observation, up to five in all. Each one is complete and independent, and any
+other result, including `THREAD_TOKEN_OBSERVED`, is final.
+`queryCliCallerContext()` itself stays a single observation.
+
 ## Bounds and qualification
 
 - Peer frames: 16 KiB UTF-8 including newline, JSON objects only; strict UTF-8,

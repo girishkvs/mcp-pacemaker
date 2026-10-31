@@ -321,8 +321,9 @@ test('legacy stop sweep stops descendants of held parents and skips reused-PID e
   assert.equal(cases.length, 4);
   const scenario = name => cases.find(item => item.scenario === name);
   for (const item of cases) {
-    assert.equal(item.stopped.legacyRootStopVerified, true, item.scenario);
-    assert.equal(item.stopped.observedDescendantsStopped, true, item.scenario);
+    const detail = `${item.scenario}: ${JSON.stringify(item.stopped)}`;
+    assert.equal(item.stopped.legacyRootStopVerified, true, detail);
+    assert.equal(item.stopped.observedDescendantsStopped, true, detail);
     assert.deepEqual(item.stopped.errors, [], item.scenario);
   }
   const reusedRoot = scenario('older-root');
@@ -528,8 +529,9 @@ test('legacy broker plans only its roots and stops the processes they started', 
   assert.equal((await verifyLegacyProcessesGone(plan)).legacyRootStopVerified, false);
   const result = await session.stop();
   fixture.results.push(result);
-  assert.equal(result.legacyRootStopVerified, true);
-  assert.equal(result.observedDescendantsStopped, true);
+  const detail = JSON.stringify(result);
+  assert.equal(result.legacyRootStopVerified, true, detail);
+  assert.equal(result.observedDescendantsStopped, true, detail);
   assert.ok(result.descendantsFound >= 1);
   assert.equal(result.descendantsStopped, result.descendantsFound);
   assert.equal(result.treeCompleteness, 'unproven');
@@ -551,8 +553,9 @@ test('legacy broker stops a server the bridge ran through cmd.exe, which Node en
   const session = await fixture.prepare();
   const result = await session.stop();
   fixture.results.push(result);
-  assert.equal(result.legacyRootStopVerified, true);
-  assert.equal(result.observedDescendantsStopped, true);
+  const detail = JSON.stringify(result);
+  assert.equal(result.legacyRootStopVerified, true, detail);
+  assert.equal(result.observedDescendantsStopped, true, detail);
   assert.deepEqual(result.errors, []);
   assert.equal(fixture.identity(wrapper, fixture.generation(wrapper)).gone, true);
   assert.equal(fixture.identity(worker, fixture.generation(worker)).gone, true, 'The server under the wrapper is stopped, not orphaned.');
@@ -596,8 +599,9 @@ test('legacy broker reopens its plan while sessions start and end, and stops the
   const later = await fixture.child();
   const result = await second.stop();
   fixture.results.push(result);
-  assert.equal(result.legacyRootStopVerified, true);
-  assert.equal(result.observedDescendantsStopped, true);
+  const detail = JSON.stringify(result);
+  assert.equal(result.legacyRootStopVerified, true, detail);
+  assert.equal(result.observedDescendantsStopped, true, detail);
   assert.deepEqual(result.errors, []);
   for (const child of [late, later]) {
     assert.equal(fixture.identity(child.pid, fixture.generation(child.pid)).gone, true, `Session process ${child.pid} is stopped`);
@@ -792,8 +796,9 @@ test('legacy broker sweep leaves an older process alive when it names a stopped 
     assert.deepEqual(session.plan.excluded, []);
     const result = await session.stop();
     fixture.results.push(result);
-    assert.equal(result.legacyRootStopVerified, true);
-    assert.equal(result.observedDescendantsStopped, true);
+    const detail = JSON.stringify(result);
+    assert.equal(result.legacyRootStopVerified, true, detail);
+    assert.equal(result.observedDescendantsStopped, true, detail);
     assert.deepEqual(result.errors, []);
     assert.equal(fixture.identity(control.pid, identity.creationTicks).gone, false);
     const recovered = await verifyLegacyProcessesGone(session.plan);
