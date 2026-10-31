@@ -130,7 +130,12 @@ older than that parent got the PID from an earlier owner and is left alone; a
 held root that appears under a pinned process (its creator's PID was reused) is
 already held and is skipped. The broker and its own parent chain, matched by PID
 and creation time, are never adopted. A live process owned by another user is
-reported, not stopped.
+reported, not stopped. A process the broker cannot open at all is left alone when
+the system process list shows it is older than the parent it names: the Windows
+session processes (csrss, wininit, winlogon) name the PID of an smss.exe that
+exited at startup, and refuse this user query and terminate access. Any other
+process it cannot open is reported. "Older" compares wall-clock creation times,
+as the rule for children above does.
 Processes whose parent had already exited before the stop cannot be traced and
 stay untouched.
 

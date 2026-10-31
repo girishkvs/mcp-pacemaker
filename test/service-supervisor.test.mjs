@@ -61,7 +61,15 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.url === '/crash') {
-    res.end('crashing', () => { appendFileSync(log, 'crashed\\n'); process.exit(1); });
+    // Close the connection before exiting: Windows resets a connection its process leaves open,
+    // which drops a reply the test has not read yet. The server's side closes right after the
+    // reply, without waiting for the test.
+    res.setHeader('connection', 'close');
+    res.end('crashing', () => {
+      const crash = () => { appendFileSync(log, 'crashed\\n'); process.exit(1); };
+      if (req.socket.closed) crash();
+      else req.socket.once('close', crash);
+    });
     return;
   }
   res.setHeader('content-type', 'application/json');

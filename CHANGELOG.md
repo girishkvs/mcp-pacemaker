@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start and end their own worker threads at any time. When the refusal is for a thread change,
   the check now runs again, up to five times in all. Each run is as strict as before, and every
   other refusal is still final.
+- Upgrading a 1.3 install on Windows could warn "Not every process the 1.3 bridge started could
+  be confirmed stopped" when every one had stopped. The Windows session processes (csrss.exe,
+  wininit.exe, winlogon.exe) name the PID of an smss.exe that exited at startup, and refuse query
+  and terminate access to a normal user. When a 1.3 process later got that PID, the upgrade took
+  the session process for one of its children, could not open it, and reported it. A process the
+  upgrade cannot open is now skipped when the system lists it as older than the 1.3 process whose
+  PID it names, since that process cannot have started it.
 - The 2.1.2 `npm run publication:verify-local` rejected every run paired with the published
   1.3.1 peer with "Supporting command vector changed". The 1.3.1 peer runs its original gate
   code, which does not add `safe.directory` to its Git commands, and the 2.1.2 verifier

@@ -318,11 +318,12 @@ test('legacy failure metadata cannot mask errors or cross concurrent operation i
 test('legacy stop sweep stops descendants of held parents and skips reused-PID edges', WINDOWS, async () => {
   const evidence = await new CachedEdgeFixture().run();
   const cases = evidence.result.results;
-  assert.equal(cases.length, 4);
+  assert.equal(cases.length, 6);
   const scenario = name => cases.find(item => item.scenario === name);
   for (const item of cases) {
     const detail = `${item.scenario}: ${JSON.stringify(item.stopped)}`;
     assert.equal(item.stopped.legacyRootStopVerified, true, detail);
+    if (item.scenario === 'younger-unopenable') continue;
     assert.equal(item.stopped.observedDescendantsStopped, true, detail);
     assert.deepEqual(item.stopped.errors, [], item.scenario);
   }
@@ -330,10 +331,15 @@ test('legacy stop sweep stops descendants of held parents and skips reused-PID e
   assert.equal(reusedRoot.rootsStopped, true);
   assert.equal(reusedRoot.stopped.descendantsFound, 1, 'A descendant naming the supervisor as its child is stopped once.');
   assert.equal(reusedRoot.stopped.descendantsStopped, 1);
-  for (const name of ['older-nonmember', 'changed-parent']) {
+  for (const name of ['older-nonmember', 'changed-parent', 'older-unopenable', 'younger-unopenable']) {
     assert.equal(scenario(name).stopped.descendantsFound, 0, name);
     assert.equal(scenario(name).untouchedAlive, true, `${name} is not adopted or stopped`);
   }
+  // A process this user cannot open, like csrss or winlogon, is left out when it is older than the
+  // held parent. A younger one could be a real child, so the stop still says it could not verify it.
+  const younger = scenario('younger-unopenable');
+  assert.equal(younger.stopped.observedDescendantsStopped, false, JSON.stringify(younger.stopped));
+  assert.deepEqual(younger.stopped.errors, [`${younger.deniedPid}:OpenProcess:5`]);
   const chain = scenario('actual-nine-generation-chain');
   assert.equal(chain.modeledParentMetadata, false);
   assert.equal(chain.generations, 9);
