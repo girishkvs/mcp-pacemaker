@@ -5,6 +5,7 @@ import { syncBuiltinESMExports, register } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { THREAD_CHURN } from './thread-churn-reasons.mjs';
 
 const mode = process.argv[2];
 assert.ok(['ordinary', 'actual-elevated', 'model-elevated', 'model-unknown'].includes(mode));
@@ -13,7 +14,13 @@ if (mode.startsWith('model-')) {
   register(new URL('./upgrade-caller-context-loader.mjs', import.meta.url));
 }
 const api = await import('../../bin/windows-task-channel.mjs');
-const actualContext = await api.queryCliCallerContext();
+// The entry guard observes again when a caller thread starts or ends mid-observation; this direct
+// read of the real context does the same.
+let actualContext;
+for (let attempt = 1; attempt <= 5; attempt++) {
+  actualContext = await api.queryCliCallerContext();
+  if (!THREAD_CHURN.includes(actualContext.reason)) break;
+}
 assert.equal(actualContext.identity.pid, process.pid);
 assert.equal(actualContext.helperExit.code, 0);
 if (mode === 'actual-elevated') assert.equal(actualContext.actorFacts.elevated, true);

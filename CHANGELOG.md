@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Windows, the bridge, CLI commands and upgrades could fail at random with "requires a
+  verified ordinary caller ... Observed: HELD_THREAD_CHANGED_OR_EXITED" (or
+  `THREAD_SET_CHANGED`, `CONTEXT_QUERY_FAILED_87`). The check takes two snapshots of the calling
+  process's threads and refuses if any thread started or ended in between, but Node and Windows
+  start and end their own worker threads at any time. When the refusal is for a thread change,
+  the check now runs again, up to five times in all. Each run is as strict as before, and every
+  other refusal is still final.
 - The 2.1.2 `npm run publication:verify-local` rejected every run paired with the published
   1.3.1 peer with "Supporting command vector changed". The 1.3.1 peer runs its original gate
   code, which does not add `safe.directory` to its Git commands, and the 2.1.2 verifier
