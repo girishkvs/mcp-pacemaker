@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the session process for one of its children, could not open it, and reported it. A process the
   upgrade cannot open is now skipped when the system lists it as older than the 1.3 process whose
   PID it names, since that process cannot have started it.
+- On Windows, the Cancel/Undo command that `prewarm` prints for a selected instance, or for paths
+  and names with special characters, first made Windows PowerShell scan its installed modules
+  ("Preparing modules for first use"), which on a new profile can take longer than the command
+  itself. It now starts the CLI without that scan.
 - The 2.1.2 `npm run publication:verify-local` rejected every run paired with the published
   1.3.1 peer with "Supporting command vector changed". The 1.3.1 peer runs its original gate
   code, which does not add `safe.directory` to its Git commands, and the 2.1.2 verifier

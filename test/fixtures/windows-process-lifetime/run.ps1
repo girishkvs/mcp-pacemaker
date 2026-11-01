@@ -167,6 +167,15 @@ function Wait-ReadyFile($Case, $Role, $Directory = $Case.Directory) {
     throw "Owned $Role readiness timed out"
 }
 
+function Test-ConnectionReset($Exception) {
+    for ($inner = $Exception; $null -ne $inner; $inner = $inner.InnerException) {
+        if ($inner -is [Net.Sockets.SocketException]) {
+            return $inner.SocketErrorCode -eq [Net.Sockets.SocketError]::ConnectionReset
+        }
+    }
+    return $false
+}
+
 function Get-Heartbeats($Case) {
     while ($Case.HeartbeatListener.Pending()) {
         $client = $Case.HeartbeatListener.AcceptTcpClient()
@@ -179,17 +188,34 @@ function Get-Heartbeats($Case) {
             Client = $client
             Stream = $client.GetStream()
             Buffer = ''
+            Reset = $false
+            Record = $null
         })
         if ($Case.HeartbeatConnections.Count -gt $Case.MaximumHeartbeatConnections) {
             throw 'Unexpected heartbeat connection count'
         }
     }
     foreach ($connection in $Case.HeartbeatConnections) {
-        while ($connection.Stream.DataAvailable) {
-            $bytes = [byte[]]::new(4096)
-            $count = $connection.Stream.Read($bytes, 0, $bytes.Length)
-            if ($count -eq 0) { break }
-            $connection.Buffer += [Text.Encoding]::UTF8.GetString($bytes, 0, $count)
+        try {
+            while (-not $connection.Reset -and
+                $connection.Stream.DataAvailable) {
+                $bytes = [byte[]]::new(4096)
+                $count = $connection.Stream.Read($bytes, 0, $bytes.Length)
+                if ($count -eq 0) { break }
+                $connection.Buffer += [Text.Encoding]::UTF8.GetString($bytes, 0, $count)
+            }
+        } catch {
+            # A process ended by TerminateProcess, as taskkill /F and the abrupt cases do, resets its
+            # connection, and Windows then drops the bytes this side has not read. The reset can land
+            # between DataAvailable and Read, because HasExited is true before the socket is closed.
+            # A reset from a process that is still alive is a real failure.
+            if (-not (Test-ConnectionReset $_.Exception)) { throw }
+            if ($null -ne $connection.Record -and
+                (Get-Liveness $connection.Record).alive) {
+                throw "Heartbeat connection of live PID $($connection.Record.Id) was reset"
+            }
+            $connection.Reset = $true
+            Add-Event $Case 'socket-heartbeat-reset' @{ bufferedCharacters = $connection.Buffer.Length }
         }
         $newline = $connection.Buffer.IndexOf("`n")
         while ($newline -ge 0) {
@@ -208,6 +234,7 @@ function Get-Heartbeats($Case) {
                 $owner[0].Id -ne $message.pid) {
                 throw 'Heartbeat PID does not match its captured owned identity'
             }
+            $connection.Record = $owner[0]
             $key = if ($owner[0].Role.EndsWith('-2')) { "$($message.role)-2" } else { $message.role }
             $previous = $Case.Heartbeats[$key]
             if ($null -ne $previous -and

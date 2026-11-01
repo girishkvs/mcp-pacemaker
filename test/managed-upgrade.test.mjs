@@ -172,6 +172,7 @@ class UpgradeFixture {
     const command = line.slice(line.indexOf('): ') + 3).trim();
     if (process.platform === 'win32') assert.match(command, /^powershell\.exe -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/);
     const words = process.platform === 'win32' ? command.split(' ') : ['/bin/sh', '-c', command];
+    const started = Date.now();
     try {
       const result = await promisify(execFile)(words[0], words.slice(1), {
         encoding: 'utf8', timeout: 30000, windowsHide: true,
@@ -179,7 +180,11 @@ class UpgradeFixture {
       });
       return result.stdout;
     } catch (error) {
-      error.message += `\nGenerated command stdout:\n${error.stdout}`;
+      // The TAP report keeps only the message, so it has to say how the command ended: a kill at
+      // the timeout looks the same as a failure otherwise.
+      error.message += `\nGenerated command ended after ${Date.now() - started} ms: ` +
+        `code ${error.code}, signal ${error.signal}, killed ${error.killed}` +
+        `\nGenerated command stdout:\n${error.stdout}`;
       throw error;
     }
   }

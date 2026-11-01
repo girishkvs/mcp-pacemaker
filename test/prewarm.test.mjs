@@ -179,11 +179,14 @@ test('Windows Undo commands preserve arguments in Command Prompt', { skip: proce
       ...(instance ? ['--instance', instance] : []),
       'prewarm', '--port', '12345', '--config', config, '--server', name, '--undo', 'undo-one',
     ]);
+    // A new profile has no module analysis cache, so a cmdlet in the command would make Windows
+    // PowerShell scan its modules first and report that on stderr.
     const powershell = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
       encoding: 'utf8',
-      env: { ...process.env, CAPTURE_ARGS: capture, Dir: 'must-not-expand' },
+      env: { ...process.env, CAPTURE_ARGS: capture, Dir: 'must-not-expand', USERPROFILE: dir },
     });
     assert.equal(powershell.status, 0, powershell.stderr);
+    assert.equal(powershell.stderr, '');
     assert.deepEqual(JSON.parse(readFileSync(capture, 'utf8')), [
       ...(instance ? ['--instance', instance] : []),
       'prewarm', '--port', '12345', '--config', config, '--server', name, '--undo', 'undo-one',

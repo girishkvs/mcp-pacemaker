@@ -157,7 +157,9 @@ export function formatUndoCommand(port, name, undoId, config, instance) {
     const argumentsList = [entry, ...(instance ? ['--instance', instance] : []),
       'prewarm', '--port', String(port), ...(config ? ['--config', config] : []), '--server', name, '--undo', undoId];
     const commandLine = argumentsList.map(windowsArgument).join(' ');
-    const command = `$info = New-Object System.Diagnostics.ProcessStartInfo; $info.FileName = ${quote(executable)}; ` +
+    // No cmdlets: the first one makes Windows PowerShell scan its modules ("Preparing modules for
+    // first use"), which on a new profile can take longer than the command itself.
+    const command = `$info = [System.Diagnostics.ProcessStartInfo]::new(); $info.FileName = ${quote(executable)}; ` +
       `$info.UseShellExecute = $false; $info.Arguments = ${quote(commandLine)}; ` +
       '$child = [System.Diagnostics.Process]::Start($info); $child.WaitForExit(); exit $child.ExitCode';
     return `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(command, 'utf16le').toString('base64')}`;
