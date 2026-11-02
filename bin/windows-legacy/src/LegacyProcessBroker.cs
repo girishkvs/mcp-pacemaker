@@ -630,7 +630,8 @@ internal sealed class LegacyProcessBroker
             int code = Marshal.GetLastWin32Error();
             opened.Dispose();
             // 87: the process exited after the snapshot and nothing holds it any more.
-            if (code != 87) Reject(id + ":OpenProcess:" + code, errors);
+            if (code != 87 &&
+                !ListedOlder(id, parent)) Reject(id + ":OpenProcess:" + code, errors);
             return null;
         }
         try
@@ -676,6 +677,18 @@ internal sealed class LegacyProcessBroker
     private void Reject(string reason, List<string> errors)
     {
         if (rejected.Add(reason)) errors.Add(reason);
+    }
+
+    // A process this user cannot open that the system lists as older than the held parent only
+    // names a PID that parent reused. Windows session processes such as csrss and winlogon outlive
+    // the smss.exe instance that started them and refuse this user query and terminate access. The
+    // list is read after the snapshot, and a PID never passes from a younger process to an older
+    // one, so it is the same process the snapshot showed, and it cannot be a descendant.
+    private bool ListedOlder(int id, Held parent)
+    {
+        long? listed = native.ListedCreation(id);
+        return listed.HasValue &&
+            listed.GetValueOrDefault() < parent.Created;
     }
 
     private void CheckStop(Stopwatch stopClock)

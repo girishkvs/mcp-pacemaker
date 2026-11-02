@@ -93,6 +93,65 @@ internal sealed class LegacyNative
         return checked((int)information.ParentId.ToInt64());
     }
 
+    // A process's creation time from the system process list, which needs no handle to that
+    // process. Null when the list cannot be read, its layout fails the check against this
+    // process's own creation time, or it does not hold the process; it throws only when out of
+    // memory.
+    internal long? ListedCreation(int processId)
+    {
+        // SYSTEM_PROCESS_INFORMATION: CreateTime at 0x20, UniqueProcessId after the image name and
+        // base priority. The check against this process's own entry below guards both offsets.
+        int idOffset = IntPtr.Size == 8 ? 0x50 : 0x44;
+        const int creationOffset = 0x20;
+        int ownId = Process.GetCurrentProcess().Id;
+        int size = 4 << 20;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                int returned;
+                int status = Api.NtQuerySystemInformation(5, buffer, size, out returned);
+                if (status == unchecked((int)0xC0000004))
+                {
+                    size = Math.Max(size * 2, returned + 65536);
+                    continue;
+                }
+                if (status != 0 ||
+                    returned > size) return null;
+                long own = 0;
+                long listed = 0;
+                int offset = 0;
+                while (offset + idOffset + IntPtr.Size <= returned)
+                {
+                    long id = Marshal.ReadIntPtr(buffer, offset + idOffset).ToInt64();
+                    if (id == ownId) own = Marshal.ReadInt64(buffer, offset + creationOffset);
+                    if (id == processId) listed = Marshal.ReadInt64(buffer, offset + creationOffset);
+                    int next = Marshal.ReadInt32(buffer, offset);
+                    if (next <= 0 ||
+                        next > returned - offset) break;
+                    offset += next;
+                }
+                long created;
+                long exit;
+                long kernel;
+                long user;
+                bool layoutVerified;
+                using (var self = Api.OpenProcess(0x1000, false, ownId))
+                {
+                    layoutVerified = !self.IsInvalid &&
+                        Api.GetProcessTimes(self, out created, out exit, out kernel, out user) &&
+                        own == created;
+                }
+                if (!layoutVerified ||
+                    listed <= 0) return null;
+                return listed;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        return null;
+    }
+
     internal string[] Arguments(int processId, SafeProcess held)
     {
         using (var search = Search("ProcessId = " + processId.ToString(CultureInfo.InvariantCulture),
@@ -820,6 +879,8 @@ internal static class Api
     internal static extern bool GetTokenInformation(SafeProcess token, int kind, IntPtr info, int size, out int returned);
     [DllImport("ntdll.dll")]
     internal static extern int NtQueryInformationProcess(SafeProcess process, int kind, out BasicInformation info, int size, out int returned);
+    [DllImport("ntdll.dll")]
+    internal static extern int NtQuerySystemInformation(int kind, IntPtr information, int size, out int returned);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr CommandLineToArgvW(string command, out int count);
     [DllImport("kernel32.dll")]

@@ -263,8 +263,9 @@ test('restart-only legacy migration selects new backend and actual old shim on t
     const result = await fixture.upgrader().execute(plan);
     assert.equal(result.status, 'upgraded');
     assert.equal(result.port, fixture.port);
-    assert.equal(result.legacyStop.legacyRootStopVerified, true);
-    assert.equal(result.legacyStop.observedDescendantsStopped, true);
+    const detail = JSON.stringify(result.legacyStop);
+    assert.equal(result.legacyStop.legacyRootStopVerified, true, detail);
+    assert.equal(result.legacyStop.observedDescendantsStopped, true, detail);
     assert.equal(result.legacyStop.descendantsStopped, result.legacyStop.descendantsFound);
     assert.equal(result.legacyStop.treeCompleteness, 'unproven');
     assert.equal('activeProcesses' in result.legacyStop, false);
@@ -403,7 +404,7 @@ test('a server 1.3 runs through cmd.exe is stopped with the bridge instead of be
     await fixture.approve(plan);
     const result = await fixture.upgrader().execute(plan);
     assert.equal(result.status, 'upgraded');
-    assert.equal(result.legacyStop.observedDescendantsStopped, true);
+    assert.equal(result.legacyStop.observedDescendantsStopped, true, JSON.stringify(result.legacyStop));
     assert.ok(result.legacyStop.descendantsFound >= 2, 'The cmd.exe wrapper and the server under it were found.');
     const beat = readFileSync(heartbeat, 'utf8');
     await new Promise(resolveWait => setTimeout(resolveWait, 1000));

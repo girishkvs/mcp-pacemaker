@@ -1,13 +1,20 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// The test waits for each of these files to exist and then parses it, so a file appears only once
+// it is complete.
+function publish(path, value) {
+  writeFileSync(`${path}.partial`, JSON.stringify(value));
+  renameSync(`${path}.partial`, path);
+}
 
 const mode = process.argv[2];
 setTimeout(() => process.exit(0), 45000);
 if (mode === '--worker') {
-  writeFileSync(process.argv[3], JSON.stringify({ pid: process.pid, parentPid: process.ppid }));
+  publish(process.argv[3], { pid: process.pid, parentPid: process.ppid });
   process.stdin.on('error', () => {});
   setInterval(() => {}, 200);
 } else if (mode === '--prepare') {
@@ -17,9 +24,9 @@ if (mode === '--worker') {
     const api = await import(pathToFileURL(modulePath).href);
     const session = await api.prepareLegacyProcesses({ port: Number(port), root });
     await session.close();
-    writeFileSync(resultPath, JSON.stringify({ ok: true }));
+    publish(resultPath, { ok: true });
   } catch (error) {
-    writeFileSync(resultPath, JSON.stringify({ ok: false, message: error.message, reason: error.detail?.reason ?? null }));
+    publish(resultPath, { ok: false, message: error.message, reason: error.detail?.reason ?? null });
   }
   process.exit(0);
 } else {
@@ -59,6 +66,6 @@ if (mode === '--worker') {
     response.end(JSON.stringify({ fixture: 'owned-legacy-broker', pid: process.pid, script: process.argv[1], children }));
   });
   server.listen(port, '127.0.0.1', () => {
-    writeFileSync(join(directory, 'ready.json'), JSON.stringify({ pid: process.pid, port: server.address().port }));
+    publish(join(directory, 'ready.json'), { pid: process.pid, port: server.address().port });
   });
 }

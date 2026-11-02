@@ -1,15 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Web.Script.Serialization;
 
-// Drives the broker's stop sweep against real owned processes. Three cases model parent
-// metadata (reused PIDs) on real handles; the nine-generation chain uses actual parentage.
+// Drives the broker's stop sweep against real owned processes. Five cases model parent
+// metadata (reused PIDs) on real processes; the nine-generation chain uses actual parentage.
 internal sealed class CachedEdgeCases
 {
     internal static CachedEdgeCases Current;
@@ -49,6 +52,14 @@ internal sealed class CachedEdgeCases
             Thread.Sleep(45000);
             return 0;
         }
+        if (args.Length == 2 &&
+            args[0] == "denied")
+        {
+            Deny();
+            File.WriteAllText(Path.Combine(args[1], "denied-" + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture)), "ready");
+            Thread.Sleep(45000);
+            return 0;
+        }
         if (args.Length != 1) throw new ArgumentException("Test lifetime helper required; the sweep model has no old-code mode");
         ArmCapsule(args[0]);
         var results = new List<object>();
@@ -57,6 +68,8 @@ internal sealed class CachedEdgeCases
             results.Add(Modeled("older-root"));
             results.Add(Modeled("older-nonmember"));
             results.Add(Modeled("changed-parent"));
+            results.Add(Unopenable(older: true));
+            results.Add(Unopenable(older: false));
             results.Add(RealChain());
             Console.WriteLine(json.Serialize(new { expectedRed = false, results, cleanup = cleanups,
                 limits = "Parent metadata is modeled on real owned handles except in the actual nine-generation chain." }));
@@ -129,7 +142,7 @@ internal sealed class CachedEdgeCases
                 bridge = second;
                 untouched = third;
                 Edge(root, bridge);
-                Child(bridge, third);
+                Child(bridge, third.Info.pid);
                 parents[third.Created] = root.Info.pid;
             }
             var receipt = StopModel(broker, root, bridge, directory);
@@ -146,6 +159,71 @@ internal sealed class CachedEdgeCases
             ReleaseBroker(broker);
             Cleanup(directory);
         }
+    }
+
+    // A process that refuses this user query and terminate access, as csrss and winlogon do, named as
+    // the root's child. An older one only names a PID the root reused and is left alone; a younger
+    // one could be a real child, so the stop still reports that it could not verify it.
+    private object Unopenable(bool older)
+    {
+        var directory = NewDirectory("legacy-sweep-unopenable-");
+        var broker = new LegacyProcessBroker();
+        try
+        {
+            var denied = older ? StartDenied(directory) : null;
+            var root = Hold(Start(directory, 0).Id);
+            var bridge = Hold(Start(directory, 0).Id);
+            if (!older) denied = StartDenied(directory);
+            Edge(root, bridge);
+            Child(root, denied.Id);
+            var receipt = StopModel(broker, root, bridge, directory);
+            return new { scenario = older ? "older-unopenable" : "younger-unopenable", modeledParentMetadata = true,
+                deniedPid = denied.Id, stopped = receipt, untouchedAlive = !denied.HasExited };
+        }
+        finally
+        {
+            modeled = false;
+            parents.Clear();
+            children.Clear();
+            ReleaseBroker(broker);
+            Cleanup(directory);
+        }
+    }
+
+    private Process StartDenied(string directory)
+    {
+        var info = new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, "denied \"" + directory + "\"");
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        var child = Process.Start(info);
+        owned.Add(child);
+        var ready = Path.Combine(directory, "denied-" + child.Id.ToString(CultureInfo.InvariantCulture));
+        var wait = Stopwatch.StartNew();
+        while (!File.Exists(ready))
+        {
+            if (wait.ElapsedMilliseconds > 10000) throw new InvalidOperationException("Owned denied worker startup bound");
+            Thread.Sleep(20);
+        }
+        // An elevated run can open it anyway, which would make the scenarios meaningless.
+        var probe = Api.OpenProcess(TerminateAndQuery, false, child.Id);
+        int code = probe.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        probe.Dispose();
+        if (code != 5) throw new InvalidOperationException(
+            "Owned denied worker did not refuse this user (" + code.ToString(CultureInfo.InvariantCulture) + "); run the model without elevation");
+        return child;
+    }
+
+    // Leaves this user only SYNCHRONIZE and READ_CONTROL on this process, so it refuses query and
+    // terminate access as csrss and winlogon do.
+    private void Deny()
+    {
+        var acl = new RawAcl(GenericAcl.AclRevision, 1);
+        acl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x00120000,
+            WindowsIdentity.GetCurrent().User, false, null));
+        var bytes = new byte[acl.BinaryLength];
+        acl.GetBinaryForm(bytes, 0);
+        uint status = CachedModelApi.SetSecurityInfo(CachedModelApi.GetCurrentProcess(), 6, 4, IntPtr.Zero, IntPtr.Zero, bytes, IntPtr.Zero);
+        if (status != 0) throw new Win32Exception((int)status);
     }
 
     private object RealChain()
@@ -201,11 +279,11 @@ internal sealed class CachedEdgeCases
 
     private void Edge(Held parent, Held child)
     {
-        Child(parent, child);
+        Child(parent, child.Info.pid);
         parents[child.Created] = parent.Info.pid;
     }
 
-    private void Child(Held parent, Held child)
+    private void Child(Held parent, int id)
     {
         List<int> group;
         if (!children.TryGetValue(parent.Info.pid, out group))
@@ -213,7 +291,7 @@ internal sealed class CachedEdgeCases
             group = new List<int>();
             children.Add(parent.Info.pid, group);
         }
-        group.Add(child.Info.pid);
+        group.Add(id);
     }
 
     internal int? Parent(SafeProcess process)
@@ -277,7 +355,14 @@ internal sealed class CachedEdgeCases
             handle.Dispose();
         }
         handles.Clear();
-        foreach (var process in owned) process.Dispose();
+        // A denied worker refuses this user a new handle, but the one Process.Start returned can end it.
+        foreach (var process in owned)
+        {
+            if (!process.HasExited) process.Kill();
+            if (!process.WaitForExit(30000)) throw new InvalidOperationException(
+                "Owned cleanup did not observe exit for pid " + process.Id.ToString(CultureInfo.InvariantCulture));
+            process.Dispose();
+        }
         owned.Clear();
         Directory.Delete(directory, true);
     }
@@ -317,4 +402,11 @@ internal static class CachedModelApi
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern uint GetProcessId(SafeProcess process);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll")]
+    internal static extern uint SetSecurityInfo(IntPtr handle, int objectType, int securityInformation,
+        IntPtr owner, IntPtr group, byte[] dacl, IntPtr sacl);
 }

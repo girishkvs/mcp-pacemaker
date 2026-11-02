@@ -292,9 +292,26 @@ export async function queryCurrentUserSession() {
   return result;
 }
 
+// A process starts and retires loader and thread-pool workers on its own, so the native observation
+// can refuse the caller when one of its threads starts or exits between the two snapshots, or when
+// an exited thread's ID is reused meanwhile. A refusal for one of these reasons gets a new, equally
+// strict observation; every other result is final.
+const THREAD_CHURN_REASONS = Object.freeze(['THREAD_SET_CHANGED', 'HELD_THREAD_CHANGED_OR_EXITED',
+  'THREAD_LIVENESS_CHANGED', 'THREAD_SNAPSHOT_METADATA_INVALID', 'THREAD_IDENTITY_CHANGED',
+  'CONTEXT_QUERY_FAILED_87']);
+const MAX_CALLER_OBSERVATIONS = 5;
+
+async function observeCallerContext() {
+  for (let attempt = 1; ; attempt++) {
+    const caller = await queryCliCallerContext();
+    if (!THREAD_CHURN_REASONS.includes(caller.reason) ||
+        attempt === MAX_CALLER_OBSERVATIONS) return caller;
+  }
+}
+
 export async function requireOrdinaryUpgradeCaller() {
   if (process.platform !== 'win32') return;
-  const caller = await queryCliCallerContext();
+  const caller = await observeCallerContext();
   const facts = caller.actorFacts;
   const observation = caller.observation;
   const ordinary = caller.ordinaryEligible === true &&
@@ -320,8 +337,9 @@ export async function requireOrdinaryUpgradeCaller() {
     // Include the native reason: an ambiguous observation and a genuinely privileged caller are
     // both refused, and without this they are indistinguishable after the fact.
     const reason = typeof caller.reason === 'string' ? caller.reason : 'UNREPORTED';
+    const repeated = THREAD_CHURN_REASONS.includes(reason) ? ` after ${MAX_CALLER_OBSERVATIONS} observations` : '';
     throw new Error('Windows upgrade execution requires a verified ordinary caller; no elevation or runtime-authority fallback was attempted. ' +
-      `Observed: ${reason}.`);
+      `Observed: ${reason}${repeated}.`);
   }
   return caller;
 }
